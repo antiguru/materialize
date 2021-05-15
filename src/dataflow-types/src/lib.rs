@@ -33,11 +33,11 @@ pub use plan::Plan;
 pub use types::*;
 
 use differential_dataflow::operators::arrange::TraceAgent;
-use differential_dataflow::trace::implementations::ord::{OrdKeySpine, OrdValSpine};
+use differential_dataflow::trace::implementations::ord::{ColValSpine, OrdKeySpine};
 
 use mz_repr::{Diff, Row, Timestamp};
 
-pub type RowSpine<K, V, T, R, O = usize> = OrdValSpine<K, V, T, R, O>;
+pub type RowSpine<K, V, T, R, O = usize> = ColValSpine<K, V, T, R, O>;
 pub type ErrSpine<K, T, R, O = usize> = OrdKeySpine<K, T, R, O>;
 
 pub type TraceRowHandle<K, V, T, R> = TraceAgent<RowSpine<K, V, T, R>>;

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use differential_dataflow::collection::AsCollection;
 use differential_dataflow::operators::arrange::arrangement::Arrange;
+use differential_dataflow::trace::implementations::ord::OrdValSpine;
 use mz_expr::{permutation_for_arrangement, MirScalarExpr};
 use timely::communication::Allocate;
 use timely::dataflow::channels::pact::Exchange;
@@ -342,7 +343,7 @@ pub fn construct<A: Allocate>(
         // Accumulate the durations of each operator.
         let elapsed = schedules_duration
             .as_collection()
-            .arrange_core::<_, RowSpine<_, _, _, _>>(
+            .arrange_core::<_, OrdValSpine<_, _, _, _>>(
                 Exchange::new(|(((_, w), ()), _, _)| *w as u64),
                 "PreArrange Timely duration",
             )
@@ -353,7 +354,7 @@ pub fn construct<A: Allocate>(
         // Accumulate histograms of execution times for each operator.
         let histogram = schedules_histogram
             .as_collection()
-            .arrange_core::<_, RowSpine<_, _, _, _>>(
+            .arrange_core::<_, OrdValSpine<_, _, _, _>>(
                 Exchange::new(|(((_, w, _), ()), _, _)| *w as u64),
                 "PreArrange Timely histogram",
             )
@@ -368,7 +369,7 @@ pub fn construct<A: Allocate>(
 
         let operates = operates
             .as_collection()
-            .arrange_core::<_, RowSpine<_, _, _, _>>(
+            .arrange_core::<_, OrdValSpine<_, _, _, _>>(
                 Exchange::new(|((((_, w), _), ()), _, _)| *w as u64),
                 "PreArrange Timely operates",
             )
@@ -382,7 +383,7 @@ pub fn construct<A: Allocate>(
 
         let addresses = addresses
             .as_collection()
-            .arrange_core::<_, RowSpine<_, _, _, _>>(
+            .arrange_core::<_, OrdValSpine<_, _, _, _>>(
                 Exchange::new(|(((_, w, _), ()), _, _)| *w as u64),
                 "PreArrange Timely addresses",
             )
@@ -392,7 +393,7 @@ pub fn construct<A: Allocate>(
 
         let parks = parks
             .as_collection()
-            .arrange_core::<_, RowSpine<_, _, _, _>>(
+            .arrange_core::<_, OrdValSpine<_, _, _, _>>(
                 Exchange::new(|(((w, _, _), ()), _, _)| *w as u64),
                 "PreArrange Timely parks",
             )
@@ -408,7 +409,7 @@ pub fn construct<A: Allocate>(
 
         let messages_received = messages_received
             .as_collection()
-            .arrange_core::<_, RowSpine<_, _, _, _>>(
+            .arrange_core::<_, OrdValSpine<_, _, _, _>>(
                 Exchange::new(|((((_, w), _), ()), _, _)| *w as u64),
                 "PreArrange Timely messages received",
             )
@@ -422,7 +423,7 @@ pub fn construct<A: Allocate>(
 
         let messages_sent = messages_sent
             .as_collection()
-            .arrange_core::<_, RowSpine<_, _, _, _>>(
+            .arrange_core::<_, OrdValSpine<_, _, _, _>>(
                 Exchange::new(|((((_, w), _), ()), _, _)| *w as u64),
                 "PreArrange Timely messages sent",
             )
@@ -436,7 +437,7 @@ pub fn construct<A: Allocate>(
 
         let channels = channels
             .as_collection()
-            .arrange_core::<_, RowSpine<_, _, _, _>>(
+            .arrange_core::<_, OrdValSpine<_, _, _, _>>(
                 Exchange::new(|((((_, w), _, _, _, _), ()), _, _)| *w as u64),
                 "PreArrange Timely operates",
             )

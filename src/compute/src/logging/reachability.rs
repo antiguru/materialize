@@ -14,6 +14,7 @@ use std::rc::Rc;
 use std::{collections::HashMap, time::Duration};
 
 use differential_dataflow::operators::arrange::arrangement::Arrange;
+use differential_dataflow::trace::implementations::ord::OrdValSpine;
 use mz_expr::{permutation_for_arrangement, MirScalarExpr};
 use timely::communication::Allocate;
 use timely::dataflow::channels::pact::Exchange;
@@ -116,7 +117,7 @@ pub fn construct<A: Allocate>(
             let mut row_buf = Row::default();
             updates
                 .as_collection()
-                .arrange_core::<_, RowSpine<_, _, _, _>>(
+                .arrange_core::<_, OrdValSpine<_, _, _, _>>(
                     Exchange::new(|(((_, _, _, _, w, _), ()), _, _)| *w as u64),
                     "PreArrange Timely reachability",
                 )

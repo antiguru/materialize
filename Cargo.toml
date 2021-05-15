@@ -91,3 +91,7 @@ debug = 1
 [patch.crates-io]
 opentelemetry = { git = "https://github.com/MaterializeInc/opentelemetry-rust.git" }
 opentelemetry-otlp = { git = "https://github.com/MaterializeInc/opentelemetry-rust.git" }
+
+[patch."https://github.com/TimelyDataflow/differential-dataflow.git"]
+differential-dataflow = { git = "https://github.com/antiguru/differential-dataflow.git", branch = "columnation" }
+dogsdogsdogs = { git = "https://github.com/antiguru/differential-dataflow.git", branch = "columnation" }
