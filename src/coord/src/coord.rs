@@ -518,6 +518,16 @@ impl Coordinator {
         ]);
 
         while let Some(msg) = messages.next().await {
+            let message_name = match &msg {
+                Message::Command(_) => "Command(_)",
+                Message::Worker(_) => "Worker(_)",
+                Message::StatementReady(_) => "StatementReady(_)",
+                Message::SinkConnectorReady(_) => "SinkConnectorReady(_)",
+                Message::AdvanceSourceTimestamp(_) => "AdvanceSourceTimestamp(_)",
+                Message::ScrapeMetrics => "ScrapeMetrics",
+                Message::Shutdown => "Shutdown",
+            };
+            let start = std::time::Instant::now();
             match msg {
                 Message::Command(cmd) => self.message_command(cmd),
                 Message::Worker(worker) => self.message_worker(worker),
@@ -531,6 +541,10 @@ impl Coordinator {
                     self.message_shutdown();
                     break;
                 }
+            }
+            let delay = start.elapsed();
+            if delay.as_secs_f32() > 0.001 {
+                println!("{} -> {:.3}s", message_name, delay.as_secs_f32());
             }
 
             if self.need_advance {
