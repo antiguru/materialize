@@ -544,11 +544,16 @@ impl Coordinator {
             }
             let delay = start.elapsed();
             if delay.as_secs_f32() > 0.001 {
-                println!("{} -> {:.3}s", message_name, delay.as_secs_f32());
+                println!("{} -> {:.6}s", message_name, delay.as_secs_f32());
             }
 
+            let start = std::time::Instant::now();
             if self.need_advance {
                 self.advance_local_inputs();
+            }
+            let delay = start.elapsed();
+            if delay.as_secs_f32() > 0.001 {
+                println!("{} -> {:.6}s", "advance_local_inputs", delay.as_secs_f32());
             }
         }
 

@@ -46,7 +46,6 @@ use persist::indexed::runtime::RuntimeClient;
 use repr::{Diff, Row, RowArena, Timestamp};
 
 use crate::arrangement::manager::{TraceBundle, TraceManager, TraceMetrics};
-use crate::logging;
 use crate::logging::materialized::MaterializedEvent;
 use crate::metrics::Metrics;
 use crate::operator::CollectionExt;
@@ -54,6 +53,7 @@ use crate::render::{self, plan::Plan as RenderPlan, RenderState};
 use crate::sink::SinkBaseMetrics;
 use crate::source::metrics::SourceBaseMetrics;
 use crate::source::timestamp::TimestampBindingRc;
+use crate::{logging, Timer};
 
 use self::metrics::{ServerMetrics, WorkerMetrics};
 
@@ -578,7 +578,10 @@ where
             // nothing to do, it will park the thread. We rely on another thread
             // unparking us when there's new work to be done, e.g., when sending
             // a command or when new Kafka messages have arrived.
-            self.timely_worker.step_or_park(None);
+            {
+                let _ = Timer::new_default("step_or_park");
+                self.timely_worker.step_or_park(None);
+            }
 
             // Report frontier information back the coordinator.
             self.report_frontiers();
@@ -605,6 +608,7 @@ where
 
     /// Send progress information to the coordinator.
     fn report_frontiers(&mut self) {
+        let _ = Timer::new_default("report_frontiers");
         fn add_progress(
             id: GlobalId,
             new_frontier: &Antichain<Timestamp>,
@@ -694,6 +698,7 @@ where
     /// Send information about new timestamp bindings created by dataflow workers back to
     /// the coordinator.
     fn report_timestamp_bindings(&mut self) {
+        let _ = Timer::new_default("report_timestamp_bindings");
         // Do nothing if dataflow workers can't send feedback or if not enough time has elapsed since
         // the last time we reported timestamp bindings.
         if self.last_bindings_feedback.elapsed().as_millis() < TS_BINDING_FEEDBACK_INTERVAL_MS {
@@ -764,12 +769,14 @@ where
     /// Needs to be called periodically (ideally once per "timestamp_frequency" in order
     /// for real time sources to make progress.
     fn update_rt_timestamps(&self) {
+        let _ = Timer::new_default("update_rt_timestamps");
         for (_, history) in self.render_state.ts_histories.iter() {
             history.update_timestamp();
         }
     }
 
     fn handle_command(&mut self, cmd: Command) {
+        let _ = Timer::new_default("handle_command");
         match cmd {
             Command::CreateDataflows(dataflows) => {
                 for dataflow in dataflows.into_iter() {
@@ -1102,6 +1109,7 @@ where
 
     /// Scan pending peeks and attempt to retire each.
     fn process_peeks(&mut self) {
+        let _ = Timer::new_default("process_peeks");
         let mut upper = Antichain::new();
         let pending_peeks_len = self.pending_peeks.len();
         let mut pending_peeks = std::mem::replace(
@@ -1130,6 +1138,7 @@ where
 
     /// Scan the shared tail response buffer, and forward results along.
     fn process_tails(&mut self) {
+        let _ = Timer::new_default("process_tails");
         let mut tail_responses = self.render_state.tail_response_buffer.borrow_mut();
         for (sink_id, response) in tail_responses.drain(..) {
             self.feedback_tx

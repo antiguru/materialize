@@ -35,6 +35,7 @@ pub type TraceValHandle<K, V, T, R> = TraceAgent<OrdValSpine<K, V, T, R>>;
 pub type KeysValsHandle = TraceValHandle<Row, Row, Timestamp, Diff>;
 pub type ErrsHandle = TraceKeyHandle<DataflowError, Timestamp, Diff>;
 
+use crate::Timer;
 use prometheus::core::{AtomicF64, AtomicU64};
 use std::time::Instant;
 
@@ -127,6 +128,7 @@ impl TraceManager {
     /// of differential dataflow, which requires users to perform this explicitly; if that changes we may
     /// be able to remove this code.
     pub fn maintenance(&mut self) {
+        let _ = Timer::new_default("maintenance");
         let mut antichain = Antichain::new();
         for (arrangement_id, bundle) in self.traces.iter_mut() {
             // Update maintenance metrics
