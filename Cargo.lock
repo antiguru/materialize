@@ -2378,12 +2378,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e6bcd6433cff03a4bfc3d9834d504467db1f1cf6d0ea765d37d330249ed629d"
 
 [[package]]
-name = "md5"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
-
-[[package]]
 name = "memchr"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4758,9 +4752,9 @@ dependencies = [
 
 [[package]]
 name = "tiberius"
-version = "0.6.4"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa12e58f1ede91b897b3e6d399f09dd5ee1f6d44d8162b61e1b53032b9976fb6"
+checksum = "83f17d6e77966667eb6ddd40a9596af9de9169d88b813cb3c902a0e4b2dc3ace"
 dependencies = [
  "async-native-tls",
  "async-stream",
@@ -5173,7 +5167,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc5cf98d8186244414c848017f0e2676b3fcb46807f6668a97dfe67359a3c4b7"
 dependencies = [
  "getrandom 0.2.1",
- "md5 0.7.0",
  "serde",
 ]
 
@@ -5376,7 +5369,7 @@ checksum = "8f820cd208ce9c6b050812dc2d724ba98c6c1e9db5ce9b3f58d925ae5723a5e6"
 dependencies = [
  "bitflags",
  "byteorder",
- "md5 0.6.1",
+ "md5",
  "rand 0.7.3",
  "winapi",
 ]
