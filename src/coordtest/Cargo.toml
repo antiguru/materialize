@@ -6,7 +6,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
-anyhow = "1.0.44"
+anyhow = "1.0.45"
+async-trait = "0.1.51"
+build-info = { path = "../build-info" }
 coord = { path = "../coord" }
 datadriven = "0.6.0"
 dataflow = { path = "../dataflow" }
@@ -20,4 +22,4 @@ structopt = "0.3.25"
 sql-parser = { path = "../sql-parser" }
 tempfile = "3.2.0"
 timely = { git = "https://github.com/TimelyDataflow/timely-dataflow", default-features = false, features = ["bincode"] }
-tokio = "1.12.0"
+tokio = "1.13.0"
