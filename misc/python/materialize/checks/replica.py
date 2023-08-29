@@ -134,3 +134,65 @@ class DropReplica(Check):
            """
             )
         )
+
+
+class CreateReplicaSet(Check):
+    def initialize(self) -> Testdrive:
+        return Testdrive(
+            dedent(
+                """
+                $[version>=6800] postgres-execute connection=postgres://mz_system:materialize@${testdrive.materialize-internal-sql-addr}
+                ALTER SYSTEM SET enable_unmanaged_cluster_replicas = ON;
+                ALTER SYSTEM SET enable_replica_sets = ON;
+
+                > CREATE CLUSTER cl REPLICAS ();
+
+                > CREATE REPLICA SET cl.foo1 REPLICAS ();
+                > CREATE REPLICA SET cl.foo2 REPLICAS ();
+                > CREATE REPLICA SET cl.foo3 REPLICAS ();
+
+                > CREATE CLUSTER REPLICA cl.cr10 IN REPLICA SET foo1 SIZE '1';
+                > CREATE CLUSTER REPLICA cl.cr11 IN REPLICA SET foo1 SIZE '1';
+                """
+            )
+        )
+
+    def manipulate(self) -> list[Testdrive]:
+        return [
+            Testdrive(dedent(s))
+            for s in [
+                """
+                > ALTER REPLICA SET cl.foo1 RENAME TO foo4;
+
+                > CREATE CLUSTER REPLICA cl.cr20 IN REPLICA SET foo2 SIZE '1';
+                > CREATE CLUSTER REPLICA cl.cr21 IN REPLICA SET foo2 SIZE '1';
+
+                > CREATE CLUSTER REPLICA cl.cr30 IN REPLICA SET foo3 SIZE '1';
+                """,
+                """
+                > DROP REPLICA SET cl.foo3;
+
+                > DROP CLUSTER REPLICA cl.cr20;
+                """,
+            ]
+        ]
+
+    def validate(self) -> Testdrive:
+        return Testdrive(
+            dedent(
+                """
+                > SHOW REPLICA SETS
+                cl foo2
+                cl foo4
+
+                > SELECT * FROM mz_internal.mz_show_cluster_replicas WHERE cluster = 'cl';
+                cl cr10 1 true
+                cl cr11 1 true
+                cl cr21 1 true
+
+                > SELECT * from mz_replica_sets;
+                u2 foo4 u2 u1
+                u3 foo2 u2 u1
+                """
+            )
+        )
