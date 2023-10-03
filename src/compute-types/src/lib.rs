@@ -77,6 +77,10 @@
 
 //! Shared types for the `mz-compute*` crates
 
+use mz_repr::GlobalId;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
 pub mod dataflows;
 pub mod explain;
 pub mod plan;
@@ -89,3 +93,15 @@ pub const DEFAULT_COMPUTE_REPLICA_LOGGING_INTERVAL_MICROS: u32 = 1_000_000;
 
 /// Identifier of a compute instance.
 pub type ComputeInstanceId = mz_storage_types::instances::StorageInstanceId;
+
+#[derive(Ord, PartialOrd, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CollectionId {
+    pub global_id: GlobalId,
+    pub uuid: Uuid,
+}
+
+impl std::fmt::Display for CollectionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CollectionId({}#{})", self.global_id, self.uuid)
+    }
+}

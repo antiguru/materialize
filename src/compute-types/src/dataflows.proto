@@ -65,3 +65,18 @@ message ProtoBuildDesc {
     mz_repr.global_id.ProtoGlobalId id = 1;
     plan.ProtoPlan plan = 2;
 }
+
+message ProtoCollectionId {
+    mz_repr.global_id.ProtoGlobalId id = 1;
+    mz_proto.ProtoU128 uuid = 2;
+}
+
+message ProtoComputeCompaction {
+    mz_repr.global_id.ProtoGlobalId id = 1;
+    mz_repr.antichain.ProtoU64Antichain frontier = 2;
+}
+
+message ProtoAllowComputeCompaction {
+    repeated ProtoComputeCompaction collections = 1;
+}
+

@@ -16,6 +16,7 @@ use anyhow::bail;
 use differential_dataflow::lattice::Lattice;
 use mz_build_info::BuildInfo;
 use mz_cluster_client::client::{ClusterReplicaLocation, ClusterStartupEpoch, TimelyConfig};
+use mz_compute_types::CollectionId;
 use mz_ore::retry::Retry;
 use mz_ore::task::{AbortOnDropHandle, JoinHandleExt};
 use mz_repr::GlobalId;
@@ -67,7 +68,7 @@ pub(super) struct Replica<T> {
     /// Replica metrics.
     metrics: ReplicaMetrics,
     /// Tombstones for dropped replicas
-    pub collection_tombstones: BTreeSet<(GlobalId, Uuid)>,
+    pub collection_tombstones: BTreeSet<CollectionId>,
 }
 
 impl<T> Replica<T>
@@ -153,7 +154,7 @@ struct ReplicaTask<T> {
     /// Replica metrics.
     metrics: ReplicaMetrics,
     /// Tracked collection state.
-    collections: BTreeMap<GlobalId, CollectionState<T>>,
+    collections: BTreeMap<CollectionId, CollectionState<T>>,
 }
 
 impl<T> ReplicaTask<T>
@@ -301,7 +302,13 @@ where
                         as_of: dataflow.as_of.clone().unwrap(),
                         uuid: dataflow.uuid,
                     };
-                    self.collections.insert(id, state);
+                    self.collections.insert(
+                        CollectionId {
+                            global_id: id,
+                            uuid: dataflow.uuid,
+                        },
+                        state,
+                    );
                 }
             }
             ComputeCommand::AllowCompaction { id, frontier } if frontier.is_empty() => {
@@ -323,22 +330,15 @@ where
 
         // Apply changes to the `initial_output_duration_seconds` metric.
         let collection_frontier = match response {
-            ComputeResponse::FrontierUpper { id, upper, uuid } => {
-                Some((id, upper.clone(), Some(uuid)))
-            }
+            ComputeResponse::FrontierUpper { id, upper } => Some((id, upper.clone())),
             ComputeResponse::SubscribeResponse(id, resp) => match resp {
-                SubscribeResponse::Batch(batch) => Some((id, batch.upper.clone(), None)),
-                SubscribeResponse::DroppedAt(_) => Some((id, Antichain::new(), None)),
+                SubscribeResponse::Batch(batch) => Some((id, batch.upper.clone())),
+                SubscribeResponse::DroppedAt(_) => Some((id, Antichain::new())),
             },
             _ => None,
         };
-        if let Some((id, frontier, uuid)) = collection_frontier {
+        if let Some((id, frontier)) = collection_frontier {
             if let Some(state) = self.collections.get(id) {
-                if let Some(uuid) = uuid {
-                    if state.uuid != *uuid {
-                        return;
-                    }
-                }
                 state.observe_frontier_update(&frontier);
             }
         }

@@ -11,6 +11,7 @@
 
 use mz_cluster_client::client::{ClusterStartupEpoch, TimelyConfig, TryIntoTimelyConfig};
 use mz_compute_types::dataflows::DataflowDescription;
+use mz_compute_types::CollectionId;
 use mz_expr::RowSetFinishing;
 use mz_ore::tracing::OpenTelemetryContext;
 use mz_persist_client::cfg::PersistParameters;
@@ -167,7 +168,7 @@ pub enum ComputeCommand<T = mz_repr::Timestamp> {
     /// [`FrontierUpper`]: super::response::ComputeResponse::FrontierUpper
     /// [#16275]: https://github.com/MaterializeInc/materialize/issues/16275
     AllowCompaction {
-        id: GlobalId,
+        id: CollectionId,
         frontier: Antichain<T>,
     },
 
@@ -238,7 +239,7 @@ impl RustType<ProtoComputeCommand> for ComputeCommand<mz_repr::Timestamp> {
                 }
                 ComputeCommand::CreateDataflow(dataflow) => CreateDataflow(dataflow.into_proto()),
                 ComputeCommand::AllowCompaction { id, frontier } => {
-                    AllowCompaction(ProtoCompaction {
+                    AllowCompaction(ProtoComputeCompaction {
                         id: Some(id.into_proto()),
                         frontier: Some(frontier.into_proto()),
                     })

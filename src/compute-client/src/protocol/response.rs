@@ -11,6 +11,7 @@
 
 use std::num::NonZeroUsize;
 
+use mz_compute_types::CollectionId;
 use mz_ore::tracing::OpenTelemetryContext;
 use mz_proto::{any_uuid, IntoRustIfSome, ProtoType, RustType, TryFromProtoError};
 use mz_repr::{Diff, GlobalId, Row};
@@ -75,9 +76,8 @@ pub enum ComputeResponse<T = mz_repr::Timestamp> {
     /// [`CreateInstance` command]: super::command::ComputeCommand::CreateInstance
     /// [#16275]: https://github.com/MaterializeInc/materialize/issues/16275
     FrontierUpper {
-        id: GlobalId,
+        id: CollectionId,
         upper: Antichain<T>,
-        uuid: Uuid,
     },
 
     /// `PeekResponse` reports the result of a previous [`Peek` command]. The peek is identified by
@@ -130,7 +130,7 @@ pub enum ComputeResponse<T = mz_repr::Timestamp> {
     /// [`DroppedAt`]: SubscribeResponse::DroppedAt
     /// [`CreateDataflow` command]: super::command::ComputeCommand::CreateDataflow
     /// [`AllowCompaction` command]: super::command::ComputeCommand::AllowCompaction
-    SubscribeResponse(GlobalId, SubscribeResponse<T>),
+    SubscribeResponse(CollectionId, SubscribeResponse<T>),
 }
 
 impl RustType<ProtoComputeResponse> for ComputeResponse<mz_repr::Timestamp> {

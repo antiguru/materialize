@@ -10,7 +10,9 @@
 //! Types for describing dataflows.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::process::id;
 
+use crate::CollectionId;
 use mz_expr::{CollectionPlan, MirRelationExpr, MirScalarExpr, OptimizedMirRelationExpr};
 use mz_proto::{any_uuid, IntoRustIfSome, ProtoMapEntry, ProtoType, RustType, TryFromProtoError};
 use mz_repr::{GlobalId, RelationType};
@@ -644,6 +646,24 @@ impl RustType<ProtoBuildDesc> for BuildDesc<crate::plan::Plan> {
         Ok(BuildDesc {
             id: x.id.into_rust_if_some("ProtoBuildDesc::id")?,
             plan: x.plan.into_rust_if_some("ProtoBuildDesc::plan")?,
+        })
+    }
+}
+
+impl RustType<ProtoCollectionId> for CollectionId {
+    fn into_proto(&self) -> ProtoCollectionId {
+        ProtoCollectionId {
+            id: Some(self.global_id.into_proto()),
+            uuid: Some(self.uuid.into_proto()),
+        }
+    }
+
+    fn from_proto(
+        ProtoCollectionId { id, uuid }: ProtoCollectionId,
+    ) -> Result<Self, TryFromProtoError> {
+        Ok(Self {
+            global_id: id.into_rust_if_some("ProtoCollectionId::id")?,
+            uuid: uuid.into_rust_if_some("ProtoCollectionId::uuid")?,
         })
     }
 }

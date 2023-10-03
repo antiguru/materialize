@@ -40,7 +40,7 @@ use mz_build_info::BuildInfo;
 use mz_cluster_client::client::ClusterReplicaLocation;
 use mz_cluster_client::ReplicaId;
 use mz_compute_types::dataflows::DataflowDescription;
-use mz_compute_types::ComputeInstanceId;
+use mz_compute_types::{CollectionId, ComputeInstanceId};
 use mz_expr::RowSetFinishing;
 use mz_ore::metrics::MetricsRegistry;
 use mz_ore::tracing::OpenTelemetryContext;
@@ -489,17 +489,17 @@ where
         Ok(())
     }
 
-    /// Drop the read capability for the given collections and allow their resources to be
-    /// reclaimed.
-    pub fn force_drop_collections(
-        &mut self,
-        instance_id: ComputeInstanceId,
-        collection_ids: Vec<GlobalId>,
-    ) -> Result<(), CollectionUpdateError> {
-        self.instance(instance_id)?
-            .force_drop_collections(collection_ids)?;
-        Ok(())
-    }
+    // /// Drop the read capability for the given collections and allow their resources to be
+    // /// reclaimed.
+    // pub fn force_drop_collections(
+    //     &mut self,
+    //     instance_id: ComputeInstanceId,
+    //     collection_ids: Vec<GlobalId>,
+    // ) -> Result<(), CollectionUpdateError> {
+    //     self.instance(instance_id)?
+    //         .force_drop_collections(collection_ids)?;
+    //     Ok(())
+    // }
 
     /// Initiate a peek request for the contents of the given collection at `timestamp`.
     pub fn peek(
@@ -651,7 +651,7 @@ pub struct CollectionState<T> {
     /// Storage identifiers on which this collection depends.
     storage_dependencies: Vec<GlobalId>,
     /// Compute identifiers on which this collection depends.
-    compute_dependencies: Vec<GlobalId>,
+    compute_dependencies: Vec<CollectionId>,
 
     /// The write frontier of this collection.
     write_frontier: Antichain<T>,
@@ -667,7 +667,7 @@ impl<T: Timestamp> CollectionState<T> {
     pub fn new(
         since: Antichain<T>,
         storage_dependencies: Vec<GlobalId>,
-        compute_dependencies: Vec<GlobalId>,
+        compute_dependencies: Vec<CollectionId>,
         uuid: Uuid,
     ) -> Self {
         let mut read_capabilities = MutableAntichain::new();
