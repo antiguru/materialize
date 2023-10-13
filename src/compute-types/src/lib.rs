@@ -77,6 +77,9 @@
 
 //! Shared types for the `mz-compute*` crates
 
+use mz_repr::GlobalId;
+use uuid::Uuid;
+
 pub mod dataflows;
 pub mod explain;
 pub mod plan;
@@ -89,3 +92,8 @@ pub const DEFAULT_COMPUTE_REPLICA_LOGGING_INTERVAL_MICROS: u32 = 1_000_000;
 
 /// Identifier of a compute instance.
 pub type ComputeInstanceId = mz_storage_types::instances::StorageInstanceId;
+
+pub struct CollectionId {
+    pub id: GlobalId,
+    pub uuid: Uuid,
+}

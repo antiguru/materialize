@@ -3988,6 +3988,7 @@ dependencies = [
  "timely",
  "tonic-build",
  "tracing",
+ "uuid",
  "workspace-hack",
 ]
 

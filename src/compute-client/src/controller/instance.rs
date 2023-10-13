@@ -117,6 +117,7 @@ pub(super) struct Instance<T> {
     /// Only if both these conditions hold is dropping a collection's state, and the associated
     /// read holds on its inputs, sound.
     collections: BTreeMap<GlobalId, CollectionState<T>>,
+    active_collections: BTreeMap<GlobalId, CollectionId>,
     /// IDs of log sources maintained by this compute instance.
     log_sources: BTreeMap<LogVariant, GlobalId>,
     /// Currently outstanding peeks.
