@@ -16,6 +16,7 @@ use anyhow::bail;
 use differential_dataflow::lattice::Lattice;
 use mz_build_info::BuildInfo;
 use mz_cluster_client::client::{ClusterReplicaLocation, ClusterStartupEpoch, TimelyConfig};
+use mz_compute_types::CollectionId;
 use mz_ore::retry::Retry;
 use mz_ore::task::{AbortOnDropHandle, JoinHandleExt};
 use mz_repr::GlobalId;
@@ -149,7 +150,7 @@ struct ReplicaTask<T> {
     /// Replica metrics.
     metrics: ReplicaMetrics,
     /// Tracked collection state.
-    collections: BTreeMap<GlobalId, CollectionState<T>>,
+    collections: BTreeMap<CollectionId, CollectionState<T>>,
 }
 
 impl<T> ReplicaTask<T>

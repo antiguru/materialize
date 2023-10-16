@@ -22,6 +22,7 @@ use mz_cluster_client::client::{ClusterStartupEpoch, TimelyConfig};
 use mz_compute_types::dataflows::DataflowDescription;
 use mz_compute_types::sinks::{ComputeSinkConnection, ComputeSinkDesc, PersistSinkConnection};
 use mz_compute_types::sources::SourceInstanceDesc;
+use mz_compute_types::CollectionId;
 use mz_expr::RowSetFinishing;
 use mz_ore::cast::CastFrom;
 use mz_ore::tracing::OpenTelemetryContext;
@@ -116,7 +117,7 @@ pub(super) struct Instance<T> {
     ///
     /// Only if both these conditions hold is dropping a collection's state, and the associated
     /// read holds on its inputs, sound.
-    collections: BTreeMap<GlobalId, CollectionState<T>>,
+    collections: BTreeMap<CollectionId, CollectionState<T>>,
     active_collections: BTreeMap<GlobalId, CollectionId>,
     /// IDs of log sources maintained by this compute instance.
     log_sources: BTreeMap<LogVariant, GlobalId>,
@@ -159,30 +160,67 @@ pub(super) struct Instance<T> {
 
 impl<T> Instance<T> {
     /// Acquire a handle to the collection state associated with `id`.
-    pub fn collection(&self, id: GlobalId) -> Result<&CollectionState<T>, CollectionMissing> {
-        self.collections.get(&id).ok_or(CollectionMissing(id))
+    pub fn collection(&self, id: CollectionId) -> &CollectionState<T> {
+        self.try_collection(id)
+            .expect("Reference to absent collection")
+    }
+
+    /// Acquire a handle to the collection state associated with `id`.
+    pub fn try_collection(&self, id: CollectionId) -> Option<&CollectionState<T>> {
+        self.collections.get(&id)
+    }
+
+    pub fn active_collection_id(&self, id: GlobalId) -> Result<CollectionId, CollectionMissing> {
+        self.active_collections
+            .get(&id)
+            .copied()
+            .ok_or(CollectionMissing(id))
+    }
+    pub fn active_collection(
+        &self,
+        id: GlobalId,
+    ) -> Result<&CollectionState<T>, CollectionMissing> {
+        Ok(self.collection(self.active_collection_id(id)?))
     }
 
     /// Acquire a mutable handle to the collection state associated with `id`.
-    fn collection_mut(
+    fn active_collection_mut(
         &mut self,
         id: GlobalId,
     ) -> Result<&mut CollectionState<T>, CollectionMissing> {
-        self.collections.get_mut(&id).ok_or(CollectionMissing(id))
+        let id = self
+            .active_collections
+            .get(&id)
+            .ok_or(CollectionMissing(id))?;
+        Ok(self.collection_mut(*id))
     }
 
-    pub fn collections_iter(&self) -> impl Iterator<Item = (&GlobalId, &CollectionState<T>)> {
+    /// Acquire a mutable handle to the collection state associated with `id`.
+    fn collection_mut(&mut self, id: CollectionId) -> &mut CollectionState<T> {
+        self.collections
+            .get_mut(&id)
+            .expect("Reference to absent collection")
+    }
+
+    pub fn collections_iter(&self) -> impl Iterator<Item = (&CollectionId, &CollectionState<T>)> {
         self.collections.iter()
     }
 
-    fn add_collection(&mut self, id: GlobalId, state: CollectionState<T>) {
+    fn add_collection(&mut self, id: CollectionId, state: CollectionState<T>) {
+        assert!(
+            !id.uuid().is_nil(),
+            "Attempted to insert a collection with nil UUID for {}",
+            id.id
+        );
         self.collections.insert(id, state);
+        self.active_collections.insert(id.id, id);
         self.report_dependency_updates(id, 1);
     }
 
-    fn remove_collection(&mut self, id: GlobalId) {
+    fn remove_collection(&mut self, id: CollectionId) {
         self.report_dependency_updates(id, -1);
         self.collections.remove(&id);
+        self.active_collections.remove(&id.id);
     }
 
     /// Enqueue the given response for delivery to the controller clients.
@@ -269,15 +307,15 @@ impl<T> Instance<T> {
     /// # Panics
     ///
     /// Panics if the identified collection does not exist.
-    fn report_dependency_updates(&mut self, id: GlobalId, diff: i64) {
+    fn report_dependency_updates(&mut self, id: CollectionId, diff: i64) {
         let collection = self.collections.get(&id).expect("collection must exist");
 
         let mut dependencies = Vec::new();
-        dependencies.extend(collection.compute_dependencies.iter());
+        dependencies.extend(collection.compute_dependencies.iter().map(CollectionId::id));
         dependencies.extend(collection.storage_dependencies.iter());
 
         let resp = ComputeControllerResponse::DependencyUpdate {
-            id,
+            id: id.id,
             dependencies,
             diff,
         };
@@ -285,7 +323,13 @@ impl<T> Instance<T> {
     }
 
     /// List compute collections that depend on the given collection.
-    pub fn collection_reverse_dependencies(&self, id: GlobalId) -> impl Iterator<Item = &GlobalId> {
+    pub fn collection_reverse_dependencies(
+        &self,
+        id: GlobalId,
+    ) -> impl Iterator<Item = &CollectionId> {
+        let id = self
+            .active_collection_id(id)
+            .expect("TODO Unexpected global id");
         self.collections_iter().filter_map(move |(id2, state)| {
             if state.compute_dependencies.contains(&id) {
                 Some(id2)
@@ -309,19 +353,21 @@ where
         response_tx: mpsc::Sender<ComputeControllerResponse<T>>,
         variable_length_row_encoding: bool,
     ) -> Self {
-        let collections = arranged_logs
+        let collections: BTreeMap<_, _> = arranged_logs
             .iter()
             .map(|(_, id)| {
                 let state = CollectionState::new_log_collection();
-                (*id, state)
+                (CollectionId::new_nil(*id), state)
             })
             .collect();
+        let active_collections = collections.keys().map(|&k| (k.id, k)).collect();
         let history = ComputeCommandHistory::new(metrics.for_history());
 
         let mut instance = Self {
             build_info,
             initialized: false,
             replicas: Default::default(),
+            active_collections,
             collections,
             log_sources: arranged_logs,
             peeks: Default::default(),
@@ -487,7 +533,7 @@ where
         let mut updates = Vec::new();
         for (compute_id, collection) in &mut self.compute.collections {
             // Skip log collections not maintained by this replica.
-            if collection.log_collection && !log_ids.contains(compute_id) {
+            if collection.log_collection && !log_ids.contains(&compute_id.id) {
                 continue;
             }
 
@@ -644,13 +690,13 @@ where
         // Validate indexes have `since.less_equal(as_of)`.
         // TODO(mcsherry): Instead, return an error from the constructing method.
         for index_id in dataflow.index_imports.keys() {
-            let collection = self.compute.collection(*index_id)?;
+            let collection = self.compute.active_collection(*index_id)?;
             let since = collection.read_capabilities.frontier();
             if !(timely::order::PartialOrder::less_equal(&since, &as_of.borrow())) {
                 Err(DataflowCreationError::SinceViolation(*index_id))?;
             }
 
-            compute_dependencies.push(*index_id);
+            compute_dependencies.push(self.compute.active_collection_id(*index_id)?);
             replica_write_frontier.join_assign(&since.to_owned());
         }
 
@@ -686,12 +732,13 @@ where
         // Install collection state for each of the exports.
         let mut updates = Vec::new();
         for export_id in dataflow.export_ids() {
+            let export_id = CollectionId::new_random(export_id);
             self.compute.add_collection(
                 export_id,
                 CollectionState::new(
                     as_of.clone(),
                     storage_dependencies.clone(),
-                    compute_dependencies.clone(),
+                    compute_dependencies.iter().map(CollectionId::id).collect(),
                 ),
             );
             updates.push((export_id, replica_write_frontier.clone()));
@@ -796,9 +843,10 @@ where
         map_filter_project: mz_expr::SafeMfpPlan,
         target_replica: Option<ReplicaId>,
     ) -> Result<(), PeekError> {
-        let since = self.compute.collection(id)?.read_capabilities.frontier();
+        let id = self.compute.active_collection_id(id)?;
+        let since = self.compute.collection(id).read_capabilities.frontier();
         if !since.less_equal(&timestamp) {
-            Err(PeekError::SinceViolation(id))?;
+            Err(PeekError::SinceViolation(id.id))?;
         }
 
         if let Some(target) = target_replica {
@@ -816,7 +864,7 @@ where
         self.compute.peeks.insert(
             uuid,
             PendingPeek {
-                target: id,
+                target: id.id,
                 time: timestamp.clone(),
                 target_replica,
                 // TODO(guswynn): can we just hold the `tracing::Span` here instead?
@@ -826,7 +874,7 @@ where
         );
 
         self.compute.send(ComputeCommand::Peek(Peek {
-            id,
+            id: id.id,
             literal_constraints,
             uuid,
             timestamp,
@@ -880,7 +928,8 @@ where
     ) -> Result<(), CollectionMissing> {
         let mut read_capability_changes = BTreeMap::default();
         for (id, policy) in policies.into_iter() {
-            let collection = self.compute.collection_mut(id)?;
+            let id = self.compute.active_collection_id(id)?;
+            let collection = self.compute.collection_mut(id);
             let mut new_read_capability = policy.frontier(collection.write_frontier.borrow());
 
             if timely::order::PartialOrder::less_equal(
@@ -907,7 +956,7 @@ where
     /// Validate that a collection exists for all identifiers, and error if any do not.
     fn validate_ids(&self, ids: impl Iterator<Item = GlobalId>) -> Result<(), CollectionMissing> {
         for id in ids {
-            self.compute.collection(id)?;
+            self.compute.active_collection(id)?;
         }
         Ok(())
     }
@@ -922,17 +971,14 @@ where
     fn update_write_frontiers(
         &mut self,
         replica_id: ReplicaId,
-        updates: &[(GlobalId, Antichain<T>)],
+        updates: &[(CollectionId, Antichain<T>)],
     ) {
         let mut advanced_collections = Vec::new();
         let mut compute_read_capability_changes = BTreeMap::default();
         let mut storage_read_capability_changes = BTreeMap::default();
         let mut dropped_collection_ids = Vec::new();
         for (id, new_upper) in updates.iter() {
-            let collection = self
-                .compute
-                .collection_mut(*id)
-                .expect("reference to absent collection");
+            let collection = self.compute.collection_mut(*id);
 
             if PartialOrder::less_than(&collection.write_frontier, new_upper) {
                 advanced_collections.push(*id);
@@ -998,10 +1044,10 @@ where
         // relying on others for that information.
         let storage_updates: Vec<_> = advanced_collections
             .into_iter()
-            .filter(|id| self.storage_controller.collection(*id).is_ok())
+            .filter(|id| self.storage_controller.collection(id.id).is_ok())
             .map(|id| {
-                let collection = self.compute.collection(id).unwrap();
-                (id, collection.write_frontier.clone())
+                let collection = self.compute.collection(id);
+                (id.id, collection.write_frontier.clone())
             })
             .collect();
         self.storage_controller
@@ -1043,54 +1089,50 @@ where
 
     /// Applies `updates`, propagates consequences through other read capabilities, and sends an appropriate compaction command.
     #[tracing::instrument(level = "debug", skip(self))]
-    fn update_read_capabilities(&mut self, updates: &mut BTreeMap<GlobalId, ChangeBatch<T>>) {
+    fn update_read_capabilities(&mut self, updates: &mut BTreeMap<CollectionId, ChangeBatch<T>>) {
         // Locations to record consequences that we need to act on.
         let mut storage_todo = BTreeMap::default();
         let mut compute_net = Vec::default();
         // Repeatedly extract the maximum id, and updates for it.
         while let Some(key) = updates.keys().rev().next().cloned() {
             let mut update = updates.remove(&key).unwrap();
-            if let Ok(collection) = self.compute.collection_mut(key) {
-                let changes = collection.read_capabilities.update_iter(update.drain());
-                update.extend(changes);
-                for id in collection.storage_dependencies.iter() {
-                    storage_todo
-                        .entry(*id)
-                        .or_insert_with(ChangeBatch::new)
-                        .extend(update.iter().cloned());
-                }
-                for id in collection.compute_dependencies.iter() {
-                    updates
-                        .entry(*id)
-                        .or_insert_with(ChangeBatch::new)
-                        .extend(update.iter().cloned());
-                }
-                compute_net.push((key, update));
-            } else {
-                // Storage presumably, but verify.
-                if self.storage_controller.collection(key).is_ok() {
-                    storage_todo
-                        .entry(key)
-                        .or_insert_with(ChangeBatch::new)
-                        .extend(update.drain())
-                } else {
-                    tracing::error!(
-                        "found neither compute nor storage collection with id {}",
-                        key
-                    );
-                }
+            let collection = self.compute.collection_mut(key);
+            let changes = collection.read_capabilities.update_iter(update.drain());
+            update.extend(changes);
+            for id in collection.storage_dependencies.iter() {
+                storage_todo
+                    .entry(*id)
+                    .or_insert_with(ChangeBatch::new)
+                    .extend(update.iter().cloned());
             }
+            for id in collection.compute_dependencies.iter() {
+                updates
+                    .entry(*id)
+                    .or_insert_with(ChangeBatch::new)
+                    .extend(update.iter().cloned());
+            }
+            compute_net.push((key, update));
+            // } else {
+            //     // Storage presumably, but verify.
+            //     if self.storage_controller.collection(key).is_ok() {
+            //         storage_todo
+            //             .entry(key)
+            //             .or_insert_with(ChangeBatch::new)
+            //             .extend(update.drain())
+            //     } else {
+            //         tracing::error!(
+            //             "found neither compute nor storage collection with id {}",
+            //             key
+            //         );
+            //     }
+            // }
         }
 
         // Translate our net compute actions into `AllowCompaction` commands
         // and a list of collections that are potentially ready to be dropped
         let mut dropped_collection_ids = Vec::new();
         for (id, change) in compute_net.iter_mut() {
-            let frontier = self
-                .compute
-                .collection(*id)
-                .expect("existence checked above")
-                .read_frontier();
+            let frontier = self.compute.collection(*id).read_frontier();
             if frontier.is_empty() {
                 dropped_collection_ids.push(*id);
             }
@@ -1127,7 +1169,12 @@ where
         // to avoid the edge case that caused #16615.
         self.compute.send(ComputeCommand::CancelPeek { uuid });
 
-        let update = (peek.target, ChangeBatch::new_from(peek.time, -1));
+        let id = self
+            .compute
+            .active_collection_id(peek.target)
+            .expect("Unknown collection");
+
+        let update = (id, ChangeBatch::new_from(peek.time, -1));
         let mut updates = [update].into();
         self.update_read_capabilities(&mut updates);
     }
@@ -1153,33 +1200,34 @@ where
 
     /// Cleans up collection state, if necessary, in response to drop operations targeted
     /// at a replica and given collections (via reporting of an empty frontier).
-    fn update_dropped_collections(&mut self, dropped_collection_ids: Vec<GlobalId>) {
+    fn update_dropped_collections(&mut self, mut dropped_collection_ids: Vec<CollectionId>) {
+        dropped_collection_ids.sort();
+        dropped_collection_ids.dedup();
         for id in dropped_collection_ids {
             // clean up the given collection if read frontier is empty
             // and all replica frontiers are empty
-            if let Ok(collection) = self.compute.collection(id) {
-                if collection.read_frontier().is_empty()
-                    && collection
-                        .replica_write_frontiers
-                        .values()
-                        .all(|frontier| frontier.is_empty())
-                {
-                    self.compute.remove_collection(id);
-                }
+            let collection = self.compute.collection(id);
+            if collection.read_frontier().is_empty()
+                && collection
+                    .replica_write_frontiers
+                    .values()
+                    .all(|frontier| frontier.is_empty())
+            {
+                self.compute.remove_collection(id);
             }
         }
     }
 
     fn handle_frontier_upper(
         &mut self,
-        id: GlobalId,
+        id: CollectionId,
         new_frontier: Antichain<T>,
         replica_id: ReplicaId,
     ) {
         // According to the compute protocol, replicas are not allowed to send `FrontierUpper`s
         // that regress frontiers they have reported previously. We still perform a check here,
         // rather than risking the controller becoming confused trying to handle regressions.
-        let Ok(coll) = self.compute.collection(id) else {
+        let Some(coll) = self.compute.try_collection(id) else {
             tracing::warn!(
                 ?replica_id,
                 "Frontier update for unknown collection {id}: {:?}",
@@ -1238,11 +1286,11 @@ where
 
     fn handle_subscribe_response(
         &mut self,
-        subscribe_id: GlobalId,
+        subscribe_id: CollectionId,
         response: SubscribeResponse<T>,
         replica_id: ReplicaId,
     ) -> Option<ComputeControllerResponse<T>> {
-        if !self.compute.collections.contains_key(&subscribe_id) {
+        if !self.compute.active_collections.contains_key(&subscribe_id) {
             tracing::warn!(?replica_id, "Response for unknown subscribe {subscribe_id}",);
             tracing::error!("Replica sent a response for an unknown subscibe");
             return None;

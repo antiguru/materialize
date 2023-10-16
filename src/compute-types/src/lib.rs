@@ -93,7 +93,42 @@ pub const DEFAULT_COMPUTE_REPLICA_LOGGING_INTERVAL_MICROS: u32 = 1_000_000;
 /// Identifier of a compute instance.
 pub type ComputeInstanceId = mz_storage_types::instances::StorageInstanceId;
 
+#[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
 pub struct CollectionId {
     pub id: GlobalId,
     pub uuid: Uuid,
+}
+
+impl CollectionId {
+    pub fn new(id: GlobalId, uuid: Uuid) -> Self {
+        Self { id, uuid }
+    }
+
+    pub fn new_random(id: GlobalId) -> Self {
+        Self::new(id, Uuid::new_v4())
+    }
+
+    pub fn new_nil(id: GlobalId) -> Self {
+        Self::new(id, Uuid::nil())
+    }
+
+    pub fn id(&self) -> GlobalId {
+        self.id
+    }
+
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+}
+
+impl From<CollectionId> for GlobalId {
+    fn from(value: CollectionId) -> Self {
+        value.id
+    }
+}
+
+impl std::fmt::Display for CollectionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#{}", self.id, self.uuid)
+    }
 }

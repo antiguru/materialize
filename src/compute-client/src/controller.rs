@@ -41,7 +41,7 @@ use mz_build_info::BuildInfo;
 use mz_cluster_client::client::ClusterReplicaLocation;
 use mz_cluster_client::ReplicaId;
 use mz_compute_types::dataflows::DataflowDescription;
-use mz_compute_types::ComputeInstanceId;
+use mz_compute_types::{CollectionId, ComputeInstanceId};
 use mz_expr::RowSetFinishing;
 use mz_ore::metrics::MetricsRegistry;
 use mz_ore::tracing::OpenTelemetryContext;
@@ -234,10 +234,11 @@ impl<T> ComputeController<T> {
         &self,
         instance_id: ComputeInstanceId,
         id: GlobalId,
-    ) -> Result<impl Iterator<Item = &GlobalId>, InstanceMissing> {
+    ) -> Result<impl Iterator<Item = GlobalId> + '_, InstanceMissing> {
         Ok(self
             .instance(instance_id)?
-            .collection_reverse_dependencies(id))
+            .collection_reverse_dependencies(id)
+            .map(CollectionId::id))
     }
 }
 
@@ -625,12 +626,12 @@ impl<T> ComputeInstanceRef<'_, T> {
 
     /// Return a read-only handle to the indicated collection.
     pub fn collection(&self, id: GlobalId) -> Result<&CollectionState<T>, CollectionMissing> {
-        self.instance.collection(id)
+        self.instance.active_collection(id)
     }
 
     /// Return an iterator over the installed collections.
-    pub fn collections(&self) -> impl Iterator<Item = (&GlobalId, &CollectionState<T>)> {
-        self.instance.collections_iter()
+    pub fn collections(&self) -> impl Iterator<Item = (GlobalId, &CollectionState<T>)> {
+        self.instance.collections_iter().map(|(k, v)| (k.id, v))
     }
 }
 
@@ -658,7 +659,7 @@ pub struct CollectionState<T> {
     /// Storage identifiers on which this collection depends.
     storage_dependencies: Vec<GlobalId>,
     /// Compute identifiers on which this collection depends.
-    compute_dependencies: Vec<GlobalId>,
+    compute_dependencies: Vec<CollectionId>,
 
     /// The write frontier of this collection.
     write_frontier: Antichain<T>,

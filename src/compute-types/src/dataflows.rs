@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::CollectionId;
 use mz_expr::{CollectionPlan, MirRelationExpr, MirScalarExpr, OptimizedMirRelationExpr};
 use mz_proto::{IntoRustIfSome, ProtoMapEntry, ProtoType, RustType, TryFromProtoError};
 use mz_repr::{GlobalId, RelationType};
@@ -32,22 +33,22 @@ include!(concat!(env!("OUT_DIR"), "/mz_compute_types.dataflows.rs"));
 
 /// A description of a dataflow to construct and results to surface.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub struct DataflowDescription<P, S: 'static = (), T = mz_repr::Timestamp> {
+pub struct DataflowDescription<P, S: 'static = (), T = mz_repr::Timestamp, Id: Ord = GlobalId> {
     /// Sources instantiations made available to the dataflow pair with monotonicity information.
-    pub source_imports: BTreeMap<GlobalId, (SourceInstanceDesc<S>, bool)>,
+    pub source_imports: BTreeMap<Id, (SourceInstanceDesc<S>, bool)>,
     /// Indexes made available to the dataflow.
     /// (id of index, import)
-    pub index_imports: BTreeMap<GlobalId, IndexImport>,
+    pub index_imports: BTreeMap<Id, IndexImport>,
     /// Views and indexes to be built and stored in the local context.
     /// Objects must be built in the specific order, as there may be
     /// dependencies of later objects on prior identifiers.
     pub objects_to_build: Vec<BuildDesc<P>>,
     /// Indexes to be made available to be shared with other dataflows
     /// (id of new index, description of index, relationtype of base source/view/table)
-    pub index_exports: BTreeMap<GlobalId, (IndexDesc, RelationType)>,
+    pub index_exports: BTreeMap<Id, (IndexDesc, RelationType)>,
     /// sinks to be created
     /// (id of new sink, description of sink)
-    pub sink_exports: BTreeMap<GlobalId, ComputeSinkDesc<S, T>>,
+    pub sink_exports: BTreeMap<Id, ComputeSinkDesc<S, T>>,
     /// An optional frontier to which inputs should be advanced.
     ///
     /// If this is set, it should override the default setting determined by
@@ -242,12 +243,13 @@ impl<T> DataflowDescription<OptimizedMirRelationExpr, (), T> {
     }
 }
 
-impl<P, S, T> DataflowDescription<P, S, T>
+impl<P, S, T, Id> DataflowDescription<P, S, T, Id>
 where
     P: CollectionPlan,
+    Id: Ord + Clone + Copy,
 {
     /// Identifiers of exported objects (indexes and sinks).
-    pub fn export_ids(&self) -> impl Iterator<Item = GlobalId> + '_ {
+    pub fn export_ids(&self) -> impl Iterator<Item = Id> + '_ {
         self.index_exports
             .keys()
             .chain(self.sink_exports.keys())
@@ -255,7 +257,7 @@ where
     }
 
     /// Identifiers of exported subscribe sinks.
-    pub fn subscribe_ids(&self) -> impl Iterator<Item = GlobalId> + '_ {
+    pub fn subscribe_ids(&self) -> impl Iterator<Item = Id> + '_ {
         self.sink_exports
             .iter()
             .filter_map(|(id, desc)| match desc.connection {
@@ -288,14 +290,14 @@ where
     /// if one only wants sources and indexes.
     ///
     /// This method is safe for mutually recursive view definitions.
-    pub fn depends_on(&self, collection_id: GlobalId) -> BTreeSet<GlobalId> {
+    pub fn depends_on(&self, collection_id: Id) -> BTreeSet<Id> {
         let mut out = BTreeSet::new();
         self.depends_on_into(collection_id, &mut out);
         out
     }
 
     /// Like `depends_on`, but appends to an existing `BTreeSet`.
-    pub fn depends_on_into(&self, collection_id: GlobalId, out: &mut BTreeSet<GlobalId>) {
+    pub fn depends_on_into(&self, collection_id: Id, out: &mut BTreeSet<Id>) {
         out.insert(collection_id);
         if self.source_imports.contains_key(&collection_id) {
             // The collection is provided by an imported source. Report the
@@ -582,9 +584,9 @@ pub type DataflowDesc = DataflowDescription<OptimizedMirRelationExpr, ()>;
 /// An index storing processed updates so they can be queried
 /// or reused in other computations
 #[derive(Arbitrary, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
-pub struct IndexDesc {
+pub struct IndexDesc<Id> {
     /// Identity of the collection the index is on.
-    pub on_id: GlobalId,
+    pub on_id: Id,
     /// Expressions to be arranged, in order of decreasing primacy.
     #[proptest(strategy = "proptest::collection::vec(any::<MirScalarExpr>(), 1..3)")]
     pub key: Vec<MirScalarExpr>,
