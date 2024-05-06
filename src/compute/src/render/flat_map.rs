@@ -104,8 +104,8 @@ where
         });
 
         use differential_dataflow::AsCollection;
-        let ok_collection = oks.as_collection();
-        let new_err_collection = errs.as_collection();
+        let ok_collection = oks.as_mz_collection();
+        let new_err_collection = errs.as_mz_collection();
         let err_collection = err_collection.concat(&new_err_collection);
         CollectionBundle::from_collections(ok_collection, err_collection)
     }

@@ -127,12 +127,12 @@ pub(super) fn construct<A: Allocate>(
         let stream_to_collection = |input: Stream<_, ((usize, ()), Timestamp, Diff)>, log, name| {
             let mut packer = PermutedRowPacker::new(log);
             input
-                .as_collection()
+                .as_mz_collection()
                 .mz_arrange_core::<_, KeyValSpine<_, _, _, _>>(
                     Pipeline,
                     &format!("PreArrange Differential {name}"),
                 )
-                .as_collection(move |op, ()| {
+                .as_mz_collection(move |op, ()| {
                     packer.pack_slice(&[
                         Datum::UInt64(u64::cast_from(*op)),
                         Datum::UInt64(u64::cast_from(worker_id)),

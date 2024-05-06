@@ -127,7 +127,7 @@ where
         ArrangementFlavor::Trace(_, oks, errs) => {
             let oks =
                 dispatch_threshold_arrangement_trace(&oks, "Threshold trace", |count| *count > 0);
-            let errs: KeyCollection<_, _, _> = errs.as_collection(|k, _| k.clone()).into();
+            let errs: KeyCollection<_, _, _> = errs.as_mz_collection(|k, _| k.clone()).into();
             let errs = errs.mz_arrange("Arrange threshold basic err");
             CollectionBundle::from_expressions(key, ArrangementFlavor::Local(oks, errs))
         }

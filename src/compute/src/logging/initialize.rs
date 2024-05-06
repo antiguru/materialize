@@ -11,7 +11,6 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use differential_dataflow::logging::DifferentialEvent;
-use differential_dataflow::Collection;
 use mz_compute_client::logging::{LogVariant, LoggingConfig};
 use mz_repr::{Diff, Timestamp};
 use mz_storage_types::errors::DataflowError;
@@ -22,6 +21,7 @@ use timely::progress::reachability::logging::TrackerEvent;
 
 use crate::arrangement::manager::{SpecializedTraceHandle, TraceBundle};
 use crate::extensions::arrange::{KeyCollection, MzArrange};
+use crate::extensions::MzCollection;
 use crate::logging::compute::ComputeEvent;
 use crate::logging::reachability::ReachabilityEvent;
 use crate::logging::{BatchLogger, EventQueue, SharedLoggingState};
@@ -121,7 +121,7 @@ impl<A: Allocate + 'static> LoggingContext<'_, A> {
             .worker
             .dataflow_named("Dataflow: logging errors", |scope| {
                 let collection: KeyCollection<_, DataflowError, Diff> =
-                    Collection::empty(scope).into();
+                    MzCollection::empty(scope).into();
                 collection.mz_arrange("Arrange logging err").trace
             });
 

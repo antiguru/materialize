@@ -15,6 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::extensions::MzCollection;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::Arranged;
 use differential_dataflow::trace::{BatchReader, Cursor, TraceReader};
@@ -90,7 +91,7 @@ where
                                     if err_dedup.insert((lookup_idx, lookup_key)) {
                                         inner_errs.push(
                                             errs.enter_region(inner)
-                                                .as_collection(|k, _v| k.clone()),
+                                                .as_mz_collection(|k, _v| k.clone()),
                                         );
                                     }
                                     Ok(oks.enter_region(inner))
@@ -99,7 +100,7 @@ where
                                     if err_dedup.insert((lookup_idx, lookup_key)) {
                                         inner_errs.push(
                                             errs.enter_region(inner)
-                                                .as_collection(|k, _v| k.clone()),
+                                                .as_mz_collection(|k, _v| k.clone()),
                                         );
                                     }
                                     Err(oks.enter_region(inner))
@@ -177,7 +178,7 @@ where
                     let mut update_stream = update_stream
                         .inner
                         .map(|(v, t, d)| ((v, t.clone()), t, d))
-                        .as_collection();
+                        .as_mz_collection();
 
                     // Repeatedly update `update_stream` to reflect joins with more and more
                     // other relations, in the specified order.
@@ -259,7 +260,7 @@ where
                     let mut update_stream = update_stream
                         .inner
                         .map(|((row, time), _, diff)| (row, time, diff))
-                        .as_collection();
+                        .as_mz_collection();
 
                     // We have completed the join building, but may have work remaining.
                     // For example, we may have expressions not pushed down (e.g. literals)
@@ -308,7 +309,7 @@ where
 
 /// Dispatches half-join construction according to arrangement type specialization.
 fn dispatch_build_halfjoin_local<G, CF>(
-    updates: Collection<G, (Row, G::Timestamp), Diff>,
+    updates: MzCollection<G, (Row, G::Timestamp), Diff>,
     trace: MzArrangement<G>,
     prev_key: Vec<MirScalarExpr>,
     prev_thinning: Vec<usize>,
@@ -316,8 +317,8 @@ fn dispatch_build_halfjoin_local<G, CF>(
     closure: JoinClosure,
     shutdown_token: ShutdownToken,
 ) -> (
-    Collection<G, (Row, G::Timestamp), Diff>,
-    Collection<G, DataflowError, Diff>,
+    MzCollection<G, (Row, G::Timestamp), Diff>,
+    MzCollection<G, DataflowError, Diff>,
 )
 where
     G: Scope,
@@ -339,7 +340,7 @@ where
 
 /// Dispatches half-join construction according to trace type specialization.
 fn dispatch_build_halfjoin_trace<G, T, CF>(
-    updates: Collection<G, (Row, G::Timestamp), Diff>,
+    updates: MzCollection<G, (Row, G::Timestamp), Diff>,
     trace: MzArrangementImport<G, T>,
     prev_key: Vec<MirScalarExpr>,
     prev_thinning: Vec<usize>,
@@ -347,8 +348,8 @@ fn dispatch_build_halfjoin_trace<G, T, CF>(
     closure: JoinClosure,
     shutdown_token: ShutdownToken,
 ) -> (
-    Collection<G, (Row, G::Timestamp), Diff>,
-    Collection<G, DataflowError, Diff>,
+    MzCollection<G, (Row, G::Timestamp), Diff>,
+    MzCollection<G, DataflowError, Diff>,
 )
 where
     G: Scope,
@@ -380,7 +381,7 @@ where
 /// the time of the update. This is crucial for correctness, as the total order on times of updates is used
 /// to ensure that any two updates are matched at most once.
 fn build_halfjoin<G, Tr, CF>(
-    updates: Collection<G, (Row, G::Timestamp), Diff>,
+    updates: MzCollection<G, (Row, G::Timestamp), Diff>,
     trace: Arranged<G, Tr>,
     prev_key: Vec<MirScalarExpr>,
     prev_thinning: Vec<usize>,
@@ -388,8 +389,8 @@ fn build_halfjoin<G, Tr, CF>(
     closure: JoinClosure,
     shutdown_token: ShutdownToken,
 ) -> (
-    Collection<G, (Row, G::Timestamp), Diff>,
-    Collection<G, DataflowError, Diff>,
+    MzCollection<G, (Row, G::Timestamp), Diff>,
+    MzCollection<G, DataflowError, Diff>,
 )
 where
     G: Scope,
@@ -462,7 +463,7 @@ where
         )
         .inner
         .ok_err(|(data_time, init_time, diff)| {
-            // TODO(mcsherry): consider `ok_err()` for `Collection`.
+            // TODO(mcsherry): consider `ok_err()` for `MzCollection`.
             match data_time {
                 (Ok(data), time) => Ok((data.map(|data| (data, time)), init_time, diff)),
                 (Err(err), _time) => Err((DataflowError::from(err), init_time, diff)),
@@ -470,8 +471,8 @@ where
         });
 
         (
-            oks.as_collection().flat_map(|x| x),
-            errs.concat(&errs2.as_collection()),
+            oks.as_mz_collection().flat_map(|x| x),
+            errs.concat(&errs2.as_mz_collection()),
         )
     } else {
         let oks = dogsdogsdogs::operators::half_join::half_join_internal_unsafe(
@@ -521,7 +522,10 @@ fn dispatch_build_update_stream_local<G>(
     as_of: Antichain<mz_repr::Timestamp>,
     source_relation: usize,
     initial_closure: JoinClosure,
-) -> (Collection<G, Row, Diff>, Collection<G, DataflowError, Diff>)
+) -> (
+    MzCollection<G, Row, Diff>,
+    MzCollection<G, DataflowError, Diff>,
+)
 where
     G: Scope,
     G::Timestamp: crate::render::RenderTimestamp,
@@ -653,7 +657,7 @@ where
             });
 
     (
-        ok_stream.as_collection(),
-        err_stream.as_collection().map(DataflowError::from),
+        ok_stream.as_mz_collection(),
+        err_stream.as_mz_collection().map(DataflowError::from),
     )
 }

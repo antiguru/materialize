@@ -31,6 +31,7 @@ use timely::dataflow::Scope;
 use timely::progress::timestamp::{Refines, Timestamp};
 
 use crate::extensions::arrange::MzArrange;
+use crate::extensions::MzCollection;
 use crate::render::context::{
     ArrangementFlavor, CollectionBundle, Context, MzArrangement, MzArrangementImport, ShutdownToken,
 };
@@ -95,7 +96,7 @@ impl LinearJoinSpec {
         arranged2: &Arranged<G, Tr2>,
         shutdown_token: ShutdownToken,
         result: L,
-    ) -> Collection<G, I::Item, Diff>
+    ) -> MzCollection<G, I::Item, Diff>
     where
         G: Scope,
         G::Timestamp: Lattice,
@@ -191,7 +192,7 @@ where
     T: Timestamp + Lattice + Columnation,
 {
     /// Streamed data as a collection.
-    Collection(Collection<G, Row, Diff>),
+    Collection(MzCollection<G, Row, Diff>),
     /// A dataflow-local arrangement.
     Local(MzArrangement<G>),
     /// An imported arrangement.
@@ -223,11 +224,11 @@ where
             // We can use an arrangement if it exists and an initial closure does not.
             let mut joined = match (arrangement, linear_plan.initial_closure) {
                 (Some(ArrangementFlavor::Local(oks, errs)), None) => {
-                    errors.push(errs.as_collection(|k, _v| k.clone()).enter_region(inner));
+                    errors.push(errs.as_mz_collection(|k, _v| k.clone()).enter_region(inner));
                     JoinedFlavor::Local(oks.enter_region(inner))
                 }
                 (Some(ArrangementFlavor::Trace(_gid, oks, errs)), None) => {
-                    errors.push(errs.as_collection(|k, _v| k.clone()).enter_region(inner));
+                    errors.push(errs.as_mz_collection(|k, _v| k.clone()).enter_region(inner));
                     JoinedFlavor::Trace(oks.enter_region(inner))
                 }
                 (_, initial_closure) => {
@@ -331,8 +332,8 @@ where
             closure,
             lookup_relation: _,
         }: LinearStagePlan,
-        errors: &mut Vec<Collection<S, DataflowError, Diff>>,
-    ) -> Collection<S, Row, Diff>
+        errors: &mut Vec<MzCollection<S, DataflowError, Diff>>,
+    ) -> MzCollection<S, Row, Diff>
     where
         S: Scope<Timestamp = G::Timestamp>,
     {
@@ -390,7 +391,7 @@ where
                             ),
                     };
 
-                    errors.push(errs1.as_collection(|k, _v| k.clone()));
+                    errors.push(errs1.as_mz_collection(|k, _v| k.clone()));
                     errors.extend(errs2);
                     oks
                 }
@@ -402,7 +403,7 @@ where
                             ),
                     };
 
-                    errors.push(errs1.as_collection(|k, _v| k.clone()));
+                    errors.push(errs1.as_mz_collection(|k, _v| k.clone()));
                     errors.extend(errs2);
                     oks
                 }
@@ -416,7 +417,7 @@ where
                             ),
                     };
 
-                    errors.push(errs1.as_collection(|k, _v| k.clone()));
+                    errors.push(errs1.as_mz_collection(|k, _v| k.clone()));
                     errors.extend(errs2);
                     oks
                 }
@@ -428,7 +429,7 @@ where
                             ),
                     };
 
-                    errors.push(errs1.as_collection(|k, _v| k.clone()));
+                    errors.push(errs1.as_mz_collection(|k, _v| k.clone()));
                     errors.extend(errs2);
                     oks
                 }
@@ -448,8 +449,8 @@ where
         next_input: Arranged<S, Tr2>,
         closure: JoinClosure,
     ) -> (
-        Collection<S, Row, Diff>,
-        Option<Collection<S, DataflowError, Diff>>,
+        MzCollection<S, Row, Diff>,
+        Option<MzCollection<S, DataflowError, Diff>>,
     )
     where
         S: Scope<Timestamp = G::Timestamp>,
@@ -493,14 +494,14 @@ where
                 )
                 .inner
                 .ok_err(|(x, t, d)| {
-                    // TODO(mcsherry): consider `ok_err()` for `Collection`.
+                    // TODO(mcsherry): consider `ok_err()` for `MzCollection`.
                     match x {
                         Ok(x) => Ok((x, t, d)),
                         Err(x) => Err((x, t, d)),
                     }
                 });
 
-            (oks.as_collection(), Some(err.as_collection()))
+            (oks.as_mz_collection(), Some(err.as_mz_collection()))
         } else {
             let oks = self.linear_join_spec.render(
                 &prev_keyed,

@@ -44,6 +44,7 @@ use tracing::warn;
 
 use crate::extensions::arrange::{ArrangementSize, KeyCollection, MzArrange};
 use crate::extensions::reduce::{MzReduce, ReduceExt};
+use crate::extensions::MzCollection;
 use crate::render::context::{CollectionBundle, Context, MzArrangement};
 use crate::render::errors::MaybeValidatingRow;
 use crate::render::reduce::monoids::{get_monoid, ReductionMonoid};
@@ -153,7 +154,7 @@ where
 
             // Demux out the potential errors from key and value selector evaluation.
             let (ok, mut err) = key_val_input
-                .as_collection()
+                .as_mz_collection()
                 .consolidate_stream()
                 .flat_map_fallible("OkErrDemux", Some);
 
@@ -173,8 +174,8 @@ where
     fn render_reduce_plan<S>(
         &self,
         plan: ReducePlan,
-        collection: Collection<S, (Row, Row), Diff>,
-        err_input: Collection<S, DataflowError, Diff>,
+        collection: MzCollection<S, (Row, Row), Diff>,
+        err_input: MzCollection<S, DataflowError, Diff>,
         key_arity: usize,
         mfp_after: Option<SafeMfpPlan>,
     ) -> CollectionBundle<S, T>
@@ -194,8 +195,8 @@ where
     fn render_reduce_plan_inner<S>(
         &self,
         plan: ReducePlan,
-        collection: Collection<S, (Row, Row), Diff>,
-        errors: &mut Vec<Collection<S, DataflowError, Diff>>,
+        collection: MzCollection<S, (Row, Row), Diff>,
+        errors: &mut Vec<MzCollection<S, DataflowError, Diff>>,
         key_arity: usize,
         mfp_after: Option<SafeMfpPlan>,
     ) -> MzArrangement<S>
@@ -296,7 +297,7 @@ where
         aggregate_types: Vec<ReductionType>,
         scope: &mut S,
         mfp_after: Option<SafeMfpPlan>,
-    ) -> (RowRowArrangement<S>, Collection<S, DataflowError, Diff>)
+    ) -> (RowRowArrangement<S>, MzCollection<S, DataflowError, Diff>)
     where
         S: Scope<Timestamp = G::Timestamp>,
     {
@@ -314,7 +315,7 @@ where
 
         // First, lets collect all results into a single collection.
         for (reduction_type, arrangement) in arrangements.into_iter() {
-            let collection = arrangement.as_collection(move |key, val| {
+            let collection = arrangement.as_mz_collection(move |key, val| {
                 (key.into_owned(), (reduction_type, val.into_owned()))
             });
             to_concat.push(collection);
@@ -480,14 +481,14 @@ where
                     }
                 },
             );
-        (oks, errs.as_collection(|_, v| v.into_owned()))
+        (oks, errs.as_mz_collection(|_, v| v.into_owned()))
     }
 
     fn dispatch_build_distinct<S>(
         &self,
-        collection: Collection<S, (Row, Row), Diff>,
+        collection: MzCollection<S, (Row, Row), Diff>,
         mfp_after: Option<SafeMfpPlan>,
-    ) -> (MzArrangement<S>, Collection<S, DataflowError, Diff>)
+    ) -> (MzArrangement<S>, MzCollection<S, DataflowError, Diff>)
     where
         S: Scope<Timestamp = G::Timestamp>,
     {
@@ -499,12 +500,12 @@ where
     /// Build the dataflow to compute the set of distinct keys.
     fn build_distinct<T1, T2, S>(
         &self,
-        collection: Collection<S, (Row, T1::ValOwned), Diff>,
+        collection: MzCollection<S, (Row, T1::ValOwned), Diff>,
         tag: &str,
         mfp_after: Option<SafeMfpPlan>,
     ) -> (
         Arranged<S, TraceAgent<T1>>,
-        Collection<S, DataflowError, Diff>,
+        MzCollection<S, DataflowError, Diff>,
     )
     where
         S: Scope<Timestamp = G::Timestamp>,
@@ -586,7 +587,7 @@ where
                     }
                 },
             );
-        (output, errors.as_collection(|_k, v| v.into_owned()))
+        (output, errors.as_mz_collection(|_k, v| v.into_owned()))
     }
 
     /// Build the dataflow to compute and arrange multiple non-accumulable,
@@ -598,11 +599,11 @@ where
     /// in the order specified by `aggrs`.
     fn build_basic_aggregates<S>(
         &self,
-        input: Collection<S, (Row, Row), Diff>,
+        input: MzCollection<S, (Row, Row), Diff>,
         aggrs: Vec<(usize, AggregateExpr)>,
         key_arity: usize,
         mfp_after: Option<SafeMfpPlan>,
-    ) -> (RowRowArrangement<S>, Collection<S, DataflowError, Diff>)
+    ) -> (RowRowArrangement<S>, MzCollection<S, DataflowError, Diff>)
     where
         S: Scope<Timestamp = G::Timestamp>,
     {
@@ -629,7 +630,9 @@ where
                 err_output = errs
             }
             to_collect.push(
-                result.as_collection(move |key, val| (key.into_owned(), (index, val.into_owned()))),
+                result.as_mz_collection(move |key, val| {
+                    (key.into_owned(), (index, val.into_owned()))
+                }),
             );
         }
 
@@ -689,7 +692,7 @@ where
                         }
                     },
                 )
-                .as_collection(|_, v| v.into_owned());
+                .as_mz_collection(|_, v| v.into_owned());
             (output, validation_errs.concat(&mfp_errs))
         } else {
             (output, validation_errs)
@@ -701,7 +704,7 @@ where
     /// This method also applies distinctness if required.
     fn build_basic_aggregate<S>(
         &self,
-        input: Collection<S, (Row, Row), Diff>,
+        input: MzCollection<S, (Row, Row), Diff>,
         index: usize,
         aggr: &AggregateExpr,
         validating: bool,
@@ -709,7 +712,7 @@ where
         mfp_after: Option<SafeMfpPlan>,
     ) -> (
         RowRowArrangement<S>,
-        Option<Collection<S, DataflowError, Diff>>,
+        Option<MzCollection<S, DataflowError, Diff>>,
     )
     where
         S: Scope<Timestamp = G::Timestamp>,
@@ -739,7 +742,7 @@ where
             if validating {
                 let (oks, errs) = self
                     .build_reduce_inaccumulable_distinct::<_, RowValSpine<Result<(), String>, _, _>>(keyed, None)
-                    .as_collection(|k, v| (k.into_owned(), v.into_owned()))
+                    .as_mz_collection(|k, v| (k.into_owned(), v.into_owned()))
                     .map_fallible("Demux Errors", move |(key_val, result)| match result {
                         Ok(()) => Ok(pairer.split(&key_val)),
                         Err(m) => Err(EvalError::Internal(m).into()),
@@ -752,7 +755,7 @@ where
                         keyed,
                         Some(" [val: empty]"),
                     )
-                    .as_collection(move |key_val_iter, _| pairer.split(key_val_iter));
+                    .as_mz_collection(move |key_val_iter, _| pairer.split(key_val_iter));
             }
         }
 
@@ -851,7 +854,7 @@ where
                         }
                     },
                 )
-                .as_collection(|_, v| v.into_owned());
+                .as_mz_collection(|_, v| v.into_owned());
             if let Some(e) = err_output {
                 err_output = Some(e.concat(&errs));
             } else {
@@ -863,7 +866,7 @@ where
 
     fn build_reduce_inaccumulable_distinct<S, Tr>(
         &self,
-        input: Collection<S, Row, Diff>,
+        input: MzCollection<S, Row, Diff>,
         name_tag: Option<&str>,
     ) -> Arranged<S, TraceAgent<Tr>>
     where
@@ -971,7 +974,7 @@ where
                             &input,
                             aggr_funcs.clone(),
                         )
-                        .as_collection(|k, v| (SharedRow::pack(k), v.clone()))
+                        .as_mz_collection(|k, v| (SharedRow::pack(k), v.clone()))
                         .map_fallible("Checked Invalid Accumulations", |(hash_key, result)| {
                             match result {
                                 Err(hash_key) => {
@@ -994,7 +997,7 @@ where
                         &input,
                         aggr_funcs.clone(),
                     )
-                    .as_collection(|k, v| {
+                    .as_mz_collection(|k, v| {
                         let binding = SharedRow::get();
                         let mut row_builder = binding.borrow_mut();
                         let key = row_builder.pack_using(k);
@@ -1079,7 +1082,7 @@ where
                             }
                         },
                     )
-                    .as_collection(|_, v| v.into_owned())
+                    .as_mz_collection(|_, v| v.into_owned())
                     .leave_region();
                 if let Some(e) = &err_output {
                     err_output = Some(e.concat(&errs));
@@ -1313,7 +1316,7 @@ where
                         }
                     }
                 })
-                .as_collection(|_k, v| v.clone());
+                .as_mz_collection(|_k, v| v.clone());
             (output, validation_errs.concat(&mfp_errs))
         } else {
             (output, validation_errs)
@@ -1413,7 +1416,7 @@ where
                     "Reduced Accumulable Distinct [val: empty]",
                     move |_k, _s, t| t.push(((), 1)),
                 )
-                .as_collection(move |key_val_iter, _| pairer.split(key_val_iter))
+                .as_mz_collection(move |key_val_iter, _| pairer.split(key_val_iter))
                 .explode_one({
                     let zero_diffs = zero_diffs.clone();
                     move |(key, row)| {
@@ -1526,7 +1529,7 @@ where
             );
         (
             arranged_output,
-            arranged_errs.as_collection(|_key, error| error.into_owned()),
+            arranged_errs.as_mz_collection(|_key, error| error.into_owned()),
         )
     }
 }

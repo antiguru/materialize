@@ -40,6 +40,7 @@ use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use crate::extensions::MzCollection;
 use differential_dataflow::consolidation::consolidate_updates;
 use differential_dataflow::difference::Multiply;
 use differential_dataflow::lattice::Lattice;
@@ -71,7 +72,7 @@ pub(super) fn mz_join_core<G, Tr1, Tr2, L, I, YFn>(
     shutdown_token: ShutdownToken,
     mut result: L,
     yield_fn: YFn,
-) -> Collection<G, I::Item, Diff>
+) -> MzCollection<G, I::Item, Diff>
 where
     G: Scope,
     G::Timestamp: Lattice,
@@ -529,7 +530,7 @@ where
                 }
             },
         )
-        .as_collection()
+        .as_mz_collection()
 }
 
 /// Deferred join computation.

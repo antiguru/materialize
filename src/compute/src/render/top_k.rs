@@ -37,6 +37,7 @@ use timely::dataflow::Scope;
 
 use crate::extensions::arrange::{ArrangementSize, KeyCollection, MzArrange};
 use crate::extensions::reduce::MzReduce;
+use crate::extensions::MzCollection;
 use crate::render::context::{CollectionBundle, Context};
 use crate::render::errors::MaybeValidatingRow;
 use crate::render::Pairer;
@@ -239,14 +240,17 @@ where
     /// Constructs a TopK dataflow subgraph.
     fn build_topk<S>(
         &self,
-        collection: Collection<S, Row, Diff>,
+        collection: MzCollection<S, Row, Diff>,
         group_key: Vec<usize>,
         order_key: Vec<mz_expr::ColumnOrder>,
         offset: usize,
         limit: Option<mz_expr::MirScalarExpr>,
         arity: usize,
         buckets: Vec<u64>,
-    ) -> (Collection<S, Row, Diff>, Collection<S, DataflowError, Diff>)
+    ) -> (
+        MzCollection<S, Row, Diff>,
+        MzCollection<S, DataflowError, Diff>,
+    )
     where
         S: Scope<Timestamp = G::Timestamp>,
     {
@@ -265,7 +269,7 @@ where
         });
 
         let mut validating = true;
-        let mut err_collection: Option<Collection<S, _, _>> = None;
+        let mut err_collection: Option<MzCollection<S, _, _>> = None;
 
         if let Some(mut limit) = limit.clone() {
             // We may need a new `limit` that reflects the addition of `offset`.
@@ -341,7 +345,7 @@ where
     // a larger number of arrangements when this optimization does nothing beneficial.
     fn build_topk_stage<S>(
         &self,
-        collection: Collection<S, (Row, Row), Diff>,
+        collection: MzCollection<S, (Row, Row), Diff>,
         order_key: Vec<mz_expr::ColumnOrder>,
         modulus: u64,
         offset: usize,
@@ -349,8 +353,8 @@ where
         arity: usize,
         validating: bool,
     ) -> (
-        Collection<S, (Row, Row), Diff>,
-        Option<Collection<S, DataflowError, Diff>>,
+        MzCollection<S, (Row, Row), Diff>,
+        Option<MzCollection<S, DataflowError, Diff>>,
     )
     where
         S: Scope<Timestamp = G::Timestamp>,
@@ -366,7 +370,7 @@ where
             let stage = build_topk_negated_stage::<S, RowValSpine<Result<Row, Row>, _, _>>(
                 &input, order_key, offset, limit, arity,
             )
-            .as_collection(|k, v| (SharedRow::pack(k), v.clone()));
+            .as_mz_collection(|k, v| (SharedRow::pack(k), v.clone()));
 
             let error_logger = self.error_logger();
             let (oks, errs) =
@@ -387,7 +391,7 @@ where
                 build_topk_negated_stage::<S, RowRowSpine<_, _>>(
                     &input, order_key, offset, limit, arity,
                 )
-                .as_collection(|k, v| {
+                .as_mz_collection(|k, v| {
                     let binding = SharedRow::get();
                     let mut row_builder = binding.borrow_mut();
                     let key = row_builder.pack_using(k);
@@ -407,11 +411,14 @@ where
 
     fn render_top1_monotonic<S>(
         &self,
-        collection: Collection<S, Row, Diff>,
+        collection: MzCollection<S, Row, Diff>,
         group_key: Vec<usize>,
         order_key: Vec<mz_expr::ColumnOrder>,
         must_consolidate: bool,
-    ) -> (Collection<S, Row, Diff>, Collection<S, DataflowError, Diff>)
+    ) -> (
+        MzCollection<S, Row, Diff>,
+        MzCollection<S, DataflowError, Diff>,
+    )
     where
         S: Scope<Timestamp = G::Timestamp>,
     {
@@ -467,7 +474,7 @@ where
             });
         // TODO(#7331): Here we discard the arranged output.
         use differential_dataflow::trace::cursor::MyTrait;
-        (result.as_collection(|_k, v| v.into_owned()), errs)
+        (result.as_mz_collection(|_k, v| v.into_owned()), errs)
     }
 }
 
@@ -688,7 +695,7 @@ where
                 });
             },
         )
-        .as_collection()
+        .as_mz_collection()
 }
 
 /// Types for in-place intra-ts aggregation of monotonic streams.

@@ -9,11 +9,12 @@
 
 use std::rc::Rc;
 
+use crate::extensions::MzCollection;
 use differential_dataflow::difference::Semigroup;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::{Arrange, Arranged, TraceAgent};
 use differential_dataflow::trace::{Batch, Batcher, Trace, TraceReader};
-use differential_dataflow::{Collection, Data, ExchangeData, Hashable};
+use differential_dataflow::{Data, ExchangeData, Hashable};
 use timely::container::columnation::Columnation;
 use timely::dataflow::channels::pact::{ParallelizationContract, Pipeline};
 use timely::dataflow::operators::Operator;
@@ -88,7 +89,7 @@ where
         Arranged<Self::Scope, TraceAgent<Tr>>: ArrangementSize;
 }
 
-impl<G, K, V, R> MzArrange for Collection<G, (K, V), R>
+impl<G, K, V, R> MzArrange for MzCollection<G, (K, V), R>
 where
     G: Scope,
     G::Timestamp: Lattice,
@@ -112,8 +113,13 @@ where
         Arranged<G, TraceAgent<Tr>>: ArrangementSize,
     {
         // Allow access to `arrange_named` because we're within Mz's wrapper.
-        #[allow(clippy::disallowed_methods)]
-        self.arrange_named(name).log_arrangement_size()
+        match self {
+            MzCollection::Collection(collection) =>
+            {
+                #[allow(clippy::disallowed_methods)]
+                collection.arrange_named(name).log_arrangement_size()
+            }
+        }
     }
 
     fn mz_arrange_core<P, Tr>(&self, pact: P, name: &str) -> Arranged<G, TraceAgent<Tr>>
@@ -131,12 +137,17 @@ where
         Arranged<G, TraceAgent<Tr>>: ArrangementSize,
     {
         // Allow access to `arrange_named` because we're within Mz's wrapper.
-        #[allow(clippy::disallowed_methods)]
-        differential_dataflow::operators::arrange::arrangement::arrange_core(
-            &self.inner,
-            pact,
-            name,
-        )
+        match self {
+            MzCollection::Collection(collection) =>
+            {
+                #[allow(clippy::disallowed_methods)]
+                differential_dataflow::operators::arrange::arrangement::arrange_core(
+                    &collection.inner,
+                    pact,
+                    name,
+                )
+            }
+        }
         .log_arrangement_size()
     }
 }
@@ -144,10 +155,10 @@ where
 /// A specialized collection where data only has a key, but no associated value.
 ///
 /// Created by calling `collection.into()`.
-pub struct KeyCollection<G: Scope, K, R: Semigroup = usize>(Collection<G, K, R>);
+pub struct KeyCollection<G: Scope, K, R: Semigroup = usize>(MzCollection<G, K, R>);
 
-impl<G: Scope, K, R: Semigroup> From<Collection<G, K, R>> for KeyCollection<G, K, R> {
-    fn from(value: Collection<G, K, R>) -> Self {
+impl<G: Scope, K, R: Semigroup> From<MzCollection<G, K, R>> for KeyCollection<G, K, R> {
+    fn from(value: MzCollection<G, K, R>) -> Self {
         KeyCollection(value)
     }
 }

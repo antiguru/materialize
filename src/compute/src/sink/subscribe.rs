@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::ops::DerefMut;
 use std::rc::Rc;
 
+use crate::extensions::MzCollection;
 use differential_dataflow::consolidation::consolidate_updates;
 use differential_dataflow::Collection;
 use mz_compute_client::protocol::response::{SubscribeBatch, SubscribeResponse};
@@ -40,8 +41,8 @@ where
         sink_id: GlobalId,
         as_of: Antichain<Timestamp>,
         _start_signal: StartSignal,
-        sinked_collection: Collection<G, Row, Diff>,
-        err_collection: Collection<G, DataflowError, Diff>,
+        sinked_collection: MzCollection<G, Row, Diff>,
+        err_collection: MzCollection<G, DataflowError, Diff>,
     ) -> Option<Rc<dyn Any>> {
         // An encapsulation of the Subscribe response protocol.
         // Used to send rows and progress messages,
@@ -77,8 +78,8 @@ where
 }
 
 fn subscribe<G>(
-    sinked_collection: Collection<G, Row, Diff>,
-    err_collection: Collection<G, DataflowError, Diff>,
+    sinked_collection: MzCollection<G, Row, Diff>,
+    err_collection: MzCollection<G, DataflowError, Diff>,
     sink_id: GlobalId,
     with_snapshot: bool,
     as_of: Antichain<G::Timestamp>,

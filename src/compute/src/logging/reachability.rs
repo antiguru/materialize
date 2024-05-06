@@ -25,6 +25,7 @@ use timely::communication::Allocate;
 use timely::dataflow::operators::Filter;
 
 use crate::extensions::arrange::MzArrange;
+use crate::extensions::AsMzCollection;
 use crate::logging::{EventQueue, LogCollection, LogVariant, TimelyLog};
 use crate::typedefs::{KeyValSpine, RowRowSpine};
 
@@ -101,7 +102,7 @@ pub(super) fn construct<A: Allocate>(
         });
 
         let updates = updates
-            .as_collection()
+            .as_mz_collection()
             .mz_arrange_core::<_, KeyValSpine<_, _, _, _>>(
                 Pipeline,
                 "PreArrange Timely reachability",
@@ -120,7 +121,7 @@ pub(super) fn construct<A: Allocate>(
                 );
 
                 let updates =
-                    updates.as_collection(move |(update_type, addr, source, port, ts), _| {
+                    updates.as_mz_collection(move |(update_type, addr, source, port, ts), _| {
                         let row_arena = RowArena::default();
                         let update_type = if *update_type { "source" } else { "target" };
                         let binding = SharedRow::get();

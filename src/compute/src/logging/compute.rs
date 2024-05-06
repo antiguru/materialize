@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use differential_dataflow::collection::AsCollection;
 use differential_dataflow::trace::{BatchReader, Cursor};
-use differential_dataflow::Collection;
 use mz_ore::cast::CastFrom;
 use mz_repr::{Datum, Diff, GlobalId, Timestamp};
 use mz_timely_util::replay::MzReplay;
@@ -36,6 +35,7 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::extensions::arrange::MzArrange;
+use crate::extensions::MzCollection;
 use crate::logging::{
     ComputeLog, EventQueue, LogCollection, LogVariant, PermutedRowPacker, SharedLoggingState,
 };
@@ -261,7 +261,7 @@ pub(super) fn construct<A: Allocate + 'static>(
 
         // Encode the contents of each logging stream into its expected `Row` format.
         let mut packer = PermutedRowPacker::new(ComputeLog::DataflowCurrent);
-        let dataflow_current = export.as_collection().map({
+        let dataflow_current = export.as_mz_collection().map({
             let mut scratch = String::new();
             move |datum| {
                 packer.pack_slice(&[
@@ -272,7 +272,7 @@ pub(super) fn construct<A: Allocate + 'static>(
             }
         });
         let mut packer = PermutedRowPacker::new(ComputeLog::FrontierCurrent);
-        let frontier_current = frontier.as_collection().map({
+        let frontier_current = frontier.as_mz_collection().map({
             let mut scratch = String::new();
             move |datum| {
                 packer.pack_slice(&[
@@ -283,7 +283,7 @@ pub(super) fn construct<A: Allocate + 'static>(
             }
         });
         let mut packer = PermutedRowPacker::new(ComputeLog::ImportFrontierCurrent);
-        let import_frontier_current = import_frontier.as_collection().map({
+        let import_frontier_current = import_frontier.as_mz_collection().map({
             let mut scratch1 = String::new();
             let mut scratch2 = String::new();
             move |datum| {
@@ -296,7 +296,7 @@ pub(super) fn construct<A: Allocate + 'static>(
             }
         });
         let mut packer = PermutedRowPacker::new(ComputeLog::PeekCurrent);
-        let peek_current = peek.as_collection().map({
+        let peek_current = peek.as_mz_collection().map({
             let mut scratch = String::new();
             move |PeekDatum { peek, peek_type }| {
                 packer.pack_slice(&[
@@ -311,7 +311,7 @@ pub(super) fn construct<A: Allocate + 'static>(
         let mut packer = PermutedRowPacker::new(ComputeLog::PeekDuration);
         let peek_duration =
             peek_duration
-                .as_collection()
+                .as_mz_collection()
                 .map(move |PeekDurationDatum { peek_type, bucket }| {
                     packer.pack_slice(&[
                         Datum::UInt64(u64::cast_from(worker_id)),
@@ -320,7 +320,7 @@ pub(super) fn construct<A: Allocate + 'static>(
                     ])
                 });
         let mut packer = PermutedRowPacker::new(ComputeLog::ShutdownDuration);
-        let shutdown_duration = shutdown_duration.as_collection().map(move |bucket| {
+        let shutdown_duration = shutdown_duration.as_mz_collection().map(move |bucket| {
             packer.pack_slice(&[
                 Datum::UInt64(u64::cast_from(worker_id)),
                 Datum::UInt64(bucket.try_into().expect("bucket too big")),
@@ -337,21 +337,21 @@ pub(super) fn construct<A: Allocate + 'static>(
 
         let mut packer = PermutedRowPacker::new(ComputeLog::ArrangementHeapSize);
         let arrangement_heap_size = arrangement_heap_size
-            .as_collection()
+            .as_mz_collection()
             .map(move |d| arrangement_heap_datum_to_row(&mut packer, d));
 
         let mut packer = PermutedRowPacker::new(ComputeLog::ArrangementHeapCapacity);
         let arrangement_heap_capacity = arrangement_heap_capacity
-            .as_collection()
+            .as_mz_collection()
             .map(move |d| arrangement_heap_datum_to_row(&mut packer, d));
 
         let mut packer = PermutedRowPacker::new(ComputeLog::ArrangementHeapSize);
         let arrangement_heap_allocations = arrangement_heap_allocations
-            .as_collection()
+            .as_mz_collection()
             .map(move |d| arrangement_heap_datum_to_row(&mut packer, d));
 
         let mut packer = PermutedRowPacker::new(ComputeLog::ErrorCount);
-        let error_count = error_count.as_collection().map({
+        let error_count = error_count.as_mz_collection().map({
             let mut scratch = String::new();
             move |datum| {
                 packer.pack_slice(&[
@@ -962,7 +962,7 @@ pub(crate) trait LogDataflowErrors {
     fn log_dataflow_errors(self, logger: Logger, export_id: GlobalId) -> Self;
 }
 
-impl<G, D> LogDataflowErrors for Collection<G, D, Diff>
+impl<G, D> LogDataflowErrors for MzCollection<G, D, Diff>
 where
     G: Scope,
     D: Data,
@@ -982,7 +982,7 @@ where
                     });
                 }
             })
-            .as_collection()
+            .as_mz_collection()
     }
 }
 

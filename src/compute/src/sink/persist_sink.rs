@@ -39,6 +39,7 @@ use timely::PartialOrder;
 use tracing::trace;
 
 use crate::compute_state::ComputeState;
+use crate::extensions::MzCollection;
 use crate::render::sinks::SinkRender;
 use crate::render::StartSignal;
 use crate::sink::correction::Correction;
@@ -55,8 +56,8 @@ where
         sink_id: GlobalId,
         as_of: Antichain<Timestamp>,
         start_signal: StartSignal,
-        mut ok_collection: Collection<G, Row, Diff>,
-        mut err_collection: Collection<G, DataflowError, Diff>,
+        mut ok_collection: MzCollection<G, Row, Diff>,
+        mut err_collection: MzCollection<G, DataflowError, Diff>,
     ) -> Option<Rc<dyn Any>> {
         // If a `RefreshSchedule` was specified, round up timestamps.
         if let Some(refresh_schedule) = &sink.refresh_schedule {
@@ -85,8 +86,8 @@ where
 pub(crate) fn persist_sink<G>(
     sink_id: GlobalId,
     target: &CollectionMetadata,
-    ok_collection: Collection<G, Row, Diff>,
-    err_collection: Collection<G, DataflowError, Diff>,
+    ok_collection: MzCollection<G, Row, Diff>,
+    err_collection: MzCollection<G, DataflowError, Diff>,
     as_of: Antichain<Timestamp>,
     compute_state: &mut ComputeState,
     start_signal: StartSignal,

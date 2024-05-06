@@ -28,6 +28,7 @@ use timely::dataflow::Scope;
 use timely::progress::Antichain;
 
 use crate::compute_state::SinkToken;
+use crate::extensions::MzCollection;
 use crate::logging::compute::LogDataflowErrors;
 use crate::render::context::Context;
 use crate::render::{RenderTimestamp, StartSignal};
@@ -63,7 +64,7 @@ where
         // TODO[btv] - We should determine the key and permutation to use during planning,
         // rather than at runtime.
         //
-        // This is basically an inlined version of the old `as_collection`.
+        // This is basically an inlined version of the old `as_mz_collection`.
         let bundle = self
             .lookup_id(mz_expr::Id::Global(sink.from))
             .expect("Sink source collection not loaded");
@@ -161,8 +162,8 @@ where
         sink_id: GlobalId,
         as_of: Antichain<mz_repr::Timestamp>,
         start_signal: StartSignal,
-        sinked_collection: Collection<G, Row, Diff>,
-        err_collection: Collection<G, DataflowError, Diff>,
+        sinked_collection: MzCollection<G, Row, Diff>,
+        err_collection: MzCollection<G, DataflowError, Diff>,
     ) -> Option<Rc<dyn Any>>;
 }
 

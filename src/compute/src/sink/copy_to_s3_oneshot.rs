@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::ops::DerefMut;
 use std::rc::Rc;
 
+use crate::extensions::MzCollection;
 use differential_dataflow::{Collection, Hashable};
 use mz_compute_client::protocol::response::CopyToResponse;
 use mz_compute_types::dyncfgs::{
@@ -43,8 +44,8 @@ where
         sink_id: GlobalId,
         _as_of: Antichain<Timestamp>,
         _start_signal: StartSignal,
-        sinked_collection: Collection<G, Row, Diff>,
-        err_collection: Collection<G, DataflowError, Diff>,
+        sinked_collection: MzCollection<G, Row, Diff>,
+        err_collection: MzCollection<G, DataflowError, Diff>,
     ) -> Option<Rc<dyn Any>> {
         // An encapsulation of the copy to response protocol.
         // Used to send rows and errors if this fails.

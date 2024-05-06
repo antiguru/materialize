@@ -7,6 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use crate::extensions::MzCollection;
 use differential_dataflow::{AsCollection, Collection, Data};
 use mz_expr::refresh_schedule::RefreshSchedule;
 use mz_ore::soft_panic_or_log;
@@ -24,9 +25,9 @@ use timely::progress::Antichain;
 /// Note that this currently only works with 1-dim timestamps. (This is not an issue for WMR,
 /// because iteration numbers should disappear by the time the data gets to the Persist sink.)
 pub(crate) fn apply_refresh<G, D>(
-    coll: Collection<G, D, Diff>,
+    coll: MzCollection<G, D, Diff>,
     refresh_schedule: RefreshSchedule,
-) -> Collection<G, D, Diff>
+) -> MzCollection<G, D, Diff>
 where
     G: Scope<Timestamp = Timestamp>,
     D: Data,
@@ -125,5 +126,5 @@ where
         }
     });
 
-    output_stream.as_collection()
+    output_stream.as_mz_collection()
 }

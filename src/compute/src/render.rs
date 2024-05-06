@@ -114,7 +114,7 @@ use differential_dataflow::dynamic::pointstamp::PointStamp;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::{Arranged, TraceAgent};
 use differential_dataflow::trace::{Batch, Batcher, Trace, TraceReader};
-use differential_dataflow::{AsCollection, Collection, Data, ExchangeData, Hashable};
+use differential_dataflow::{AsCollection, Data, ExchangeData, Hashable};
 use futures::channel::oneshot;
 use futures::FutureExt;
 use mz_compute_types::dataflows::{BuildDesc, DataflowDescription, IndexDesc};
@@ -160,6 +160,7 @@ pub mod sinks;
 mod threshold;
 mod top_k;
 
+use crate::extensions::MzCollection;
 pub use context::CollectionBundle;
 pub use join::LinearJoinSpec;
 
@@ -248,8 +249,8 @@ pub fn build_compute_dataflow<A: Allocate>(
                     ok_stream = ok_stream.probe_with(&input_probe);
 
                     let (oks, errs) = (
-                        ok_stream.as_collection().leave_region().leave_region(),
-                        err_stream.as_collection().leave_region().leave_region(),
+                        ok_stream.as_mz_collection().leave_region().leave_region(),
+                        err_stream.as_mz_collection().leave_region().leave_region(),
                     );
 
                     imported_sources.push((mz_expr::Id::Global(*source_id), (oks, errs)));
@@ -559,7 +560,7 @@ where
                 let oks_trace = oks.trace_handle();
 
                 let errs = errs
-                    .as_collection(|k, v| (k.clone(), v.clone()))
+                    .as_mz_collection(|k, v| (k.clone(), v.clone()))
                     .leave()
                     .mz_arrange("Arrange export iterative err");
 
@@ -626,7 +627,7 @@ where
         Arranged<G, TraceAgent<Tr2>>: ArrangementSize,
     {
         use differential_dataflow::trace::cursor::MyTrait;
-        oks.as_collection(|k, v| (k.into_owned(), v.into_owned()))
+        oks.as_mz_collection(|k, v| (k.into_owned(), v.into_owned()))
             .leave()
             .mz_arrange(name)
     }
@@ -697,9 +698,9 @@ where
                             // The pointstamp starts counting from 0, so we need to add 1.
                             iteration_index + 1 >= limit.max_iters.into()
                         });
-                    oks = Collection::new(in_limit);
+                    oks = MzCollection::new(in_limit);
                     if !limit.return_at_limit {
-                        err = err.concat(&Collection::new(over_limit).map(move |_data| {
+                        err = err.concat(&MzCollection::new(over_limit).map(move |_data| {
                             DataflowError::EvalError(Box::new(EvalError::LetRecLimitExceeded(
                                 format!("{}", limit.max_iters.get()),
                             )))
@@ -721,7 +722,7 @@ where
                         "Distinct recursive err",
                         move |_k, _s, t| t.push(((), 1)),
                     )
-                    .as_collection(|k, _| k.clone());
+                    .as_mz_collection(|k, _| k.clone());
                 if let Some(token) = &self.shutdown_token.get_inner() {
                     errs = errs.with_token(Weak::clone(token));
                 }
@@ -822,7 +823,7 @@ where
                         }
                     })
                     .to_stream(&mut self.scope)
-                    .as_collection();
+                    .as_mz_collection();
 
                 let mut error_time: mz_repr::Timestamp = Timestamp::minimum();
                 error_time.advance_by(self.as_of_frontier.borrow());
@@ -836,7 +837,7 @@ where
                         )
                     })
                     .to_stream(&mut self.scope)
-                    .as_collection();
+                    .as_mz_collection();
 
                 CollectionBundle::from_collections(ok_collection, err_collection)
             }
@@ -1012,7 +1013,7 @@ where
                     .as_mut()
                     .expect("CollectionBundle invariant");
                 let stream = self.log_operator_hydration_inner(&oks.inner, lir_id);
-                *oks = stream.as_collection();
+                *oks = stream.as_mz_collection();
             }
         }
     }

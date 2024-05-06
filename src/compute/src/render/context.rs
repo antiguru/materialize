@@ -39,6 +39,7 @@ use tracing::error;
 use crate::arrangement::manager::SpecializedTraceHandle;
 use crate::compute_state::{ComputeState, HydrationEvent};
 use crate::extensions::arrange::{KeyCollection, MzArrange};
+use crate::extensions::MzCollection;
 use crate::render::errors::ErrorLogger;
 use crate::render::{LinearJoinSpec, RenderTimestamp};
 use crate::typedefs::{ErrAgent, ErrEnter, ErrSpine, RowRowAgent, RowRowEnter, RowRowSpine};
@@ -275,13 +276,13 @@ where
     }
 
     /// Extracts the underlying arrangement as a stream of updates.
-    pub fn as_collection<L>(&self, mut logic: L) -> Collection<S, Row, Diff>
+    pub fn as_mz_collection<L>(&self, mut logic: L) -> MzCollection<S, Row, Diff>
     where
         L: for<'a, 'b> FnMut(&'a DatumVecBorrow<'b>) -> Row + 'static,
     {
         let mut datums = DatumVec::new();
         match self {
-            MzArrangement::RowRow(inner) => inner.as_collection(move |k, v| {
+            MzArrangement::RowRow(inner) => inner.as_mz_collection(move |k, v| {
                 let mut datums_borrow = datums.borrow();
                 datums_borrow.extend(k.to_datum_iter());
                 datums_borrow.extend(v.to_datum_iter());
@@ -386,13 +387,13 @@ where
     }
 
     /// Extracts the underlying trace as a stream of updates.
-    pub fn as_collection<L>(&self, mut logic: L) -> Collection<S, Row, Diff>
+    pub fn as_mz_collection<L>(&self, mut logic: L) -> MzCollection<S, Row, Diff>
     where
         L: for<'a, 'b> FnMut(&'a DatumVecBorrow<'b>) -> Row + 'static,
     {
         let mut datums = DatumVec::new();
         match self {
-            MzArrangementImport::RowRow(inner) => inner.as_collection(move |k, v| {
+            MzArrangementImport::RowRow(inner) => inner.as_mz_collection(move |k, v| {
                 let mut datums_borrow = datums.borrow();
                 datums_borrow.extend(k.to_datum_iter());
                 datums_borrow.extend(v.to_datum_iter());
@@ -478,15 +479,20 @@ where
     /// This method presents the contents as they are, without further computation.
     /// If you have logic that could be applied to each record, consider using the
     /// `flat_map` methods which allows this and can reduce the work done.
-    pub fn as_collection(&self) -> (Collection<S, Row, Diff>, Collection<S, DataflowError, Diff>) {
+    pub fn as_mz_collection(
+        &self,
+    ) -> (
+        MzCollection<S, Row, Diff>,
+        MzCollection<S, DataflowError, Diff>,
+    ) {
         match &self {
             ArrangementFlavor::Local(oks, errs) => (
-                oks.as_collection(move |borrow| SharedRow::pack(&**borrow)),
-                errs.as_collection(|k, &()| k.clone()),
+                oks.as_mz_collection(move |borrow| SharedRow::pack(&**borrow)),
+                errs.as_mz_collection(|k, &()| k.clone()),
             ),
             ArrangementFlavor::Trace(_, oks, errs) => (
-                oks.as_collection(move |borrow| SharedRow::pack(&**borrow)),
-                errs.as_collection(|k, &()| k.clone()),
+                oks.as_mz_collection(move |borrow| SharedRow::pack(&**borrow)),
+                errs.as_mz_collection(|k, &()| k.clone()),
             ),
         }
     }
@@ -506,7 +512,7 @@ where
         constructor: C,
     ) -> (
         timely::dataflow::Stream<S, I::Item>,
-        Collection<S, DataflowError, Diff>,
+        MzCollection<S, DataflowError, Diff>,
     )
     where
         I: IntoIterator,
@@ -523,13 +529,13 @@ where
             ArrangementFlavor::Local(oks, errs) => {
                 let logic = constructor();
                 let oks = oks.flat_map(key, logic, refuel);
-                let errs = errs.as_collection(|k, &()| k.clone());
+                let errs = errs.as_mz_collection(|k, &()| k.clone());
                 (oks, errs)
             }
             ArrangementFlavor::Trace(_, oks, errs) => {
                 let logic = constructor();
                 let oks = oks.flat_map(key, logic, refuel);
-                let errs = errs.as_collection(|k, &()| k.clone());
+                let errs = errs.as_mz_collection(|k, &()| k.clone());
                 (oks, errs)
             }
         }
@@ -591,7 +597,10 @@ where
     T: Timestamp + Lattice + Columnation,
     S::Timestamp: Lattice + Refines<T> + Columnation,
 {
-    pub collection: Option<(Collection<S, Row, Diff>, Collection<S, DataflowError, Diff>)>,
+    pub collection: Option<(
+        MzCollection<S, Row, Diff>,
+        MzCollection<S, DataflowError, Diff>,
+    )>,
     pub arranged: BTreeMap<Vec<MirScalarExpr>, ArrangementFlavor<S, T>>,
 }
 
@@ -720,7 +729,7 @@ where
                 .arranged
                 .get(key)
                 .unwrap_or_else(|| panic!("The collection arranged by {:?} doesn't exist.", key))
-                .as_collection(),
+                .as_mz_collection(),
         }
     }
 
@@ -874,7 +883,7 @@ where
         mfp.optimize();
         let mfp_plan = mfp.into_plan().unwrap();
 
-        // If the MFP is trivial, we can just call `as_collection`.
+        // If the MFP is trivial, we can just call `as_mz_collection`.
         // In the case that we weren't going to apply the `key_val` optimization,
         // this path results in a slightly smaller and faster
         // dataflow graph, and is intended to fix
@@ -933,8 +942,8 @@ where
         let (oks, errs) = stream.ok_err(|x| x);
 
         use differential_dataflow::AsCollection;
-        let oks = oks.as_collection();
-        let errs = errs.as_collection();
+        let oks = oks.as_mz_collection();
+        let errs = errs.as_mz_collection();
         (oks, errors.concat(&errs))
     }
     pub fn ensure_collections(
