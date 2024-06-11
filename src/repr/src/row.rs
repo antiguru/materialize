@@ -306,6 +306,7 @@ impl Ord for Row {
 mod columnation {
     use columnation::{Columnation, Region};
     use mz_ore::region::LgAllocRegion;
+    use timely::container::flatcontainer;
 
     use crate::Row;
 
@@ -333,6 +334,10 @@ mod columnation {
 
     impl Columnation for Row {
         type InnerRegion = RowStack;
+    }
+
+    impl mz_flatcontainer::MzContainerized for Row {
+        type Region = flatcontainer::OwnedRegion<Self>;
     }
 
     impl Region for RowStack {

@@ -2328,6 +2328,10 @@ impl Columnation for ColumnOrder {
     type InnerRegion = CopyRegion<Self>;
 }
 
+impl mz_flatcontainer::MzContainerized for ColumnOrder {
+    type Region = flatcontainer::OwnedRegion<Self>;
+}
+
 impl RustType<ProtoColumnOrder> for ColumnOrder {
     fn into_proto(&self) -> ProtoColumnOrder {
         ProtoColumnOrder {

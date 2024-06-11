@@ -835,6 +835,7 @@ pub mod monoids {
     use mz_repr::{DatumVec, Diff, Row};
     use serde::{Deserialize, Serialize};
     use timely::container::columnation::{Columnation, Region};
+    use timely::container::flatcontainer;
 
     /// A monoid containing a row and an ordering.
     #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize, Hash)]
@@ -891,6 +892,10 @@ pub mod monoids {
 
     impl Columnation for Top1Monoid {
         type InnerRegion = Top1MonoidRegion;
+    }
+
+    impl mz_flatcontainer::MzContainerized for Top1Monoid {
+        type Region = flatcontainer::OwnedRegion<Self>;
     }
 
     #[derive(Default)]

@@ -386,6 +386,10 @@ impl Columnation for ChannelDatum {
     type InnerRegion = CopyRegion<Self>;
 }
 
+impl mz_flatcontainer::MzContainerized for ChannelDatum {
+    type Region = flatcontainer::OwnedRegion<Self>;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 struct ParkDatum {
     duration_pow: u128,
@@ -394,6 +398,10 @@ struct ParkDatum {
 
 impl Columnation for ParkDatum {
     type InnerRegion = CopyRegion<Self>;
+}
+
+impl mz_flatcontainer::MzContainerized for ParkDatum {
+    type Region = flatcontainer::OwnedRegion<Self>;
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -406,6 +414,10 @@ impl Columnation for MessageDatum {
     type InnerRegion = CopyRegion<Self>;
 }
 
+impl mz_flatcontainer::MzContainerized for MessageDatum {
+    type Region = flatcontainer::OwnedRegion<Self>;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 struct ScheduleHistogramDatum {
     operator: usize,
@@ -414,6 +426,10 @@ struct ScheduleHistogramDatum {
 
 impl Columnation for ScheduleHistogramDatum {
     type InnerRegion = CopyRegion<Self>;
+}
+
+impl mz_flatcontainer::MzContainerized for ScheduleHistogramDatum {
+    type Region = flatcontainer::OwnedRegion<Self>;
 }
 
 /// Event handler of the demux operator.

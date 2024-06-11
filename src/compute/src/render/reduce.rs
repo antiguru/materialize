@@ -2195,6 +2195,10 @@ impl Columnation for Accum {
     type InnerRegion = CopyRegion<Self>;
 }
 
+impl mz_flatcontainer::MzContainerized for Accum {
+    type Region = flatcontainer::OwnedRegion<Self>;
+}
+
 /// Monoids for in-place compaction of monotonic streams.
 mod monoids {
 
@@ -2304,6 +2308,10 @@ mod monoids {
 
     impl Columnation for ReductionMonoid {
         type InnerRegion = ReductionMonoidRegion;
+    }
+
+    impl mz_flatcontainer::MzContainerized for ReductionMonoid {
+        type Region = flatcontainer::OwnedRegion<Self>;
     }
 
     /// Region for [`ReductionMonoid`]. This region is special in that it stores both enum variants

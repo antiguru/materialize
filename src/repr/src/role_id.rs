@@ -202,6 +202,10 @@ impl Columnation for RoleId {
     type InnerRegion = CopyRegion<RoleId>;
 }
 
+impl mz_flatcontainer::MzContainerized for RoleId {
+    type Region = flatcontainer::OwnedRegion<Self>;
+}
+
 #[mz_ore::test]
 fn test_role_id_parsing() {
     let s = "s42";

@@ -97,6 +97,10 @@ impl columnation::Columnation for ReductionType {
     type InnerRegion = columnation::CopyRegion<ReductionType>;
 }
 
+impl mz_flatcontainer::MzContainerized for ReductionType {
+    type Region = flatcontainer::OwnedRegion<Self>;
+}
+
 impl RustType<ProtoReductionType> for ReductionType {
     fn into_proto(&self) -> ProtoReductionType {
         use proto_reduction_type::Kind;

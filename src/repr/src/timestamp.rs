@@ -15,6 +15,7 @@ use dec::TryFromDecimalError;
 use mz_proto::{RustType, TryFromProtoError};
 use proptest_derive::Arbitrary;
 use serde::{Deserialize, Serialize, Serializer};
+use timely::container::flatcontainer;
 
 use crate::adt::numeric::Numeric;
 use crate::refresh_schedule::RefreshSchedule;
@@ -458,4 +459,8 @@ impl TryFrom<Numeric> for Timestamp {
 
 impl columnation::Columnation for Timestamp {
     type InnerRegion = columnation::CopyRegion<Timestamp>;
+}
+
+impl mz_flatcontainer::MzContainerized for Timestamp {
+    type Region = flatcontainer::OwnedRegion<Self>;
 }

@@ -238,6 +238,10 @@ impl Columnation for AclMode {
     type InnerRegion = CopyRegion<AclMode>;
 }
 
+impl mz_flatcontainer::MzContainerized for AclMode {
+    type Region = flatcontainer::OwnedRegion<Self>;
+}
+
 impl Arbitrary for AclMode {
     type Parameters = ();
     type Strategy = BoxedStrategy<AclMode>;
@@ -377,6 +381,10 @@ impl RustType<ProtoMzAclItem> for MzAclItem {
 
 impl Columnation for MzAclItem {
     type InnerRegion = CopyRegion<MzAclItem>;
+}
+
+impl mz_flatcontainer::MzContainerized for MzAclItem {
+    type Region = flatcontainer::OwnedRegion<Self>;
 }
 
 /// An encoded packed variant of [`MzAclItem`].
@@ -636,6 +644,10 @@ impl RustType<ProtoAclItem> for AclItem {
 
 impl Columnation for AclItem {
     type InnerRegion = CopyRegion<AclItem>;
+}
+
+impl mz_flatcontainer::MzContainerized for AclItem {
+    type Region = flatcontainer::OwnedRegion<Self>;
 }
 
 /// An encoded packed variant of [`AclItem`].

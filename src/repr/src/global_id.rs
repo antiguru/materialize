@@ -132,3 +132,7 @@ impl RustType<ProtoGlobalId> for GlobalId {
 impl Columnation for GlobalId {
     type InnerRegion = CopyRegion<GlobalId>;
 }
+
+impl mz_flatcontainer::MzContainerized for GlobalId {
+    type Region = flatcontainer::OwnedRegion<Self>;
+}

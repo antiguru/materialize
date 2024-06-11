@@ -445,6 +445,7 @@ mod columnation {
     use mz_repr::strconv::ParseError;
     use mz_repr::Row;
     use timely::container::columnation::{Columnation, Region, StableRegion};
+    use timely::container::flatcontainer;
 
     use crate::errors::{
         DataflowError, DecodeError, DecodeErrorKind, EnvelopeError, SourceError,
@@ -453,6 +454,10 @@ mod columnation {
 
     impl Columnation for DataflowError {
         type InnerRegion = DataflowErrorRegion;
+    }
+
+    impl mz_flatcontainer::MzContainerized for DataflowError {
+        type Region = flatcontainer::OwnedRegion<Self>;
     }
 
     /// A region to store [`DataflowError`].

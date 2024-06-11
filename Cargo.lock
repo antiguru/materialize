@@ -4442,6 +4442,7 @@ dependencies = [
  "dec",
  "differential-dataflow",
  "dogsdogsdogs",
+ "flatcontainer",
  "futures",
  "itertools 0.10.5",
  "lgalloc",
@@ -4453,6 +4454,7 @@ dependencies = [
  "mz-dyncfg",
  "mz-dyncfgs",
  "mz-expr",
+ "mz-flatcontainer",
  "mz-ore",
  "mz-persist-client",
  "mz-persist-types",
@@ -4534,10 +4536,12 @@ version = "0.0.0"
 dependencies = [
  "columnation",
  "differential-dataflow",
+ "flatcontainer",
  "itertools 0.10.5",
  "mz-build-tools",
  "mz-dyncfg",
  "mz-expr",
+ "mz-flatcontainer",
  "mz-ore",
  "mz-proto",
  "mz-repr",
@@ -4772,12 +4776,14 @@ dependencies = [
  "encoding",
  "enum-iterator",
  "fallible-iterator",
+ "flatcontainer",
  "hex",
  "hmac",
  "itertools 0.10.5",
  "md-5",
  "mz-build-tools",
  "mz-expr-test-util",
+ "mz-flatcontainer",
  "mz-lowertest",
  "mz-ore",
  "mz-persist-types",
@@ -4877,6 +4883,14 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-subscriber",
+ "workspace-hack",
+]
+
+[[package]]
+name = "mz-flatcontainer"
+version = "0.0.0"
+dependencies = [
+ "flatcontainer",
  "workspace-hack",
 ]
 
@@ -5754,9 +5768,11 @@ dependencies = [
  "enum-kinds",
  "enum_dispatch",
  "fast-float",
+ "flatcontainer",
  "hex",
  "itertools 0.10.5",
  "mz-build-tools",
+ "mz-flatcontainer",
  "mz-lowertest",
  "mz-ore",
  "mz-persist",
@@ -6396,6 +6412,7 @@ dependencies = [
  "derivative",
  "differential-dataflow",
  "fail",
+ "flatcontainer",
  "futures",
  "insta",
  "itertools 0.10.5",
@@ -6406,6 +6423,7 @@ dependencies = [
  "mz-cloud-resources",
  "mz-dyncfg",
  "mz-expr",
+ "mz-flatcontainer",
  "mz-interchange",
  "mz-kafka-util",
  "mz-mysql-util",
