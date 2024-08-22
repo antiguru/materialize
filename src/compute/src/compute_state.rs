@@ -328,7 +328,13 @@ impl<'a, A: Allocate + 'static> ActiveComputeState<'a, A> {
     pub fn handle_compute_command(&mut self, cmd: ComputeCommand) {
         use ComputeCommand::*;
 
-        self.compute_state.command_history.push(cmd.clone());
+        if self
+            .compute_state
+            .command_history
+            .must_retain_for_replica_history(&cmd)
+        {
+            self.compute_state.command_history.push(cmd.clone());
+        }
 
         // Record the command duration, per worker and command kind.
         let timer = self

@@ -52,6 +52,18 @@ where
         }
     }
 
+    /// Returns true of the command must be stored in the cluster's command history on the replica.
+    ///
+    /// This enables optimizations where we can skip storing commands in the history that we know
+    /// will not be needed for reconciliation. However, we need to be careful to retain all commands
+    /// in the controller, which doesn't have the luxury to rely on someone else to replay commands.
+    pub fn must_retain_for_replica_history(&self, command: &ComputeCommand<T>) -> bool {
+        match command {
+            ComputeCommand::Peek(_) | ComputeCommand::CancelPeek { .. } => false,
+            _ => true,
+        }
+    }
+
     /// Add a command to the history.
     ///
     /// This action will reduce the history every time it doubles.
