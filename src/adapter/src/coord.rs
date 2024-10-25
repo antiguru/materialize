@@ -2589,7 +2589,7 @@ impl Coordinator {
             // Filter our own ID because we don't exist yet.
             let id_bundle = dataflow_import_id_bundle(&physical_plan, ct.cluster_id);
             let time_dependence = TimeDependenceHelper::new(self.catalog())
-                .determine_time_dependence_ids(id_bundle.iter().filter(|x| x != id));
+                .determine_time_dependence_ids(id_bundle.iter().filter(|x| x != id), None);
             physical_plan.time_dependence = Some(time_dependence);
 
             // Determine an as of for the new continual task.
@@ -2678,7 +2678,7 @@ impl Coordinator {
 
                     let (mut physical_plan, metainfo) = global_lir_plan.unapply();
                     let time_dependence = TimeDependenceHelper::new(self.catalog())
-                        .determine_time_dependence_plan(&physical_plan, idx.cluster_id);
+                        .determine_time_dependence_plan(&physical_plan, idx.cluster_id, None);
                     physical_plan.time_dependence = Some(time_dependence);
                     let metainfo = {
                         // Pre-allocate a vector of transient GlobalIds for each notice.
@@ -2738,7 +2738,11 @@ impl Coordinator {
 
                     let (mut physical_plan, metainfo) = global_lir_plan.unapply();
                     let time_dependence = TimeDependenceHelper::new(self.catalog())
-                        .determine_time_dependence_plan(&physical_plan, mv.cluster_id);
+                        .determine_time_dependence_plan(
+                            &physical_plan,
+                            mv.cluster_id,
+                            mv.refresh_schedule.clone(),
+                        );
                     physical_plan.time_dependence = Some(time_dependence);
                     let metainfo = {
                         // Pre-allocate a vector of transient GlobalIds for each notice.
@@ -2773,7 +2777,7 @@ impl Coordinator {
                     // Filter our own id as it is not known yet.
                     let id_bundle = dataflow_import_id_bundle(&physical_plan, ct.cluster_id);
                     let time_dependence = TimeDependenceHelper::new(self.catalog())
-                        .determine_time_dependence_ids(id_bundle.iter().filter(|x| *x != id));
+                        .determine_time_dependence_ids(id_bundle.iter().filter(|x| *x != id), None);
                     physical_plan.time_dependence = Some(time_dependence);
 
                     let catalog = self.catalog_mut();
