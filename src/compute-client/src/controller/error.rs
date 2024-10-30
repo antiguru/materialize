@@ -18,6 +18,7 @@
 //! of each method and make it easy for callers to ensure that all possible errors are handled.
 
 use mz_repr::GlobalId;
+use mz_storage_types::controller::StorageError;
 use mz_storage_types::read_holds::ReadHoldError;
 use thiserror::Error;
 
@@ -154,6 +155,15 @@ impl From<ReadHoldError> for DataflowCreationError {
     }
 }
 
+impl From<DetermineTimeDependenceError> for DataflowCreationError {
+    fn from(error: DetermineTimeDependenceError) -> Self {
+        match error {
+            DetermineTimeDependenceError::InstanceMissing(id) => Self::InstanceMissing(id),
+            DetermineTimeDependenceError::CollectionMissing(id) => Self::CollectionMissing(id),
+        }
+    }
+}
+
 /// Errors arising during peek processing.
 #[derive(Error, Debug)]
 pub enum PeekError {
@@ -252,5 +262,37 @@ pub enum RemoveOrphansError {
 impl From<anyhow::Error> for RemoveOrphansError {
     fn from(error: anyhow::Error) -> Self {
         Self::OrchestratorError(error)
+    }
+}
+
+/// Errors arising when reading time dependence.
+#[derive(Error, Debug)]
+pub enum DetermineTimeDependenceError {
+    /// The supplied instance doesn't exist.
+    #[error("instance does not exist: {0}")]
+    InstanceMissing(ComputeInstanceId),
+    /// The supplied collection doesn't exist.
+    #[error("collection does not exist: {0}")]
+    CollectionMissing(GlobalId),
+}
+
+impl From<InstanceMissing> for DetermineTimeDependenceError {
+    fn from(error: InstanceMissing) -> Self {
+        Self::InstanceMissing(error.0)
+    }
+}
+
+impl From<CollectionMissing> for DetermineTimeDependenceError {
+    fn from(error: CollectionMissing) -> Self {
+        Self::CollectionMissing(error.0)
+    }
+}
+
+impl<T: std::fmt::Debug> From<StorageError<T>> for DetermineTimeDependenceError {
+    fn from(error: StorageError<T>) -> Self {
+        match error {
+            StorageError::IdentifierMissing(id) => Self::CollectionMissing(id),
+            error => panic!("Surprised by {error:?}. How should we handle this?"),
+        }
     }
 }

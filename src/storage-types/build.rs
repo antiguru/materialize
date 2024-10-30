@@ -42,6 +42,7 @@ fn main() {
         .extern_path(".mz_pgcopy.copy", "::mz_pgcopy")
         .extern_path(".mz_postgres_util.tunnel", "::mz_postgres_util::tunnel")
         .extern_path(".mz_proto", "::mz_proto")
+        .extern_path(".mz_repr.refresh_schedule", "::mz_repr::refresh_schedule")
         .extern_path(".mz_repr.relation_and_scalar", "::mz_repr")
         .extern_path(".mz_repr.row", "::mz_repr")
         .extern_path(".mz_repr.url", "::mz_repr::url")
@@ -69,6 +70,7 @@ fn main() {
                 "storage-types/src/sources/mysql.proto",
                 "storage-types/src/sources/postgres.proto",
                 "storage-types/src/sources/load_generator.proto",
+                "storage-types/src/time_dependence.proto",
             ],
             &[PathBuf::from(".."), mz_build_tools::protoc_include()],
         )

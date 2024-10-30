@@ -186,7 +186,6 @@ use crate::error::AdapterError;
 use crate::explain::insights::PlanInsightsContext;
 use crate::explain::optimizer_trace::{DispatchGuard, OptimizerTrace};
 use crate::metrics::Metrics;
-use crate::optimize::dataflow_expiration::time_dependence;
 use crate::optimize::dataflows::{
     dataflow_import_id_bundle, ComputeInstanceSnapshot, DataflowBuilder,
 };
@@ -2667,9 +2666,7 @@ impl Coordinator {
                         (optimized_plan, global_lir_plan)
                     };
 
-                    let (mut physical_plan, metainfo) = global_lir_plan.unapply();
-                    physical_plan.time_dependence =
-                        time_dependence(self.catalog(), physical_plan.import_ids(), None);
+                    let (physical_plan, metainfo) = global_lir_plan.unapply();
                     let metainfo = {
                         // Pre-allocate a vector of transient GlobalIds for each notice.
                         let notice_ids = std::iter::repeat_with(|| self.allocate_transient_id())
@@ -2728,12 +2725,7 @@ impl Coordinator {
                         (optimized_plan, global_lir_plan)
                     };
 
-                    let (mut physical_plan, metainfo) = global_lir_plan.unapply();
-                    physical_plan.time_dependence = time_dependence(
-                        self.catalog(),
-                        physical_plan.import_ids(),
-                        mv.refresh_schedule.clone(),
-                    );
+                    let (physical_plan, metainfo) = global_lir_plan.unapply();
                     let metainfo = {
                         // Pre-allocate a vector of transient GlobalIds for each notice.
                         let notice_ids = std::iter::repeat_with(|| self.allocate_transient_id())
@@ -2762,12 +2754,8 @@ impl Coordinator {
                         .catalog()
                         .resolve_full_name(entry.name(), None)
                         .to_string();
-                    let (optimized_plan, mut physical_plan, metainfo) = self
+                    let (optimized_plan, physical_plan, metainfo) = self
                         .optimize_create_continual_task(ct, id, self.owned_catalog(), debug_name)?;
-                    // Filter our own id as it is not known yet.
-                    let ids = physical_plan.import_ids().filter(|x| *x != id);
-                    physical_plan.time_dependence = time_dependence(self.catalog(), ids, None);
-
                     let catalog = self.catalog_mut();
                     catalog.set_optimized_plan(id, optimized_plan);
                     catalog.set_physical_plan(id, physical_plan);
@@ -3104,7 +3092,7 @@ impl Coordinator {
                 catalog.expire().await;
             }
         }
-        .boxed_local()
+            .boxed_local()
     }
 
     /// Obtain a read-only Catalog reference.

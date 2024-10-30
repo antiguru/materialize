@@ -53,6 +53,7 @@ use mz_repr::{Datum, Diff, GlobalId, Row, TimestampManipulation};
 use mz_storage_client::controller::{IntrospectionType, StorageController, StorageWriteOp};
 use mz_storage_types::read_holds::ReadHold;
 use mz_storage_types::read_policy::ReadPolicy;
+use mz_storage_types::time_dependence::TimeDependence;
 use prometheus::proto::LabelPair;
 use serde::{Deserialize, Serialize};
 use timely::progress::{Antichain, ChangeBatch, Timestamp};
@@ -64,8 +65,8 @@ use uuid::Uuid;
 
 use crate::controller::error::{
     CollectionLookupError, CollectionMissing, CollectionUpdateError, DataflowCreationError,
-    HydrationCheckBadTarget, InstanceExists, InstanceMissing, PeekError, ReadPolicyError,
-    ReplicaCreationError, ReplicaDropError,
+    DetermineTimeDependenceError, HydrationCheckBadTarget, InstanceExists, InstanceMissing,
+    PeekError, ReadPolicyError, ReplicaCreationError, ReplicaDropError,
 };
 use crate::controller::instance::{Instance, SharedCollectionState};
 use crate::controller::replica::ReplicaConfig;
@@ -778,7 +779,7 @@ where
     pub fn create_dataflow(
         &mut self,
         instance_id: ComputeInstanceId,
-        dataflow: DataflowDescription<mz_compute_types::plan::Plan<T>, (), T>,
+        mut dataflow: DataflowDescription<mz_compute_types::plan::Plan<T>, (), T>,
         subscribe_target_replica: Option<ReplicaId>,
     ) -> Result<(), DataflowCreationError> {
         use DataflowCreationError::*;
@@ -820,6 +821,7 @@ where
                 return Err(CollectionMissing(id));
             }
         }
+        let time_dependence = self.determine_time_dependence(&dataflow, instance_id)?;
 
         let instance = self.instance_mut(instance_id).expect("validated");
 
@@ -830,10 +832,13 @@ where
                 write_only: dataflow.sink_exports.contains_key(&id),
                 compute_dependencies: dataflow.imported_index_ids().collect(),
                 shared: shared.clone(),
+                time_dependence: time_dependence.clone(),
             };
             instance.collections.insert(id, collection);
             shared_collection_state.insert(id, shared);
         }
+
+        dataflow.time_dependence = time_dependence;
 
         instance.call(move |i| {
             i.create_dataflow(
@@ -1062,6 +1067,51 @@ where
         // of data we have to record.
         self.record_introspection_updates(storage);
     }
+
+    fn determine_time_dependence(
+        &self,
+        dataflow: &DataflowDescription<mz_compute_types::plan::Plan<T>, (), T>,
+        instance_id: ComputeInstanceId,
+    ) -> Result<Option<TimeDependence>, DetermineTimeDependenceError> {
+        let mut time_dependencies = Vec::new();
+
+        for id in dataflow.imported_source_ids() {
+            if let Some(dependence) = self.storage_collections.get_time_dependence(id)? {
+                time_dependencies.push(dependence);
+            }
+        }
+        let instance = self.instance(instance_id)?;
+        for id in dataflow.imported_index_ids() {
+            if let Some(dependence) = instance.get_time_dependence(id)? {
+                time_dependencies.push(dependence);
+            }
+        }
+
+        // Sort and dedupe to remove redundancy.
+        time_dependencies.sort();
+        time_dependencies.dedup();
+
+        let time_dependence = if time_dependencies
+            .iter()
+            .any(|dep| *dep == TimeDependence::default())
+        {
+            // Wall-clock dependency is dominant.
+            Some(TimeDependence::new(
+                dataflow.refresh_schedule.clone(),
+                vec![],
+            ))
+        } else if !time_dependencies.is_empty() {
+            // No immediate wall-clock dependency, found some dependency with a refresh schedule.
+            Some(TimeDependence::new(
+                dataflow.refresh_schedule.clone(),
+                time_dependencies,
+            ))
+        } else {
+            // No wall-clock dependence, no refresh schedule
+            None
+        };
+        Ok(TimeDependence::normalize(time_dependence))
+    }
 }
 
 #[derive(Debug)]
@@ -1179,6 +1229,13 @@ impl<T: ComputeControllerTimestamp> InstanceState<T> {
         ]);
         Ok(serde_json::Value::Object(map))
     }
+
+    fn get_time_dependence(
+        &self,
+        id: GlobalId,
+    ) -> Result<Option<TimeDependence>, CollectionMissing> {
+        Ok(self.collection(id)?.time_dependence.clone())
+    }
 }
 
 #[derive(Debug)]
@@ -1186,6 +1243,7 @@ struct Collection<T> {
     write_only: bool,
     compute_dependencies: BTreeSet<GlobalId>,
     shared: SharedCollectionState<T>,
+    time_dependence: Option<TimeDependence>,
 }
 
 impl<T: Timestamp> Collection<T> {
@@ -1195,6 +1253,7 @@ impl<T: Timestamp> Collection<T> {
             write_only: false,
             compute_dependencies: Default::default(),
             shared: SharedCollectionState::new(as_of),
+            time_dependence: Some(TimeDependence::default()),
         }
     }
 

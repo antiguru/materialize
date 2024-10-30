@@ -22,6 +22,10 @@ use futures::stream::FuturesUnordered;
 use futures::{Future, FutureExt, StreamExt};
 use itertools::Itertools;
 
+use crate::controller::{
+    CollectionDescription, DataSource, PersistEpoch, StorageMetadata, StorageTxn,
+};
+use crate::storage_collections::metrics::{ShardIdSet, StorageCollectionsMetrics};
 use mz_ore::collections::CollectionExt;
 use mz_ore::metrics::MetricsRegistry;
 use mz_ore::now::{EpochMillis, NowFn};
@@ -50,6 +54,7 @@ use mz_storage_types::sources::{
     GenericSourceConnection, IngestionDescription, SourceData, SourceDesc, SourceExport,
     SourceExportDataConfig,
 };
+use mz_storage_types::time_dependence::TimeDependence;
 use mz_txn_wal::metrics::Metrics as TxnMetrics;
 use mz_txn_wal::txn_read::{DataSnapshot, TxnsRead};
 use mz_txn_wal::txns::TxnsHandle;
@@ -60,11 +65,6 @@ use timely::PartialOrder;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, trace, warn};
-
-use crate::controller::{
-    CollectionDescription, DataSource, PersistEpoch, StorageMetadata, StorageTxn,
-};
-use crate::storage_collections::metrics::{ShardIdSet, StorageCollectionsMetrics};
 
 mod metrics;
 
@@ -302,6 +302,11 @@ pub trait StorageCollections: Debug {
         &self,
         desired_holds: Vec<GlobalId>,
     ) -> Result<Vec<ReadHold<Self::Timestamp>>, ReadHoldError>;
+
+    fn get_time_dependence(
+        &self,
+        id: GlobalId,
+    ) -> Result<Option<TimeDependence>, StorageError<Self::Timestamp>>;
 }
 
 /// Frontiers of the collection identified by `id`.
@@ -840,6 +845,37 @@ where
         };
 
         Ok(dependencies)
+    }
+
+    fn determine_time_dependence(
+        &self,
+        self_collections: &BTreeMap<GlobalId, CollectionState<T>>,
+        data_source: &DataSource,
+    ) -> Result<Option<TimeDependence>, StorageError<T>> {
+        match data_source {
+            DataSource::Ingestion(ingestion) => {
+                match ingestion.desc.connection {
+                    // Kafka, Postgres, MySql sources follow wall clock.
+                    GenericSourceConnection::Kafka(_)
+                    | GenericSourceConnection::Postgres(_)
+                    | GenericSourceConnection::MySql(_) => Ok(Some(TimeDependence::default())),
+                    // Load generators not further specified.
+                    GenericSourceConnection::LoadGenerator(_) => Ok(None),
+                }
+            }
+            DataSource::IngestionExport { ingestion_id, .. } => {
+                let source_collection = self_collections
+                    .get(ingestion_id)
+                    .ok_or(StorageError::IdentifierMissing(*ingestion_id))?;
+                Ok(source_collection.time_dependence.clone())
+            }
+            // Introspection, other, progress, table, and webhook sources follow wall clock.
+            DataSource::Introspection(_)
+            | DataSource::Other
+            | DataSource::Progress
+            | DataSource::Table
+            | DataSource::Webhook { .. } => Ok(Some(TimeDependence::default())),
+        }
     }
 
     /// Install read capabilities on the given `storage_dependencies`.
@@ -1536,6 +1572,9 @@ where
             let storage_dependencies = self
                 .determine_collection_dependencies(&*self_collections, &description.data_source)?;
 
+            let time_dependence =
+                self.determine_time_dependence(&*self_collections, &description.data_source)?;
+
             // Determine the initial since of the collection.
             let initial_since = match storage_dependencies
                 .iter()
@@ -1603,6 +1642,7 @@ where
                 write_frontier.clone(),
                 storage_dependencies,
                 metadata.clone(),
+                time_dependence,
             );
 
             // Install the collection state in the appropriate spot.
@@ -1980,6 +2020,17 @@ where
 
         Ok(acquired_holds)
     }
+
+    fn get_time_dependence(
+        &self,
+        id: GlobalId,
+    ) -> Result<Option<TimeDependence>, StorageError<Self::Timestamp>> {
+        let collections = self.collections.lock().expect("lock poisoned");
+        let collection = collections
+            .get(&id)
+            .ok_or(StorageError::IdentifierMissing(id))?;
+        Ok(collection.time_dependence.clone())
+    }
 }
 
 /// Wraps either a "critical" [SinceHandle] or a leased [ReadHandle].
@@ -2130,6 +2181,8 @@ struct CollectionState<T> {
     pub write_frontier: Antichain<T>,
 
     pub collection_metadata: CollectionMetadata,
+
+    pub time_dependence: Option<TimeDependence>,
 }
 
 impl<T: TimelyTimestamp> CollectionState<T> {
@@ -2141,6 +2194,7 @@ impl<T: TimelyTimestamp> CollectionState<T> {
         write_frontier: Antichain<T>,
         storage_dependencies: Vec<GlobalId>,
         metadata: CollectionMetadata,
+        time_dependence: Option<TimeDependence>,
     ) -> Self {
         let mut read_capabilities = MutableAntichain::new();
         read_capabilities.update_iter(since.iter().map(|time| (time.clone(), 1)));
@@ -2154,6 +2208,7 @@ impl<T: TimelyTimestamp> CollectionState<T> {
             storage_dependencies,
             write_frontier,
             collection_metadata: metadata,
+            time_dependence,
         }
     }
 
