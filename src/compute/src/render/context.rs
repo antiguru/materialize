@@ -356,6 +356,7 @@ where
         key: Option<Row>,
         mut logic: L,
         refuel: usize,
+        max_demand: Option<usize>,
     ) -> timely::dataflow::Stream<S, I::Item>
     where
         T: Timestamp + Lattice + Columnation,
@@ -366,6 +367,7 @@ where
     {
         use differential_dataflow::operators::arrange::TraceAgent;
         let mut datums = DatumVec::new();
+        let max_demand = max_demand.unwrap_or(usize::MAX);
         match self {
             MzArrangement::RowRow(inner) => {
                 CollectionBundle::<S, T>::flat_map_core::<TraceAgent<RowRowSpine<_, _>>, Row, _, _, _>(
@@ -373,8 +375,9 @@ where
                     key,
                     move |k, v, t, d| {
                         let mut datums_borrow = datums.borrow();
-                        datums_borrow.extend(k.to_datum_iter());
-                        datums_borrow.extend(v.to_datum_iter());
+                        datums_borrow.extend(k.to_datum_iter().take(max_demand));
+                        let max_demand = max_demand.saturating_sub(datums_borrow.len());
+                        datums_borrow.extend(v.to_datum_iter().take(max_demand));
                         logic(&mut datums_borrow, t, d)
                     },
                     refuel,
@@ -467,6 +470,7 @@ where
         key: Option<Row>,
         mut logic: L,
         refuel: usize,
+        max_demand: Option<usize>,
     ) -> timely::dataflow::Stream<S, I::Item>
     where
         I: IntoIterator<Item = (D, S::Timestamp, Diff)>,
@@ -474,6 +478,7 @@ where
         L: for<'a, 'b> FnMut(&'a mut DatumVecBorrow<'b>, &'a S::Timestamp, &'a Diff) -> I + 'static,
     {
         let mut datums = DatumVec::new();
+        let max_demand = max_demand.unwrap_or(usize::MAX);
         match self {
             MzArrangementImport::RowRow(inner) => CollectionBundle::<S, T>::flat_map_core::<
                 RowRowEnter<T, Diff, S::Timestamp>,
@@ -486,8 +491,9 @@ where
                 key,
                 move |k, v, t, d| {
                     let mut datums_borrow = datums.borrow();
-                    datums_borrow.extend(k.to_datum_iter());
-                    datums_borrow.extend(v.to_datum_iter());
+                    datums_borrow.extend(k.to_datum_iter().take(max_demand));
+                    let max_demand = max_demand.saturating_sub(datums_borrow.len());
+                    datums_borrow.extend(v.to_datum_iter().take(max_demand));
                     logic(&mut datums_borrow, t, d)
                 },
                 refuel,
@@ -567,6 +573,7 @@ where
     pub fn flat_map<D, I, C, L>(
         &self,
         key: Option<Row>,
+        max_demand: Option<usize>,
         constructor: C,
     ) -> (
         timely::dataflow::Stream<S, I::Item>,
@@ -586,13 +593,13 @@ where
         match &self {
             ArrangementFlavor::Local(oks, errs) => {
                 let logic = constructor();
-                let oks = oks.flat_map(key, logic, refuel);
+                let oks = oks.flat_map(key, logic, refuel, max_demand);
                 let errs = errs.as_collection(|k, &()| k.clone());
                 (oks, errs)
             }
             ArrangementFlavor::Trace(_, oks, errs) => {
                 let logic = constructor();
-                let oks = oks.flat_map(key, logic, refuel);
+                let oks = oks.flat_map(key, logic, refuel, max_demand);
                 let errs = errs.as_collection(|k, &()| k.clone());
                 (oks, errs)
             }
@@ -803,6 +810,7 @@ where
     pub fn flat_map<D, I, C, L>(
         &self,
         key_val: Option<(Vec<MirScalarExpr>, Option<Row>)>,
+        max_demand: Option<usize>,
         constructor: C,
     ) -> (
         timely::dataflow::Stream<S, I::Item>,
@@ -821,7 +829,7 @@ where
             let flavor = self
                 .arrangement(&key)
                 .expect("Should have ensured during planning that this arrangement exists.");
-            flavor.flat_map(val, constructor)
+            flavor.flat_map(val, max_demand, constructor)
         } else {
             use timely::dataflow::operators::Map;
             let (oks, errs) = self
@@ -831,8 +839,13 @@ where
             let mut logic = constructor();
             let mut datums = DatumVec::new();
             (
-                oks.inner
-                    .flat_map(move |(v, t, d)| logic(&mut datums.borrow_with(&v), &t, &d)),
+                oks.inner.flat_map(move |(v, t, d)| {
+                    logic(
+                        &mut datums.borrow_with_limit(&v, max_demand.unwrap_or(usize::MAX)),
+                        &t,
+                        &d,
+                    )
+                }),
                 errs,
             )
         }
@@ -939,6 +952,7 @@ where
         Collection<S, DataflowError, Diff>,
     ) {
         mfp.optimize();
+        let max_demand = mfp.demand().iter().max().copied().map(|x| x + 1);
         let mfp_plan = mfp.into_plan().unwrap();
 
         // If the MFP is trivial, we can just call `as_collection`.
@@ -956,7 +970,7 @@ where
             let key = key_val.map(|(k, _v)| k);
             return self.as_specific_collection(key.as_deref());
         }
-        let (stream, errors) = self.flat_map(key_val, || {
+        let (stream, errors) = self.flat_map(key_val, max_demand, || {
             let mut datum_vec = DatumVec::new();
             // Wrap in an `Rc` so that lifetimes work out.
             let until = std::rc::Rc::new(until);
