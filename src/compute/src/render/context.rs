@@ -953,6 +953,9 @@ where
     ) {
         mfp.optimize();
         let max_demand = mfp.demand().iter().max().copied().map(|x| x + 1);
+        if let Some(max_demand) = max_demand {
+            mfp.permute_fn(|c| c, max_demand);
+        }
         let mfp_plan = mfp.into_plan().unwrap();
 
         // If the MFP is trivial, we can just call `as_collection`.
