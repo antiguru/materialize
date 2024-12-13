@@ -101,11 +101,11 @@ where
             let demand_map_len = demand_map.len();
             key_plan.permute_fn(|c| demand_map[&c], demand_map_len);
             val_plan.permute_fn(|c| demand_map[&c], demand_map_len);
-            let max_demand = demand.last().copied().map(|x| x + 1).unwrap_or(0);
+            let max_demand = demand.iter().max().map(|x| *x + 1).unwrap_or(0);
             let skips = mz_compute_types::plan::reduce::convert_indexes_to_skips(demand);
             let (key_val_input, err_input) = input.enter_region(inner).flat_map(
                 input_key.map(|k| (k, None)),
-                Some(max_demand),
+                max_demand,
                 || {
                     move |row_datums, time, diff| {
                         let binding = SharedRow::get();

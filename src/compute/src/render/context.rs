@@ -356,7 +356,7 @@ where
         key: Option<Row>,
         mut logic: L,
         refuel: usize,
-        max_demand: Option<usize>,
+        max_demand: usize,
     ) -> timely::dataflow::Stream<S, I::Item>
     where
         T: Timestamp + Lattice + Columnation,
@@ -367,7 +367,6 @@ where
     {
         use differential_dataflow::operators::arrange::TraceAgent;
         let mut datums = DatumVec::new();
-        let max_demand = max_demand.unwrap_or(usize::MAX);
         match self {
             MzArrangement::RowRow(inner) => {
                 CollectionBundle::<S, T>::flat_map_core::<TraceAgent<RowRowSpine<_, _>>, Row, _, _, _>(
@@ -470,7 +469,7 @@ where
         key: Option<Row>,
         mut logic: L,
         refuel: usize,
-        max_demand: Option<usize>,
+        max_demand: usize,
     ) -> timely::dataflow::Stream<S, I::Item>
     where
         I: IntoIterator<Item = (D, S::Timestamp, Diff)>,
@@ -478,7 +477,6 @@ where
         L: for<'a, 'b> FnMut(&'a mut DatumVecBorrow<'b>, &'a S::Timestamp, &'a Diff) -> I + 'static,
     {
         let mut datums = DatumVec::new();
-        let max_demand = max_demand.unwrap_or(usize::MAX);
         match self {
             MzArrangementImport::RowRow(inner) => CollectionBundle::<S, T>::flat_map_core::<
                 RowRowEnter<T, Diff, S::Timestamp>,
@@ -573,7 +571,7 @@ where
     pub fn flat_map<D, I, C, L>(
         &self,
         key: Option<Row>,
-        max_demand: Option<usize>,
+        max_demand: usize,
         constructor: C,
     ) -> (
         timely::dataflow::Stream<S, I::Item>,
@@ -810,7 +808,7 @@ where
     pub fn flat_map<D, I, C, L>(
         &self,
         key_val: Option<(Vec<MirScalarExpr>, Option<Row>)>,
-        max_demand: Option<usize>,
+        max_demand: usize,
         constructor: C,
     ) -> (
         timely::dataflow::Stream<S, I::Item>,
@@ -840,11 +838,7 @@ where
             let mut datums = DatumVec::new();
             (
                 oks.inner.flat_map(move |(v, t, d)| {
-                    logic(
-                        &mut datums.borrow_with_limit(&v, max_demand.unwrap_or(usize::MAX)),
-                        &t,
-                        &d,
-                    )
+                    logic(&mut datums.borrow_with_limit(&v, max_demand), &t, &d)
                 }),
                 errs,
             )
@@ -951,11 +945,9 @@ where
         Collection<S, mz_repr::Row, Diff>,
         Collection<S, DataflowError, Diff>,
     ) {
+        let max_demand = mfp.demand().iter().max().map(|x| *x + 1).unwrap_or(0);
+        mfp.permute_fn(|c| c, max_demand);
         mfp.optimize();
-        let max_demand = mfp.demand().iter().max().copied().map(|x| x + 1);
-        if let Some(max_demand) = max_demand {
-            mfp.permute_fn(|c| c, max_demand);
-        }
         let mfp_plan = mfp.into_plan().unwrap();
 
         // If the MFP is trivial, we can just call `as_collection`.
