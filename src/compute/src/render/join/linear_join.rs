@@ -27,13 +27,14 @@ use mz_dyncfg::ConfigSet;
 use mz_repr::fixed_length::ToDatumIter;
 use mz_repr::{DatumVec, Diff, Row, RowArena, SharedRow};
 use mz_storage_types::errors::DataflowError;
-use mz_timely_util::containers::{columnar_exchange, Col2ValBatcher, ColumnBuilder};
+use mz_timely_util::containers::{columnar_exchange, Col2ValBatcher, Column, ColumnBuilder};
 use mz_timely_util::operator::{CollectionExt, StreamExt};
 use timely::dataflow::channels::pact::{ExchangeCore, Pipeline};
 use timely::dataflow::operators::OkErr;
 use timely::dataflow::scopes::Child;
 use timely::dataflow::{Scope, ScopeParent};
 use timely::progress::timestamp::{Refines, Timestamp};
+use timely::Container;
 
 use crate::extensions::arrange::MzArrangeCore;
 use crate::render::context::{ArrangementFlavor, CollectionBundle, Context, ShutdownToken};
@@ -191,11 +192,11 @@ impl YieldSpec {
 enum JoinedFlavor<G, T>
 where
     G: Scope,
-    G::Timestamp: Lattice + Refines<T> + Columnation,
+    G::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
     T: Timestamp + Lattice + Columnation,
 {
     /// Streamed data as a collection.
-    Collection(Collection<G, Row, Diff>),
+    Collection(Collection<G, Row, Diff, Column<(Row, G::Timestamp, Diff)>>),
     /// A dataflow-local arrangement.
     Local(Arranged<G, RowRowAgent<G::Timestamp, Diff>>),
     /// An imported arrangement.
@@ -270,7 +271,7 @@ where
                             let binding = SharedRow::get();
                             let mut row_builder = binding.borrow_mut();
                             let temp_storage = RowArena::new();
-                            let mut datums_local = datums.borrow_with(&row);
+                            let mut datums_local = datums.borrow_with(row);
                             // TODO(mcsherry): re-use `row` allocation.
                             closure
                                 .apply(&mut datums_local, &temp_storage, &mut row_builder)
@@ -314,7 +315,7 @@ where
                         let binding = SharedRow::get();
                         let mut row_builder = binding.borrow_mut();
                         let temp_storage = RowArena::new();
-                        let mut datums_local = datums.borrow_with(&row);
+                        let mut datums_local = datums.borrow_with(row);
                         // TODO(mcsherry): re-use `row` allocation.
                         closure
                             .apply(&mut datums_local, &temp_storage, &mut row_builder)

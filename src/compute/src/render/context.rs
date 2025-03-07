@@ -31,7 +31,7 @@ use mz_repr::fixed_length::ToDatumIter;
 use mz_repr::{DatumVec, DatumVecBorrow, Diff, GlobalId, Row, RowArena, SharedRow};
 use mz_storage_types::controller::CollectionMetadata;
 use mz_storage_types::errors::DataflowError;
-use mz_timely_util::containers::{columnar_exchange, Col2ValBatcher, ColumnBuilder};
+use mz_timely_util::containers::{columnar_exchange, Col2ValBatcher, Column, ColumnBuilder};
 use mz_timely_util::operator::{CollectionExt, StreamExt};
 use timely::container::CapacityContainerBuilder;
 use timely::dataflow::channels::pact::{ExchangeCore, Pipeline};
@@ -66,7 +66,8 @@ use crate::typedefs::{
 pub struct Context<S: Scope, T = mz_repr::Timestamp>
 where
     T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    S::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
+    <S::Timestamp as Columnar>::Container: Clone,
 {
     /// The scope within which all managed collections exist.
     ///
@@ -105,7 +106,8 @@ where
 
 impl<S: Scope> Context<S>
 where
-    S::Timestamp: Lattice + Refines<mz_repr::Timestamp> + Columnation,
+    S::Timestamp: Lattice + Refines<mz_repr::Timestamp> + Columnation + Columnar,
+    <S::Timestamp as Columnar>::Container: Clone,
 {
     /// Creates a new empty Context.
     pub fn for_dataflow_in<Plan>(
@@ -159,7 +161,8 @@ where
 impl<S: Scope, T> Context<S, T>
 where
     T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    S::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
+    <S::Timestamp as Columnar>::Container: Clone,
 {
     /// Insert a collection bundle by an identifier.
     ///
@@ -208,7 +211,8 @@ where
 impl<S: Scope, T> Context<S, T>
 where
     T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    S::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
+    <S::Timestamp as Columnar>::Container: Clone,
 {
     /// Brings the underlying arrangements and collections into a region.
     pub fn enter_region<'a>(
@@ -329,7 +333,8 @@ where
 impl<S: Scope, T> ArrangementFlavor<S, T>
 where
     T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    S::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
+    <S::Timestamp as Columnar>::Container: Clone,
 {
     /// Presents `self` as a stream of updates.
     ///
@@ -339,7 +344,12 @@ where
     /// If you have logic that could be applied to each record, consider using the
     /// `flat_map` methods which allows this and can reduce the work done.
     #[deprecated(note = "Use `flat_map` instead.")]
-    pub fn as_collection(&self) -> (Collection<S, Row, Diff>, Collection<S, DataflowError, Diff>) {
+    pub fn as_collection(
+        &self,
+    ) -> (
+        Collection<S, Row, Diff, Column<(Row, S::Timestamp, Diff)>>,
+        Collection<S, DataflowError, Diff>,
+    ) {
         let mut datums = DatumVec::new();
         let logic = move |k: DatumSeq, v: DatumSeq| {
             let mut datums_borrow = datums.borrow();
@@ -458,20 +468,25 @@ where
 pub struct CollectionBundle<S: Scope, T = mz_repr::Timestamp>
 where
     T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    S::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
+    <S::Timestamp as Columnar>::Container: Clone,
 {
-    pub collection: Option<(Collection<S, Row, Diff>, Collection<S, DataflowError, Diff>)>,
+    pub collection: Option<(
+        Collection<S, Row, Diff, Column<(Row, S::Timestamp, Diff)>>,
+        Collection<S, DataflowError, Diff>,
+    )>,
     pub arranged: BTreeMap<Vec<MirScalarExpr>, ArrangementFlavor<S, T>>,
 }
 
 impl<S: Scope, T: Lattice> CollectionBundle<S, T>
 where
     T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    S::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
+    <S::Timestamp as Columnar>::Container: Clone,
 {
     /// Construct a new collection bundle from update streams.
     pub fn from_collections(
-        oks: Collection<S, Row, Diff>,
+        oks: Collection<S, Row, Diff, Column<(Row, S::Timestamp, Diff)>>,
         errs: Collection<S, DataflowError, Diff>,
     ) -> Self {
         Self {
@@ -540,7 +555,8 @@ where
 impl<'a, S: Scope, T> CollectionBundle<Child<'a, S, S::Timestamp>, T>
 where
     T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    S::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
+    <S::Timestamp as Columnar>::Container: Clone,
 {
     /// Extracts the collection bundle from a region.
     pub fn leave_region(&self) -> CollectionBundle<S, T> {
@@ -561,7 +577,8 @@ where
 impl<S: Scope, T> CollectionBundle<S, T>
 where
     T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    S::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
+    <S::Timestamp as Columnar>::Container: Clone,
 {
     /// Asserts that the arrangement for a specific key
     /// (or the raw collection for no key) exists,
@@ -579,7 +596,10 @@ where
         &self,
         key: Option<&[MirScalarExpr]>,
         config_set: &ConfigSet,
-    ) -> (Collection<S, Row, Diff>, Collection<S, DataflowError, Diff>) {
+    ) -> (
+        Collection<S, Row, Diff, Column<(Row, S::Timestamp, Diff)>>,
+        Collection<S, DataflowError, Diff>,
+    ) {
         // Any operator that uses this method was told to use a particular
         // collection during LIR planning, where we should have made
         // sure that that collection exists.
@@ -637,7 +657,7 @@ where
                 .expect("Should have ensured during planning that this arrangement exists.")
                 .flat_map(val, logic)
         } else {
-            use timely::dataflow::operators::Map;
+            use timely::dataflow::operators::core::Map;
             let (oks, errs) = self
                 .collection
                 .clone()
@@ -645,7 +665,7 @@ where
             let mut datums = DatumVec::new();
             let oks = oks
                 .inner
-                .flat_map(move |(v, t, d)| logic(&mut datums.borrow_with(&v), t, d));
+                .flat_map(move |(v, t, d)| logic(&mut datums.borrow_with(v), t, *d));
             (oks, errs)
         }
     }
@@ -748,7 +768,7 @@ where
         until: Antichain<mz_repr::Timestamp>,
         config_set: &ConfigSet,
     ) -> (
-        Collection<S, mz_repr::Row, Diff>,
+        Collection<S, mz_repr::Row, Diff, Column<(Row, S::Timestamp, Diff)>>,
         Collection<S, DataflowError, Diff>,
     ) {
         mfp.optimize();
@@ -882,12 +902,12 @@ where
     /// columns in the key are not included in the value.
     fn arrange_collection(
         name: &String,
-        oks: Collection<S, Row, i64>,
+        oks: Collection<S, Row, Diff, Column<(Row, S::Timestamp, Diff)>>,
         key: Vec<MirScalarExpr>,
         thinning: Vec<usize>,
     ) -> (
         Arranged<S, RowRowAgent<S::Timestamp, Diff>>,
-        Collection<S, DataflowError, i64>,
+        Collection<S, DataflowError, Diff>,
     ) {
         // The following `unary_fallible` implements a `map_fallible`, but produces columnar updates
         // for the ok stream. The `map_fallible` cannot be used here because the closure cannot
@@ -895,7 +915,7 @@ where
         // a bespoke operator that also optimizes reuse of allocations across individual updates.
         let (oks, errs) = oks
             .inner
-            .unary_fallible::<ColumnBuilder<((Row, Row), S::Timestamp, i64)>, _, _, _>(
+            .unary_fallible::<ColumnBuilder<((Row, Row), S::Timestamp, Diff)>, _, _, _>(
                 Pipeline,
                 "FormArrangementKey",
                 move |_, _| {
@@ -918,7 +938,11 @@ where
                                         ok_session.give(((&*key_buf, &*val_buf), time, diff));
                                     }
                                     Err(e) => {
-                                        err_session.give((e.into(), time.clone(), *diff));
+                                        err_session.give((
+                                            e.into(),
+                                            Columnar::into_owned(time),
+                                            *diff,
+                                        ));
                                     }
                                 }
                             }

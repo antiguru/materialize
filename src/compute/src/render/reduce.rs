@@ -11,9 +11,7 @@
 //!
 //! Consult [ReducePlan] documentation for details.
 
-use std::collections::BTreeMap;
-use std::sync::LazyLock;
-
+use columnar::Columnar;
 use dec::OrderedDecimal;
 use differential_dataflow::collection::AsCollection;
 use differential_dataflow::consolidation::ConsolidatingContainerBuilder;
@@ -38,6 +36,8 @@ use mz_repr::{Datum, DatumList, DatumVec, Diff, Row, RowArena, SharedRow};
 use mz_storage_types::errors::DataflowError;
 use mz_timely_util::operator::CollectionExt;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::LazyLock;
 use timely::container::{CapacityContainerBuilder, PushInto};
 use timely::dataflow::Scope;
 use timely::progress::timestamp::Refines;
@@ -62,7 +62,8 @@ use crate::typedefs::{
 impl<G, T> Context<G, T>
 where
     G: Scope,
-    G::Timestamp: Lattice + Refines<T> + Columnation,
+    G::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
+    <G::Timestamp as Columnar>::Container: Clone,
     T: Timestamp + Lattice + Columnation,
 {
     /// Renders a `MirRelationExpr::Reduce` using various non-obvious techniques to

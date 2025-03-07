@@ -117,7 +117,7 @@ use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::{Arranged, ShutdownButton};
 use differential_dataflow::trace::TraceReader;
 use differential_dataflow::IntoOwned;
-use differential_dataflow::{AsCollection, Collection, Data};
+use differential_dataflow::{AsCollection, Collection};
 use futures::channel::oneshot;
 use futures::FutureExt;
 use mz_compute_types::dataflows::{DataflowDescription, IndexDesc};
@@ -140,7 +140,7 @@ use mz_timely_util::operator::{CollectionExt, StreamExt};
 use mz_timely_util::probe::{Handle as MzProbeHandle, ProbeNotify};
 use timely::communication::Allocate;
 use timely::dataflow::channels::pact::Pipeline;
-use timely::dataflow::operators::to_stream::ToStream;
+use timely::dataflow::operators::core::ToStream;
 use timely::dataflow::operators::{probe, BranchWhen, Capability, Operator, Probe};
 use timely::dataflow::scopes::Child;
 use timely::dataflow::{Scope, Stream, StreamCore};
@@ -149,7 +149,7 @@ use timely::progress::timestamp::Refines;
 use timely::progress::{Antichain, Timestamp};
 use timely::scheduling::ActivateOnDrop;
 use timely::worker::Worker as TimelyWorker;
-use timely::PartialOrder;
+use timely::{Container, Data, PartialOrder};
 
 use crate::arrangement::manager::TraceBundle;
 use crate::compute_state::ComputeState;
@@ -175,6 +175,8 @@ mod top_k;
 
 pub use context::CollectionBundle;
 pub use join::LinearJoinSpec;
+use mz_timely_util::containers::Column;
+use mz_timely_util::enter_data::EnterData;
 
 /// Assemble the "compute"  side of a dataflow, i.e. all but the sources.
 ///
@@ -366,7 +368,7 @@ pub fn build_compute_dataflow<A: Allocate>(
 
                 for (id, (oks, errs)) in imported_sources.into_iter() {
                     let bundle = crate::render::CollectionBundle::from_collections(
-                        oks.enter(region),
+                        oks.inner.enter_data(region).as_collection(),
                         errs.enter(region),
                     );
                     // Associate collection bundle with the source identifier.
@@ -1290,9 +1292,13 @@ where
         }
     }
 
-    fn log_operator_hydration_inner<D>(&self, stream: &Stream<G, D>, lir_id: LirId) -> Stream<G, D>
+    fn log_operator_hydration_inner<C>(
+        &self,
+        stream: &StreamCore<G, C>,
+        lir_id: LirId,
+    ) -> StreamCore<G, C>
     where
-        D: Clone + 'static,
+        C: Data + Container,
     {
         let Some(logger) = self.hydration_logger.clone() else {
             return stream.clone(); // hydration logging disabled
@@ -1548,13 +1554,13 @@ where
 /// still be upstream of `arrange_core` operators when those get to know about us dropping the
 /// minimum capability. The in-flight snapshot updates would hold back the input frontiers of
 /// `arrange_core` operators to the `as_of`, which would cause them to insert empty batches.
-fn suppress_early_progress<G, D>(
-    stream: Stream<G, D>,
+fn suppress_early_progress<G, C>(
+    stream: StreamCore<G, C>,
     as_of: Antichain<G::Timestamp>,
-) -> Stream<G, D>
+) -> StreamCore<G, C>
 where
     G: Scope,
-    D: Data,
+    C: Data + Container,
 {
     stream.unary_frontier(Pipeline, "SuppressEarlyProgress", |default_cap, _info| {
         let mut early_cap = Some(default_cap);
@@ -1668,6 +1674,112 @@ where
                             .iter()
                             .flat_map(|(_, time, _)| u64::from(time).checked_add(slack_ms))
                         {
+                            let rounded_time =
+                                (time / slack_ms).saturating_add(1).saturating_mul(slack_ms);
+                            if !upper.less_than(&rounded_time.into()) {
+                                pending_times.insert(rounded_time.into());
+                            }
+                        }
+                        output.session(&cap).give_container(data);
+                        if retained_cap.as_ref().is_none_or(|c| {
+                            !c.time().less_than(cap.time()) && !upper.less_than(cap.time())
+                        }) {
+                            retained_cap = Some(cap.retain());
+                        }
+                    }
+
+                    handle.with_frontier(|f| {
+                        while pending_times
+                            .first()
+                            .map_or(false, |retained_time| !f.less_than(&retained_time))
+                        {
+                            let _ = pending_times.pop_first();
+                        }
+                    });
+
+                    while limit.map_or(false, |limit| pending_times.len() > limit) {
+                        let _ = pending_times.pop_first();
+                    }
+
+                    match (retained_cap.as_mut(), pending_times.first()) {
+                        (Some(cap), Some(first)) => cap.downgrade(first),
+                        (_, None) => retained_cap = None,
+                        _ => {}
+                    }
+
+                    if input.frontier.is_empty() {
+                        retained_cap = None;
+                        pending_times.clear();
+                    }
+
+                    if !pending_times.is_empty() {
+                        tracing::debug!(
+                            name,
+                            info.global_id,
+                            pending_times = %PendingTimesDisplay(pending_times.iter().cloned()),
+                            frontier = ?input.frontier.frontier().get(0),
+                            probe = ?handle.with_frontier(|f| f.get(0).cloned()),
+                            ?upper,
+                            "pending times",
+                        );
+                    }
+                }
+            });
+        (Rc::new(button.unwrap().press_on_drop()), stream)
+    }
+}
+
+// TODO: We could make this generic over a `T` that can be converted to and from a u64 millisecond
+// number.
+impl<G, D, R> LimitProgress<mz_repr::Timestamp>
+    for StreamCore<G, Column<(D, mz_repr::Timestamp, R)>>
+where
+    G: Scope<Timestamp = mz_repr::Timestamp>,
+    D: timely::Data + Columnar,
+    R: timely::Data + Columnar,
+    Column<(D, mz_repr::Timestamp, R)>: Data,
+{
+    fn limit_progress(
+        &self,
+        handle: MzProbeHandle<mz_repr::Timestamp>,
+        slack_ms: u64,
+        limit: Option<usize>,
+        upper: Antichain<mz_repr::Timestamp>,
+        name: String,
+    ) -> (Rc<dyn Any>, Self) {
+        let mut button = None;
+
+        let stream =
+            self.unary_frontier(Pipeline, &format!("LimitProgress({name})"), |_cap, info| {
+                // Times that we've observed on our input.
+                let mut pending_times: BTreeSet<G::Timestamp> = BTreeSet::new();
+                // Capability for the lower bound of `pending_times`, if any.
+                let mut retained_cap: Option<Capability<G::Timestamp>> = None;
+
+                let activator = self.scope().activator_for(info.address);
+                handle.activate(activator.clone());
+
+                let shutdown = Rc::new(());
+                button = Some(ShutdownButton::new(
+                    Rc::new(RefCell::new(Some(Rc::clone(&shutdown)))),
+                    activator,
+                ));
+                let shutdown = Rc::downgrade(&shutdown);
+
+                move |input, output| {
+                    // We've been shut down, release all resources and consume inputs.
+                    if shutdown.strong_count() == 0 {
+                        retained_cap = None;
+                        pending_times.clear();
+                        while let Some(_) = input.next() {}
+                        return;
+                    }
+
+                    while let Some((cap, data)) = input.next() {
+                        for time in data.iter().flat_map(|(_, time, _)| {
+                            u64::from(<mz_repr::Timestamp as Columnar>::into_owned(time))
+                                .checked_add(slack_ms)
+                        }) {
                             let rounded_time =
                                 (time / slack_ms).saturating_add(1).saturating_mul(slack_ms);
                             if !upper.less_than(&rounded_time.into()) {

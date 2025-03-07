@@ -113,6 +113,11 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::compute_state::ComputeState;
+use crate::render::sinks::SinkRender;
+use crate::render::StartSignal;
+use crate::sink::correction::Correction;
+use crate::sink::refresh::apply_refresh;
 use differential_dataflow::{AsCollection, Collection, Hashable};
 use futures::StreamExt;
 use mz_compute_types::sinks::{ComputeSinkDesc, MaterializedViewSinkConnection};
@@ -131,22 +136,17 @@ use mz_storage_types::errors::DataflowError;
 use mz_storage_types::sources::SourceData;
 use mz_timely_util::builder_async::PressOnDropButton;
 use mz_timely_util::builder_async::{Event, OperatorBuilder};
+use mz_timely_util::containers::Column;
 use mz_timely_util::probe::{Handle, ProbeNotify};
 use serde::{Deserialize, Serialize};
 use timely::container::CapacityContainerBuilder;
 use timely::dataflow::channels::pact::{Exchange, Pipeline};
 use timely::dataflow::operators::{probe, Broadcast, Capability, CapabilitySet};
-use timely::dataflow::{Scope, Stream};
+use timely::dataflow::{Scope, Stream, StreamCore};
 use timely::progress::Antichain;
 use timely::PartialOrder;
 use tokio::sync::watch;
 use tracing::trace;
-
-use crate::compute_state::ComputeState;
-use crate::render::sinks::SinkRender;
-use crate::render::StartSignal;
-use crate::sink::correction::Correction;
-use crate::sink::refresh::apply_refresh;
 
 impl<G> SinkRender<G> for MaterializedViewSinkConnection<CollectionMetadata>
 where
@@ -206,8 +206,10 @@ type DesiredStreams<S> =
     OkErr<Stream<S, (Row, Timestamp, Diff)>, Stream<S, (DataflowError, Timestamp, Diff)>>;
 
 /// Type of the `persist` stream, split into `Ok` and `Err` streams.
-type PersistStreams<S> =
-    OkErr<Stream<S, (Row, Timestamp, Diff)>, Stream<S, (DataflowError, Timestamp, Diff)>>;
+type PersistStreams<S> = OkErr<
+    StreamCore<S, Column<(Row, Timestamp, Diff)>>,
+    Stream<S, (DataflowError, Timestamp, Diff)>,
+>;
 
 /// Type of the `descs` stream.
 type DescsStream<S> = Stream<S, BatchDescription>;
@@ -710,6 +712,9 @@ mod mint {
 /// Implementation of the `write` operator.
 mod write {
     use super::*;
+    use columnar::Columnar;
+    use mz_timely_util::containers::ColumnBuilder;
+    use timely::dataflow::channels::pact::ExchangeCore;
 
     /// Render the `write` operator.
     ///
@@ -740,9 +745,13 @@ mod write {
 
         let (batches_output, batches_output_stream) = op.new_output();
 
+        type ExchangeColumn<T, F> = ExchangeCore<ColumnBuilder<T>, F>;
+
         // It is important that we exchange the `desired` and `persist` data the same way, so
         // updates that cancel each other out end up on the same worker.
         let exchange_ok = |(d, _, _): &(Row, Timestamp, Diff)| d.hashed();
+        let exchange_ok_column =
+            |(d, _, _): &<(Row, Timestamp, Diff) as Columnar>::Ref<'_>| d.hashed();
         let exchange_err = |(d, _, _): &(DataflowError, Timestamp, Diff)| d.hashed();
 
         let mut desired_inputs = OkErr::new(
@@ -750,7 +759,7 @@ mod write {
             op.new_disconnected_input(&desired.err, Exchange::new(exchange_err)),
         );
         let mut persist_inputs = OkErr::new(
-            op.new_disconnected_input(&persist.ok, Exchange::new(exchange_ok)),
+            op.new_disconnected_input(&persist.ok, ExchangeColumn::new_core(exchange_ok_column)),
             op.new_disconnected_input(&persist.err, Exchange::new(exchange_err)),
         );
         let mut descs_input = op.new_input_for(&descs.broadcast(), Pipeline, &batches_output);

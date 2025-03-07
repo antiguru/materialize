@@ -20,6 +20,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::metrics::BackpressureMetrics;
 use differential_dataflow::lattice::Lattice;
 use futures::{future::Either, StreamExt};
 use mz_expr::{ColumnSpecs, Interpreter, MfpPlan, ResultSpec, UnmaterializableFunc};
@@ -41,19 +42,22 @@ use mz_storage_types::stats::RelationPartStats;
 use mz_timely_util::builder_async::{
     Event, OperatorBuilder as AsyncOperatorBuilder, PressOnDropButton,
 };
+use mz_timely_util::containers::{Column, ColumnBuilder};
+use mz_timely_util::ok_err::OkErrCB;
 use mz_timely_util::probe::ProbeNotify;
 use mz_txn_wal::operator::{txns_progress, TxnsContext};
 use serde::{Deserialize, Serialize};
 use timely::communication::Push;
+use timely::container::CapacityContainerBuilder;
 use timely::dataflow::channels::pact::Pipeline;
 use timely::dataflow::channels::Message;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
 use timely::dataflow::operators::generic::OutputHandleCore;
-use timely::dataflow::operators::{Capability, Leave, OkErr};
+use timely::dataflow::operators::{Capability, Leave};
 use timely::dataflow::operators::{CapabilitySet, ConnectLoop, Feedback};
 use timely::dataflow::scopes::Child;
-use timely::dataflow::ScopeParent;
 use timely::dataflow::{Scope, Stream};
+use timely::dataflow::{ScopeParent, StreamCore};
 use timely::order::TotalOrder;
 use timely::progress::timestamp::PathSummary;
 use timely::progress::Antichain;
@@ -62,8 +66,6 @@ use timely::scheduling::Activator;
 use timely::PartialOrder;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::trace;
-
-use crate::metrics::BackpressureMetrics;
 
 /// This opaque token represents progress within a timestamp, allowing finer-grained frontier
 /// progress than would otherwise be possible.
@@ -150,7 +152,7 @@ pub fn persist_source<G>(
     start_signal: impl Future<Output = ()> + 'static,
     error_handler: impl FnOnce(String) -> Pin<Box<dyn Future<Output = ()>>> + 'static,
 ) -> (
-    Stream<G, (Row, Timestamp, Diff)>,
+    StreamCore<G, Column<(Row, Timestamp, Diff)>>,
     Stream<G, (DataflowError, Timestamp, Diff)>,
     Vec<PressOnDropButton>,
 )
@@ -255,10 +257,13 @@ where
         None => (stream, vec![]),
     };
     tokens.extend(txns_tokens);
-    let (ok_stream, err_stream) = stream.ok_err(|(d, t, r)| match d {
-        Ok(row) => Ok((row, t.0, r)),
-        Err(err) => Err((err, t.0, r)),
-    });
+    let (ok_stream, err_stream) = stream
+        .ok_err_cb::<ColumnBuilder<_>, CapacityContainerBuilder<_>, _>(|(d, t, r), out1, out2| {
+            match d {
+                Ok(row) => out1.give(&(row, t.0, r)),
+                Err(err) => out2.give((err, t.0, r)),
+            }
+        });
     (ok_stream, err_stream, tokens)
 }
 

@@ -11,14 +11,15 @@ use columnar::Columnar;
 use differential_dataflow::consolidation::ConsolidatingContainerBuilder;
 use mz_expr::MfpPlan;
 use mz_expr::{MapFilterProject, MirScalarExpr, TableFunc};
-use mz_repr::{DatumVec, RowArena, SharedRow};
+use mz_repr::{DatumVec, RowArena, RowRef, SharedRow};
 use mz_repr::{Diff, Row, Timestamp};
 use mz_timely_util::operator::StreamExt;
 use timely::dataflow::channels::pact::Pipeline;
 use timely::dataflow::channels::pushers::buffer::Session;
 use timely::dataflow::channels::pushers::{Counter, Tee};
 use timely::dataflow::Scope;
-use timely::progress::Antichain;
+use timely::progress::{Antichain, Timestamp as _};
+use timely::Container;
 
 use crate::render::context::{CollectionBundle, Context};
 use crate::render::DataflowError;
@@ -51,15 +52,18 @@ where
                 // Buffer for extensions to `input_row`.
                 let mut table_func_output = Vec::new();
 
+                let mut time_owned = G::Timestamp::minimum();
+
                 input.for_each(|cap, data| {
                     let mut ok_session = ok_output.session_with_builder(&cap);
                     let mut err_session = err_output.session_with_builder(&cap);
 
-                    'input: for (input_row, time, diff) in data.drain(..) {
+                    'input: for (input_row, time, diff) in data.iter() {
+                        Columnar::copy_from(&mut time_owned, time);
                         let temp_storage = RowArena::new();
 
                         // Unpack datums for expression evaluation.
-                        let datums_local = datums.borrow_with(&input_row);
+                        let datums_local = datums.borrow_with(input_row);
                         let args = exprs
                             .iter()
                             .map(|e| e.eval(&datums_local, &temp_storage))
@@ -67,14 +71,14 @@ where
                         let args = match args {
                             Ok(args) => args,
                             Err(e) => {
-                                err_session.give((e.into(), time, diff));
+                                err_session.give((e.into(), time_owned, *diff));
                                 continue 'input;
                             }
                         };
                         let mut extensions = match func.eval(&args, &temp_storage) {
                             Ok(exts) => exts.fuse(),
                             Err(e) => {
-                                err_session.give((e.into(), time, diff));
+                                err_session.give((e.into(), time_owned, *diff));
                                 continue 'input;
                             }
                         };
@@ -85,8 +89,8 @@ where
                             table_func_output.extend((&mut extensions).take(1023));
                             // We could consolidate `table_func_output`, but it seems unlikely to be productive.
                             drain_through_mfp(
-                                &input_row,
-                                &time,
+                                input_row,
+                                &time_owned,
                                 &diff,
                                 &mut datums_mfp,
                                 &table_func_output,
@@ -114,7 +118,7 @@ where
 ///
 /// The method decodes `input_row`, and should be amortized across non-trivial `extensions`.
 fn drain_through_mfp<T>(
-    input_row: &Row,
+    input_row: &RowRef,
     input_time: &T,
     input_diff: &Diff,
     datum_vec: &mut DatumVec,

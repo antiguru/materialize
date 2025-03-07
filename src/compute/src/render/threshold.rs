@@ -11,6 +11,7 @@
 //!
 //! Consult [ThresholdPlan] documentation for details.
 
+use columnar::Columnar;
 use differential_dataflow::containers::Columnation;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::{Arranged, TraceAgent};
@@ -77,7 +78,8 @@ pub fn build_threshold_basic<G, T>(
 ) -> CollectionBundle<G, T>
 where
     G: Scope,
-    G::Timestamp: Lattice + Refines<T> + Columnation,
+    G::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
+    <G::Timestamp as Columnar>::Container: Clone,
     T: Timestamp + Lattice + Columnation,
 {
     let arrangement = input
@@ -109,7 +111,8 @@ where
 impl<G, T> Context<G, T>
 where
     G: Scope,
-    G::Timestamp: Lattice + Refines<T> + Columnation,
+    G::Timestamp: Lattice + Refines<T> + Columnation + Columnar,
+    <G::Timestamp as Columnar>::Container: Clone,
     T: Timestamp + Lattice + Columnation,
 {
     pub(crate) fn render_threshold(

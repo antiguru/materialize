@@ -12,6 +12,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::healthcheck::HealthStatusMessage;
+use crate::internal_control::InternalStorageCommand;
+use crate::storage_state::StorageState;
 use differential_dataflow::operators::arrange::Arrange;
 use differential_dataflow::trace::implementations::ord_neu::{
     ColValBatcher, ColValBuilder, ColValSpine,
@@ -26,14 +29,11 @@ use mz_storage_types::controller::CollectionMetadata;
 use mz_storage_types::errors::DataflowError;
 use mz_storage_types::sinks::{StorageSinkConnection, StorageSinkDesc};
 use mz_timely_util::builder_async::PressOnDropButton;
+use mz_timely_util::containers::Column;
 use timely::dataflow::operators::Leave;
 use timely::dataflow::scopes::Child;
 use timely::dataflow::{Scope, Stream};
 use tracing::warn;
-
-use crate::healthcheck::HealthStatusMessage;
-use crate::internal_control::InternalStorageCommand;
-use crate::storage_state::StorageState;
 
 /// _Renders_ complete _differential_ [`Collection`]s
 /// that represent the sink and its errors as requested
@@ -105,7 +105,7 @@ fn zip_into_diff_pairs<G>(
     sink_id: GlobalId,
     sink: &StorageSinkDesc<CollectionMetadata, mz_repr::Timestamp>,
     sink_render: &dyn SinkRender<G>,
-    collection: Collection<G, Row, Diff>,
+    collection: Collection<G, Row, Diff, Column<(Row, G::Timestamp, Diff)>>,
 ) -> Collection<G, (Option<Row>, DiffPair<Row>), Diff>
 where
     G: Scope<Timestamp = Timestamp>,
@@ -127,14 +127,16 @@ where
     let key_is_synthetic = key_indices.is_none();
 
     let collection = match key_indices {
-        None => collection.map(|row| (Some(Row::pack(Some(Datum::UInt64(row.hashed())))), row)),
+        None => collection
+            .inner
+            .map(|row| (Some(Row::pack(Some(Datum::UInt64(row.hashed())))), row)),
         Some(key_indices) => {
             let mut datum_vec = mz_repr::DatumVec::new();
             collection.map(move |row| {
                 // TODO[perf] (btv) - is there a way to avoid unpacking and
                 // repacking every row and cloning the datums? Does it matter?
                 let key = {
-                    let datums = datum_vec.borrow_with(&row);
+                    let datums = datum_vec.borrow_with(row);
                     Row::pack(key_indices.iter().map(|&idx| datums[idx].clone()))
                 };
                 (Some(key), row)

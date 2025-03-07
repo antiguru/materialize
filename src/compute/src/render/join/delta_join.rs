@@ -27,10 +27,12 @@ use mz_expr::MirScalarExpr;
 use mz_repr::fixed_length::ToDatumIter;
 use mz_repr::{DatumVec, Diff, Row, RowArena, SharedRow};
 use mz_storage_types::errors::DataflowError;
+use mz_timely_util::containers::{Column, ColumnBuilder};
 use mz_timely_util::operator::{CollectionExt, StreamExt};
 use timely::container::CapacityContainerBuilder;
 use timely::dataflow::channels::pact::Pipeline;
-use timely::dataflow::operators::{Map, OkErr};
+use timely::dataflow::operators::core::Map;
+use timely::dataflow::operators::OkErr;
 use timely::dataflow::Scope;
 use timely::progress::timestamp::Refines;
 use timely::progress::Antichain;
@@ -463,7 +465,10 @@ fn build_update_stream<G, Tr>(
     as_of: Antichain<mz_repr::Timestamp>,
     source_relation: usize,
     initial_closure: JoinClosure,
-) -> (Collection<G, Row, Diff>, Collection<G, DataflowError, Diff>)
+) -> (
+    Collection<G, Row, Diff, Column<(Row, G::Timestamp, Diff)>>,
+    Collection<G, DataflowError, Diff>,
+)
 where
     G: Scope,
     G::Timestamp: RenderTimestamp,
@@ -479,74 +484,74 @@ where
         inner_as_of.insert(<G::Timestamp>::to_inner(event_time.clone()));
     }
 
-    let (ok_stream, err_stream) =
-        trace
-            .stream
-            .unary_fallible(Pipeline, "UpdateStream", move |_, _| {
-                let mut datums = DatumVec::new();
-                Box::new(move |input, ok_output, err_output| {
-                    input.for_each(|time, data| {
-                        let binding = SharedRow::get();
-                        let mut row_builder = binding.borrow_mut();
-                        let mut ok_session = ok_output.session(&time);
-                        let mut err_session = err_output.session(&time);
+    let (ok_stream, err_stream) = trace.stream.unary_fallible::<ColumnBuilder<_>, _, _, _>(
+        Pipeline,
+        "UpdateStream",
+        move |_, _| {
+            let mut datums = DatumVec::new();
+            Box::new(move |input, ok_output, err_output| {
+                input.for_each(|time, data| {
+                    let binding = SharedRow::get();
+                    let mut row_builder = binding.borrow_mut();
+                    let mut ok_session = ok_output.session_with_builder(&time);
+                    let mut err_session = err_output.session(&time);
 
-                        for wrapper in data.iter() {
-                            let batch = &wrapper;
-                            let mut cursor = batch.cursor();
-                            while let Some(key) = cursor.get_key(batch) {
-                                while let Some(val) = cursor.get_val(batch) {
-                                    cursor.map_times(batch, |time, diff| {
-                                        // note: only the delta path for the first relation will see
-                                        // updates at start-up time
-                                        if source_relation == 0
-                                            || inner_as_of.elements().iter().all(|e| e != time)
-                                        {
-                                            let time = time.into_owned();
-                                            let temp_storage = RowArena::new();
+                    for wrapper in data.iter() {
+                        let batch = &wrapper;
+                        let mut cursor = batch.cursor();
+                        while let Some(key) = cursor.get_key(batch) {
+                            while let Some(val) = cursor.get_val(batch) {
+                                cursor.map_times(batch, |time, diff| {
+                                    // note: only the delta path for the first relation will see
+                                    // updates at start-up time
+                                    if source_relation == 0
+                                        || inner_as_of.elements().iter().all(|e| e != time)
+                                    {
+                                        let time = time.into_owned();
+                                        let temp_storage = RowArena::new();
 
-                                            let mut datums_local = datums.borrow();
-                                            datums_local.extend(key.to_datum_iter());
-                                            datums_local.extend(val.to_datum_iter());
+                                        let mut datums_local = datums.borrow();
+                                        datums_local.extend(key.to_datum_iter());
+                                        datums_local.extend(val.to_datum_iter());
 
-                                            if !initial_closure.is_identity() {
-                                                match initial_closure
-                                                    .apply(
-                                                        &mut datums_local,
-                                                        &temp_storage,
-                                                        &mut row_builder,
-                                                    )
-                                                    .transpose()
-                                                {
-                                                    Some(Ok(row)) => ok_session.give((
-                                                        row,
-                                                        time,
-                                                        diff.into_owned(),
-                                                    )),
-                                                    Some(Err(err)) => err_session.give((
-                                                        err,
-                                                        time,
-                                                        diff.into_owned(),
-                                                    )),
-                                                    None => {}
+                                        if !initial_closure.is_identity() {
+                                            match initial_closure
+                                                .apply(
+                                                    &mut datums_local,
+                                                    &temp_storage,
+                                                    &mut row_builder,
+                                                )
+                                                .transpose()
+                                            {
+                                                Some(Ok(row)) => ok_session.give((
+                                                    &row,
+                                                    &time,
+                                                    &diff.into_owned(),
+                                                )),
+                                                Some(Err(err)) => {
+                                                    err_session.give((err, time, diff.into_owned()))
                                                 }
-                                            } else {
-                                                let row = {
-                                                    row_builder.packer().extend(&*datums_local);
-                                                    row_builder.clone()
-                                                };
-                                                ok_session.give((row, time, diff.into_owned()));
+                                                None => {}
                                             }
+                                        } else {
+                                            row_builder.packer().extend(&*datums_local);
+                                            ok_session.give((
+                                                &*row_builder,
+                                                &time,
+                                                &diff.into_owned(),
+                                            ));
                                         }
-                                    });
-                                    cursor.step_val(batch);
-                                }
-                                cursor.step_key(batch);
+                                    }
+                                });
+                                cursor.step_val(batch);
                             }
+                            cursor.step_key(batch);
                         }
-                    });
-                })
-            });
+                    }
+                });
+            })
+        },
+    );
 
     (
         ok_stream.as_collection(),

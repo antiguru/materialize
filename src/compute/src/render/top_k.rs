@@ -11,6 +11,15 @@
 //!
 //! Consult [TopKPlan] documentation for details.
 
+use crate::extensions::arrange::{ArrangementSize, KeyCollection, MzArrange};
+use crate::extensions::reduce::MzReduce;
+use crate::render::context::{CollectionBundle, Context};
+use crate::render::errors::MaybeValidatingRow;
+use crate::render::Pairer;
+use crate::row_spine::{
+    DatumSeq, RowBatcher, RowBuilder, RowRowBatcher, RowRowBuilder, RowValBuilder, RowValSpine,
+};
+use crate::typedefs::{KeyBatcher, RowRowSpine, RowSpine};
 use columnar::Columnar;
 use differential_dataflow::containers::Columnation;
 use differential_dataflow::hashable::Hashable;
@@ -28,6 +37,7 @@ use mz_ore::cast::CastFrom;
 use mz_ore::soft_assert_or_log;
 use mz_repr::{Datum, DatumVec, Diff, Row, ScalarType, SharedRow};
 use mz_storage_types::errors::DataflowError;
+use mz_timely_util::containers::Column;
 use mz_timely_util::operator::CollectionExt;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -37,16 +47,6 @@ use timely::dataflow::channels::pact::Pipeline;
 use timely::dataflow::operators::Operator;
 use timely::dataflow::Scope;
 use timely::Container;
-
-use crate::extensions::arrange::{ArrangementSize, KeyCollection, MzArrange};
-use crate::extensions::reduce::MzReduce;
-use crate::render::context::{CollectionBundle, Context};
-use crate::render::errors::MaybeValidatingRow;
-use crate::render::Pairer;
-use crate::row_spine::{
-    DatumSeq, RowBatcher, RowBuilder, RowRowBatcher, RowRowBuilder, RowValBuilder, RowValSpine,
-};
-use crate::typedefs::{KeyBatcher, RowRowSpine, RowSpine};
 
 // The implementation requires integer timestamps to be able to delay feedback for monotonic inputs.
 impl<G> Context<G>
@@ -89,7 +89,7 @@ where
                     let mut datum_vec = mz_repr::DatumVec::new();
                     let errors = ok_input.flat_map(move |row| {
                         let temp_storage = mz_repr::RowArena::new();
-                        let datums = datum_vec.borrow_with(&row);
+                        let datums = datum_vec.borrow_with(row);
                         match expr.eval(&datums[..], &temp_storage) {
                             Ok(l) if l != Datum::Null && l.unwrap_int64() < 0 => {
                                 Some(EvalError::NegLimit.into())
@@ -138,7 +138,7 @@ where
                     let collection = ok_input
                         .map(move |row| {
                             let group_row = {
-                                let datums = datum_vec.borrow_with(&row);
+                                let datums = datum_vec.borrow_with(row);
                                 SharedRow::pack(group_key.iter().map(|i| datums[*i]))
                             };
                             (group_row, row)
@@ -250,7 +250,7 @@ where
     /// Constructs a TopK dataflow subgraph.
     fn build_topk<S>(
         &self,
-        collection: Collection<S, Row, Diff>,
+        collection: Collection<S, Row, Diff, Column<(Row, S::Timestamp, Diff)>>,
         group_key: Vec<usize>,
         order_key: Vec<mz_expr::ColumnOrder>,
         offset: usize,
@@ -447,11 +447,14 @@ where
 
     fn render_top1_monotonic<S>(
         &self,
-        collection: Collection<S, Row, Diff>,
+        collection: Collection<S, Row, Diff, Column<(Row, S::Timestamp, Diff)>>,
         group_key: Vec<usize>,
         order_key: Vec<mz_expr::ColumnOrder>,
         must_consolidate: bool,
-    ) -> (Collection<S, Row, Diff>, Collection<S, DataflowError, Diff>)
+    ) -> (
+        Collection<S, Row, Diff, Column<(Row, S::Timestamp, Diff)>>,
+        Collection<S, DataflowError, Diff>,
+    )
     where
         S: Scope<Timestamp = G::Timestamp>,
     {
@@ -465,7 +468,7 @@ where
                 move |row| {
                     // Scoped to allow borrow of `row` to drop.
                     let group_key = {
-                        let datums = datum_vec.borrow_with(&row);
+                        let datums = datum_vec.borrow_with(row);
                         SharedRow::pack(group_key.iter().map(|i| datums[*i]))
                     };
                     (group_key, row)
