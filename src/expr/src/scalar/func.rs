@@ -70,6 +70,7 @@ use crate::{like_pattern, EvalError, MirScalarExpr};
 
 #[macro_use]
 mod macros;
+mod binary;
 mod encoding;
 pub(crate) mod format;
 pub(crate) mod impls;
@@ -310,12 +311,18 @@ pub fn jsonb_stringify<'a>(a: Datum<'a>, temp_storage: &'a RowArena) -> Datum<'a
     }
 }
 
-fn add_int16<'a>(a: Datum<'a>, b: Datum<'a>) -> Result<Datum<'a>, EvalError> {
-    a.unwrap_int16()
-        .checked_add(b.unwrap_int16())
-        .ok_or(EvalError::NumericFieldOverflow)
-        .map(Datum::from)
-}
+sqlfunc!(
+    #[is_infix_op = true]
+    fn add_int16<'a>(
+        a: Datum<'a>,
+        b: Datum<'a>,
+        _temp_storage: &RowArena,
+    ) -> Result<i16, EvalError> {
+        a.unwrap_int16()
+            .checked_add(b.unwrap_int16())
+            .ok_or(EvalError::NumericFieldOverflow)
+    }
+);
 
 fn add_int32<'a>(a: Datum<'a>, b: Datum<'a>) -> Result<Datum<'a>, EvalError> {
     a.unwrap_int32()
@@ -2488,13 +2495,20 @@ impl BinaryFunc {
         a_expr: &'a MirScalarExpr,
         b_expr: &'a MirScalarExpr,
     ) -> Result<Datum<'a>, EvalError> {
+        use binary::LazyBinaryFunc;
+
+        match self {
+            BinaryFunc::AddInt16 => return AddInt16.eval(datums, temp_storage, a_expr, b_expr),
+            _ => {}
+        }
+
         let a = a_expr.eval(datums, temp_storage)?;
         let b = b_expr.eval(datums, temp_storage)?;
         if self.propagates_nulls() && (a.is_null() || b.is_null()) {
             return Ok(Datum::Null);
         }
         match self {
-            BinaryFunc::AddInt16 => add_int16(a, b),
+            BinaryFunc::AddInt16 => unreachable!("handled above"),
             BinaryFunc::AddInt32 => add_int32(a, b),
             BinaryFunc::AddInt64 => add_int64(a, b),
             BinaryFunc::AddUInt16 => add_uint16(a, b),
@@ -2751,6 +2765,11 @@ impl BinaryFunc {
     }
 
     pub fn output_type(&self, input1_type: ColumnType, input2_type: ColumnType) -> ColumnType {
+        match self {
+            Self::AddInt16 => return AddInt16.output_type(input1_type, input2_type),
+            _ => {}
+        }
+
         use BinaryFunc::*;
         let in_nullable = input1_type.nullable || input2_type.nullable;
         match self {
@@ -2947,6 +2966,11 @@ impl BinaryFunc {
 
     /// Whether the function output is NULL if any of its inputs are NULL.
     pub fn propagates_nulls(&self) -> bool {
+        match self {
+            Self::AddInt16 => return binary::LazyBinaryFunc::propagates_nulls(&AddInt16),
+            _ => {}
+        }
+
         // NOTE: The following is a list of the binary functions
         // that **DO NOT** propagate nulls.
         !matches!(
@@ -2966,6 +2990,13 @@ impl BinaryFunc {
     /// This is presently conservative, and may indicate that a function
     /// introduces nulls even when it does not.
     pub fn introduces_nulls(&self) -> bool {
+        match self {
+            Self::AddInt16 => return binary::LazyBinaryFunc::introduces_nulls(&AddInt16),
+            other => other.introduces_nulls_inner(),
+        }
+    }
+
+    fn introduces_nulls_inner(&self) -> bool {
         use BinaryFunc::*;
         match self {
             AddInt16
@@ -3167,6 +3198,13 @@ impl BinaryFunc {
     }
 
     pub fn is_infix_op(&self) -> bool {
+        match self {
+            Self::AddInt16 => return <AddInt16 as binary::LazyBinaryFunc>::is_infix_op(&AddInt16),
+            other => other.is_infix_op_inner(),
+        }
+    }
+
+    fn is_infix_op_inner(&self) -> bool {
         use BinaryFunc::*;
         match self {
             AddInt16

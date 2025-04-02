@@ -46,7 +46,8 @@ macro_rules! sqlfunc {
         sqlfunc!(
             #[sqlname = $name]
             #[preserves_uniqueness = false]
-#[is_monotone = $is_monotone]            fn $fn_name $($tail)*
+            #[is_monotone = $is_monotone]
+            fn $fn_name $($tail)*
         );
     };
 
@@ -184,6 +185,68 @@ macro_rules! sqlfunc {
 
             #[allow(clippy::extra_unused_lifetimes)]
             pub fn $fn_name<$lt>($param_name: $input_ty) -> $output_ty {
+                $body
+            }
+        }
+    };
+
+    (
+        #[sqlname = $name:expr]
+        #[preserves_uniqueness = $preserves_uniqueness:expr]
+        #[inverse = $inverse:expr]
+        #[is_monotone = $is_monotone:expr]
+        #[is_infix_op = $is_infix_op:expr]
+        fn $fn_name:ident<$lt:lifetime>($param_name_a:ident: $input_ty_a:ty, $param_name_b:ident: $input_ty_b:ty, $arena:ident: &RowArena $(,)?) -> $output_ty:ty
+            $body:block
+    ) => {
+        paste::paste! {
+            #[derive(proptest_derive::Arbitrary, Ord, PartialOrd, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, Hash, mz_lowertest::MzReflect)]
+            pub struct [<$fn_name:camel>];
+
+            impl<'a> crate::func::binary::EagerBinaryFunc<'a> for [<$fn_name:camel>] {
+                type Input1 = $input_ty_a;
+                type Input2 = $input_ty_b;
+                type Output = $output_ty;
+
+                fn call(&self, a: Self::Input1, b: Self::Input2, temp_storage: &$lt RowArena) -> Self::Output {
+                    $fn_name(a, b, temp_storage)
+                }
+
+                fn output_type(&self, input_type: mz_repr::ColumnType) -> mz_repr::ColumnType {
+                    use mz_repr::AsColumnType;
+                    let output = Self::Output::as_column_type();
+                    let propagates_nulls = crate::func::binary::EagerBinaryFunc::propagates_nulls(self);
+                    let nullable = output.nullable;
+                    // The output is nullable if it is nullable by itself or the input is nullable
+                    // and this function propagates nulls
+                    output.nullable(nullable || (propagates_nulls && input_type.nullable))
+                }
+
+                fn preserves_uniqueness(&self) -> bool {
+                    $preserves_uniqueness
+                }
+
+                fn inverse(&self) -> Option<crate::BinaryFunc> {
+                    $inverse
+                }
+
+                fn is_monotone(&self) -> bool {
+                    $is_monotone
+                }
+
+                fn is_infix_op(&self) -> bool {
+                    $is_infix_op
+                }
+            }
+
+            impl std::fmt::Display for [<$fn_name:camel>] {
+                fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str($name)
+                }
+            }
+
+            #[allow(clippy::extra_unused_lifetimes, unused_variables)]
+            pub fn $fn_name<$lt>($param_name_a: $input_ty_a, $param_name_b: $input_ty_b, $arena: &$lt RowArena) -> $output_ty {
                 $body
             }
         }
