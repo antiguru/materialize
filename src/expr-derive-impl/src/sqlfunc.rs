@@ -37,8 +37,6 @@ pub(crate) struct Modifiers {
     could_error: Option<Expr>,
     /// Whether the function propagates nulls. Applies to binary functions.
     propagates_nulls: Option<Expr>,
-    /// Whether the function introduces nulls. Applies to all functions.
-    introduces_nulls: Option<Expr>,
 }
 
 /// Implementation for the `#[sqlfunc]` macro. The first parameter is the attribute
@@ -191,7 +189,6 @@ fn unary_func(func: &syn::ItemFn, modifiers: Modifiers) -> darling::Result<Token
         negate,
         could_error,
         propagates_nulls,
-        introduces_nulls,
     } = modifiers;
 
     if is_infix_op.is_some() {
@@ -244,7 +241,7 @@ fn unary_func(func: &syn::ItemFn, modifiers: Modifiers) -> darling::Result<Token
         }
     };
 
-    let (output_type, mut introduces_nulls_fn) = if let Some(output_type) = output_type {
+    let (output_type, introduces_nulls_fn) = if let Some(output_type) = output_type {
         let introduces_nulls_fn = quote! {
             fn introduces_nulls(&self) -> bool {
                 <#output_type as ::mz_repr::DatumType<'_, ()>>::nullable()
@@ -255,14 +252,6 @@ fn unary_func(func: &syn::ItemFn, modifiers: Modifiers) -> darling::Result<Token
     } else {
         (quote! { Self::Output }, None)
     };
-
-    if let Some(introduces_nulls) = introduces_nulls {
-        introduces_nulls_fn = Some(quote! {
-            fn introduces_nulls(&self) -> bool {
-                #introduces_nulls
-            }
-        });
-    }
 
     let could_error_fn = could_error.map(|could_error| {
         quote! {
@@ -334,7 +323,6 @@ fn binary_func(
         negate,
         could_error,
         propagates_nulls,
-        introduces_nulls,
     } = modifiers;
 
     if preserves_uniqueness.is_some() {
@@ -374,7 +362,7 @@ fn binary_func(
         }
     };
 
-    let (output_type, mut introduces_nulls_fn) = if let Some(output_type) = output_type {
+    let (output_type, introduces_nulls_fn) = if let Some(output_type) = output_type {
         let introduces_nulls_fn = quote! {
             fn introduces_nulls(&self) -> bool {
                 <#output_type as ::mz_repr::DatumType<'_, ()>>::nullable()
@@ -385,14 +373,6 @@ fn binary_func(
     } else {
         (quote! { Self::Output }, None)
     };
-
-    if let Some(introduces_nulls) = introduces_nulls {
-        introduces_nulls_fn = Some(quote! {
-            fn introduces_nulls(&self) -> bool {
-                #introduces_nulls
-            }
-        });
-    }
 
     let arena = if arena {
         quote! { , temp_storage }
