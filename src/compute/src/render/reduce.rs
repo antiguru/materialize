@@ -45,6 +45,7 @@ use timely::progress::Timestamp;
 use timely::progress::timestamp::Refines;
 use tracing::warn;
 
+use crate::MzData;
 use crate::extensions::arrange::{ArrangementSize, KeyCollection, MzArrange};
 use crate::extensions::reduce::{MzReduce, ReduceExt};
 use crate::render::context::{CollectionBundle, Context};
@@ -62,8 +63,8 @@ use crate::typedefs::{
 impl<G, T> Context<G, T>
 where
     G: Scope,
-    G::Timestamp: Lattice + Refines<T> + Columnation,
-    T: Timestamp + Lattice + Columnation,
+    G::Timestamp: Lattice + Refines<T> + MzData,
+    T: Timestamp + Lattice + MzData,
 {
     /// Renders a `MirRelationExpr::Reduce` using various non-obvious techniques to
     /// minimize worst-case incremental update times and memory footprint.

@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 
 use columnar::Columnar;
 use differential_dataflow::consolidation::ConsolidatingContainerBuilder;
-use differential_dataflow::containers::Columnation;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::arrangement::Arranged;
 use differential_dataflow::trace::TraceReader;
@@ -35,6 +34,7 @@ use timely::dataflow::scopes::Child;
 use timely::dataflow::{Scope, ScopeParent};
 use timely::progress::timestamp::{Refines, Timestamp};
 
+use crate::MzData;
 use crate::extensions::arrange::MzArrangeCore;
 use crate::render::RenderTimestamp;
 use crate::render::context::{ArrangementFlavor, CollectionBundle, Context, ShutdownToken};
@@ -191,8 +191,8 @@ impl YieldSpec {
 enum JoinedFlavor<G, T>
 where
     G: Scope,
-    G::Timestamp: Lattice + Refines<T> + Columnation,
-    T: Timestamp + Lattice + Columnation,
+    G::Timestamp: Lattice + Refines<T> + MzData,
+    T: Timestamp + Lattice + MzData,
 {
     /// Streamed data as a collection.
     Collection(Collection<G, Row, Diff>),
@@ -208,7 +208,7 @@ where
     G::Timestamp: Lattice + Refines<T> + RenderTimestamp,
     <G::Timestamp as Columnar>::Container: Clone + Send,
     for<'a> <G::Timestamp as Columnar>::Ref<'a>: Ord + Copy,
-    T: Timestamp + Lattice + Columnation,
+    T: Timestamp + Lattice + MzData,
 {
     pub(crate) fn render_join(
         &self,

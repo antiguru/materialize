@@ -11,6 +11,9 @@
 
 //! Materialize's compute layer.
 
+use columnar::Columnar;
+use differential_dataflow::containers::Columnation;
+
 pub mod server;
 
 mod arrangement;
@@ -23,3 +26,6 @@ mod render;
 mod row_spine;
 mod sink;
 mod typedefs;
+
+pub(crate) trait MzData: timely::Data + Columnar + Columnation {}
+impl<T: timely::Data + Columnar + Columnation> MzData for T {}

@@ -17,7 +17,6 @@ use std::sync::mpsc;
 use columnar::Columnar;
 use differential_dataflow::IntoOwned;
 use differential_dataflow::consolidation::ConsolidatingContainerBuilder;
-use differential_dataflow::containers::Columnation;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::Arranged;
 use differential_dataflow::trace::{BatchReader, Cursor, TraceReader};
@@ -31,19 +30,20 @@ use mz_repr::fixed_length::ToDatumIter;
 use mz_repr::{DatumVec, DatumVecBorrow, Diff, GlobalId, Row, RowArena, SharedRow};
 use mz_storage_types::controller::CollectionMetadata;
 use mz_storage_types::errors::DataflowError;
-use mz_timely_util::containers::{Col2ValBatcher, ColumnBuilder, columnar_exchange};
+use mz_timely_util::containers::{Col2ValBatcher, Column, ColumnBuilder, columnar_exchange};
 use mz_timely_util::operator::{CollectionExt, StreamExt};
 use timely::Container;
-use timely::container::CapacityContainerBuilder;
+use timely::container::{CapacityContainerBuilder, PushInto, SizableContainer};
 use timely::dataflow::channels::pact::{ExchangeCore, Pipeline};
-use timely::dataflow::operators::Capability;
 use timely::dataflow::operators::generic::OutputHandleCore;
+use timely::dataflow::operators::{Capability, Enter, Leave, Operator};
 use timely::dataflow::scopes::Child;
-use timely::dataflow::{Scope, Stream};
+use timely::dataflow::{Scope, ScopeParent, Stream, StreamCore};
 use timely::progress::timestamp::Refines;
 use timely::progress::{Antichain, Timestamp};
 use tracing::error;
 
+use crate::MzData;
 use crate::compute_state::{ComputeState, HydrationEvent};
 use crate::extensions::arrange::{KeyCollection, MzArrange, MzArrangeCore};
 use crate::render::errors::ErrorLogger;
@@ -65,8 +65,8 @@ use crate::typedefs::{
 /// of regions or iteration.
 pub struct Context<S: Scope, T = mz_repr::Timestamp>
 where
-    T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    T: Timestamp + Lattice + MzData,
+    S::Timestamp: Lattice + Refines<T> + MzData,
 {
     /// The scope within which all managed collections exist.
     ///
@@ -105,7 +105,7 @@ where
 
 impl<S: Scope> Context<S>
 where
-    S::Timestamp: Lattice + Refines<mz_repr::Timestamp> + Columnation,
+    S::Timestamp: Lattice + Refines<mz_repr::Timestamp> + MzData,
 {
     /// Creates a new empty Context.
     pub fn for_dataflow_in<Plan>(
@@ -158,8 +158,8 @@ where
 
 impl<S: Scope, T> Context<S, T>
 where
-    T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    T: Timestamp + Lattice + MzData,
+    S::Timestamp: Lattice + Refines<T> + MzData,
 {
     /// Insert a collection bundle by an identifier.
     ///
@@ -207,8 +207,8 @@ where
 
 impl<S: Scope, T> Context<S, T>
 where
-    T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    T: Timestamp + Lattice + MzData,
+    S::Timestamp: Lattice + Refines<T> + MzData,
 {
     /// Brings the underlying arrangements and collections into a region.
     pub fn enter_region<'a>(
@@ -307,8 +307,8 @@ impl HydrationLogger {
 #[derive(Clone)]
 pub enum ArrangementFlavor<S: Scope, T = mz_repr::Timestamp>
 where
-    T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    T: Timestamp + Lattice + MzData,
+    S::Timestamp: Lattice + Refines<T> + MzData,
 {
     /// A dataflow-local arrangement.
     Local(
@@ -328,8 +328,8 @@ where
 
 impl<S: Scope, T> ArrangementFlavor<S, T>
 where
-    T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    T: Timestamp + Lattice + MzData,
+    S::Timestamp: Lattice + Refines<T> + MzData,
 {
     /// Presents `self` as a stream of updates.
     ///
@@ -339,7 +339,7 @@ where
     /// If you have logic that could be applied to each record, consider using the
     /// `flat_map` methods which allows this and can reduce the work done.
     #[deprecated(note = "Use `flat_map` instead.")]
-    pub fn as_collection(&self) -> (Collection<S, Row, Diff>, Collection<S, DataflowError, Diff>) {
+    pub fn as_collection(&self) -> (MzCollection<S, Row>, Collection<S, DataflowError, Diff>) {
         let mut datums = DatumVec::new();
         let logic = move |k: DatumSeq, v: DatumSeq| {
             let mut datums_borrow = datums.borrow();
@@ -349,11 +349,11 @@ where
         };
         match &self {
             ArrangementFlavor::Local(oks, errs) => (
-                oks.as_collection(logic),
+                oks.as_collection(logic).into(),
                 errs.as_collection(|k, &()| k.clone()),
             ),
             ArrangementFlavor::Trace(_, oks, errs) => (
-                oks.as_collection(logic),
+                oks.as_collection(logic).into(),
                 errs.as_collection(|k, &()| k.clone()),
             ),
         }
@@ -412,8 +412,8 @@ where
 }
 impl<S: Scope, T> ArrangementFlavor<S, T>
 where
-    T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    T: Timestamp + Lattice + MzData,
+    S::Timestamp: Lattice + Refines<T> + MzData,
 {
     /// The scope containing the collection bundle.
     pub fn scope(&self) -> S {
@@ -440,8 +440,8 @@ where
 }
 impl<'a, S: Scope, T> ArrangementFlavor<Child<'a, S, S::Timestamp>, T>
 where
-    T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    T: Timestamp + Lattice + MzData,
+    S::Timestamp: Lattice + Refines<T> + MzData,
 {
     /// Extracts the arrangement flavor from a region.
     pub fn leave_region(&self) -> ArrangementFlavor<S, T> {
@@ -456,6 +456,201 @@ where
     }
 }
 
+#[derive(Clone)]
+pub enum MzCollection<G, D, R = Diff>
+where
+    G: Scope,
+    G::Timestamp: MzData,
+    D: MzData,
+    R: MzData,
+{
+    Row(Collection<G, D, R>),
+    Col(Collection<G, D, R, Column<(D, G::Timestamp, R)>>),
+}
+
+impl<G, D, R> From<Collection<G, D, R>> for MzCollection<G, D, R>
+where
+    G: Scope,
+    G::Timestamp: MzData,
+    D: MzData,
+    R: MzData,
+{
+    fn from(collection: Collection<G, D, R>) -> Self {
+        MzCollection::Row(collection)
+    }
+}
+
+impl<G, D, R> From<Collection<G, D, R, Column<(D, G::Timestamp, R)>>> for MzCollection<G, D, R>
+where
+    G: Scope,
+    G::Timestamp: MzData,
+    D: MzData,
+    R: MzData,
+{
+    fn from(collection: Collection<G, D, R, Column<(D, G::Timestamp, R)>>) -> Self {
+        MzCollection::Col(collection)
+    }
+}
+
+impl<G, D, R> MzCollection<G, D, R>
+where
+    G: Scope,
+    G::Timestamp: MzData,
+    D: MzData,
+    R: MzData,
+{
+    pub fn scope(&self) -> G {
+        match self {
+            MzCollection::Row(collection) => collection.scope(),
+            MzCollection::Col(collection) => collection.scope(),
+        }
+    }
+    // Brings a Collection into a nested region.
+    ///
+    /// This method is a specialization of `enter` to the case where the nested scope is a region.
+    /// It removes the need for an operator that adjusts the timestamp.
+    pub fn enter_region<'a>(
+        &self,
+        child: &Child<'a, G, G::Timestamp>,
+    ) -> MzCollection<Child<'a, G, G::Timestamp>, D, R> {
+        match self {
+            MzCollection::Row(collection) => collection.inner.enter(child).as_collection().into(),
+            MzCollection::Col(_collection) => {
+                todo!()
+            }
+        }
+    }
+
+    pub fn enter<'a, T>(&self, child: &Child<'a, G, T>) -> Collection<Child<'a, G, T>, D, R>
+    where
+        T: Refines<<G as ScopeParent>::Timestamp>,
+    {
+        match self {
+            MzCollection::Row(collection) => {
+                use timely::dataflow::operators::Map;
+                collection
+                    .inner
+                    .enter(child)
+                    .map(|(data, time, diff)| (data, T::to_inner(time), diff))
+                    .as_collection()
+            }
+            MzCollection::Col(_collection) => {
+                todo!()
+            }
+        }
+    }
+
+    pub fn flat_map<I, L>(&self, mut logic: L) -> MzCollection<G, I::Item, R>
+    where
+        G::Timestamp: Clone,
+        I: IntoIterator,
+        I::Item: MzData,
+        L: FnMut(D) -> I + 'static,
+    {
+        use timely::dataflow::operators::core::Map;
+        match self {
+            MzCollection::Row(collection) => collection
+                .inner
+                .flat_map(move |(data, time, delta)| {
+                    logic(data)
+                        .into_iter()
+                        .map(move |x| (x, time.clone(), delta.clone()))
+                })
+                .as_mz_collection(),
+            MzCollection::Col(_collection) => {
+                todo!()
+            }
+        }
+    }
+
+    fn flat_map_inner<C2, I, L>(&self, logic: L) -> StreamCore<G, C2>
+    where
+        I: IntoIterator,
+        C2: SizableContainer + PushInto<I::Item> + timely::Data,
+        L: FnMut((D, G::Timestamp, R)) -> I + 'static,
+    {
+        use timely::dataflow::operators::core::Map;
+        match self {
+            MzCollection::Row(collection) => collection.inner.flat_map(logic),
+            MzCollection::Col(_collection) => {
+                todo!()
+            }
+        }
+    }
+}
+
+/// Methods requiring a region as the scope.
+impl<G, D, R> MzCollection<Child<'_, G, G::Timestamp>, D, R>
+where
+    G: Scope,
+    G::Timestamp: MzData,
+    D: MzData,
+    R: MzData,
+{
+    /// Returns the value of a Collection from a nested region to its containing scope.
+    ///
+    /// This method is a specialization of `leave` to the case that of a nested region.
+    /// It removes the need for an operator that adjusts the timestamp.
+    pub fn leave_region(&self) -> MzCollection<G, D, R> {
+        match self {
+            MzCollection::Row(collection) => collection.inner.leave().as_collection().into(),
+            MzCollection::Col(_collection) => {
+                todo!()
+            }
+        }
+    }
+}
+
+/// Methods requiring a nested scope.
+impl<'a, G, T, D, R> MzCollection<Child<'a, G, T>, D, R>
+where
+    G: Scope,
+    G::Timestamp: MzData,
+    T: Timestamp + Refines<G::Timestamp> + MzData,
+    D: MzData,
+    R: MzData,
+{
+    /// Returns the final value of a Collection from a nested scope to its containing scope.
+    pub fn leave(&self) -> MzCollection<G, D, R> {
+        use timely::dataflow::operators::Map;
+        match self {
+            MzCollection::Row(collection) => collection
+                .inner
+                .leave()
+                .map(|(data, time, diff)| (data, time.to_outer(), diff))
+                .as_collection()
+                .into(),
+            MzCollection::Col(_collection) => {
+                todo!()
+            }
+        }
+    }
+}
+
+/// Conversion to a differential dataflow Collection.
+pub trait AsMzCollection<G, D, R, C>
+where
+    G: Scope,
+    G::Timestamp: MzData,
+    D: MzData,
+    R: MzData,
+{
+    /// Converts the type to a differential dataflow collection.
+    fn as_mz_collection(&self) -> MzCollection<G, D, R>;
+}
+
+impl<G, D, R> AsMzCollection<G, D, R, Vec<(D, G::Timestamp, R)>> for Stream<G, (D, G::Timestamp, R)>
+where
+    G: Scope,
+    G::Timestamp: MzData,
+    D: MzData,
+    R: MzData,
+{
+    fn as_mz_collection(&self) -> MzCollection<G, D, R> {
+        MzCollection::<G, D, R>::Row(self.as_collection())
+    }
+}
+
 /// A bundle of the various ways a collection can be represented.
 ///
 /// This type maintains the invariant that it does contain at least one valid
@@ -463,21 +658,21 @@ where
 #[derive(Clone)]
 pub struct CollectionBundle<S: Scope, T = mz_repr::Timestamp>
 where
-    T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    T: Timestamp + Lattice + MzData,
+    S::Timestamp: Lattice + Refines<T> + MzData,
 {
-    pub collection: Option<(Collection<S, Row, Diff>, Collection<S, DataflowError, Diff>)>,
+    pub collection: Option<(MzCollection<S, Row>, Collection<S, DataflowError, Diff>)>,
     pub arranged: BTreeMap<Vec<MirScalarExpr>, ArrangementFlavor<S, T>>,
 }
 
 impl<S: Scope, T: Lattice> CollectionBundle<S, T>
 where
-    T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    T: Timestamp + Lattice + MzData,
+    S::Timestamp: Lattice + Refines<T> + MzData,
 {
     /// Construct a new collection bundle from update streams.
     pub fn from_collections(
-        oks: Collection<S, Row, Diff>,
+        oks: MzCollection<S, Row>,
         errs: Collection<S, DataflowError, Diff>,
     ) -> Self {
         Self {
@@ -514,7 +709,7 @@ where
     /// The scope containing the collection bundle.
     pub fn scope(&self) -> S {
         if let Some((oks, _errs)) = &self.collection {
-            oks.inner.scope()
+            oks.scope()
         } else {
             self.arranged
                 .values()
@@ -545,8 +740,8 @@ where
 
 impl<'a, S: Scope, T> CollectionBundle<Child<'a, S, S::Timestamp>, T>
 where
-    T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    T: Timestamp + Lattice + MzData,
+    S::Timestamp: Lattice + Refines<T> + MzData,
 {
     /// Extracts the collection bundle from a region.
     pub fn leave_region(&self) -> CollectionBundle<S, T> {
@@ -566,8 +761,8 @@ where
 
 impl<S: Scope, T> CollectionBundle<S, T>
 where
-    T: Timestamp + Lattice + Columnation,
-    S::Timestamp: Lattice + Refines<T> + Columnation,
+    T: Timestamp + Lattice + MzData,
+    S::Timestamp: Lattice + Refines<T> + MzData,
 {
     /// Asserts that the arrangement for a specific key
     /// (or the raw collection for no key) exists,
@@ -585,7 +780,7 @@ where
         &self,
         key: Option<&[MirScalarExpr]>,
         config_set: &ConfigSet,
-    ) -> (Collection<S, Row, Diff>, Collection<S, DataflowError, Diff>) {
+    ) -> (MzCollection<S, Row>, Collection<S, DataflowError, Diff>) {
         // Any operator that uses this method was told to use a particular
         // collection during LIR planning, where we should have made
         // sure that that collection exists.
@@ -605,7 +800,7 @@ where
                     let (ok, err) = arranged.flat_map(None, usize::MAX, |borrow, t, r| {
                         Some((SharedRow::pack(borrow.iter()), t, r))
                     });
-                    (ok.as_collection(), err)
+                    (ok.as_collection().into(), err)
                 } else {
                     #[allow(deprecated)]
                     arranged.as_collection()
@@ -654,7 +849,7 @@ where
                 .clone()
                 .expect("Invariant violated: CollectionBundle contains no collection.");
             let mut datums = DatumVec::new();
-            let oks = oks.inner.flat_map(move |(v, t, d)| {
+            let oks = oks.flat_map_inner(move |(v, t, d)| {
                 logic(&mut datums.borrow_with_limit(&v, max_demand), t, d)
             });
             (oks, errs)
@@ -738,7 +933,7 @@ where
 
 impl<S, T> CollectionBundle<S, T>
 where
-    T: Timestamp + Lattice + Columnation,
+    T: Timestamp + Lattice + MzData,
     S: Scope,
     S::Timestamp: Refines<T> + RenderTimestamp,
     <S::Timestamp as Columnar>::Container: Clone + Send,
@@ -758,10 +953,7 @@ where
         key_val: Option<(Vec<MirScalarExpr>, Option<Row>)>,
         until: Antichain<mz_repr::Timestamp>,
         config_set: &ConfigSet,
-    ) -> (
-        Collection<S, mz_repr::Row, Diff>,
-        Collection<S, DataflowError, Diff>,
-    ) {
+    ) -> (MzCollection<S, Row>, Collection<S, DataflowError, Diff>) {
         mfp.optimize();
         let mfp_plan = mfp.clone().into_plan().unwrap();
 
@@ -833,7 +1025,7 @@ where
                 |x| x,
             );
 
-        (oks, errors.concat(&errs))
+        (oks.into(), errors.concat(&errs))
     }
     pub fn ensure_collections(
         mut self,
@@ -898,7 +1090,7 @@ where
     /// columns in the key are not included in the value.
     fn arrange_collection(
         name: &String,
-        oks: Collection<S, Row, Diff>,
+        oks: MzCollection<S, Row>,
         key: Vec<MirScalarExpr>,
         thinning: Vec<usize>,
     ) -> (

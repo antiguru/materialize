@@ -309,7 +309,7 @@ where
                 differential_dataflow::collection::concatenate(inner, inner_errs).leave_region(),
             )
         });
-        CollectionBundle::from_collections(oks, errs)
+        CollectionBundle::from_collections(oks.into(), errs)
     }
 }
 

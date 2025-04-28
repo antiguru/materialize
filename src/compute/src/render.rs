@@ -158,7 +158,7 @@ use crate::extensions::reduce::MzReduce;
 use crate::logging::compute::{
     ComputeEvent, DataflowGlobal, LirMapping, LirMetadata, LogDataflowErrors,
 };
-use crate::render::context::{ArrangementFlavor, Context, ShutdownToken};
+use crate::render::context::{ArrangementFlavor, AsMzCollection, Context, ShutdownToken};
 use crate::render::continual_task::ContinualTaskCtx;
 use crate::row_spine::{RowRowBatcher, RowRowBuilder};
 use crate::typedefs::{ErrBatcher, ErrBuilder, ErrSpine, KeyBatcher};
@@ -340,7 +340,7 @@ pub fn build_compute_dataflow<A: Allocate>(
                     };
 
                     let (oks, errs) = (
-                        ok_stream.as_collection().leave_region().leave_region(),
+                        ok_stream.as_mz_collection().leave_region().leave_region(),
                         err_stream.as_collection().leave_region().leave_region(),
                     );
 
@@ -1286,7 +1286,7 @@ where
                     .as_mut()
                     .expect("CollectionBundle invariant");
                 let stream = self.log_operator_hydration_inner(&oks.inner, lir_id);
-                *oks = stream.as_collection();
+                *oks = stream.as_collection().into();
             }
         }
     }
