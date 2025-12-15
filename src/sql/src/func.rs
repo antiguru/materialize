@@ -4455,6 +4455,16 @@ fn array_to_string(
     ))
 }
 
+struct RangeI32;
+impl From<RangeI32> for ParamType {
+    fn from(_: RangeI32) -> Self {
+        SqlScalarType::Range {
+            element_type: Box::new(SqlScalarType::Int32),
+        }
+        .into()
+    }
+}
+
 /// Correlates an operator with all of its implementations.
 pub static OP_IMPLS: LazyLock<BTreeMap<&'static str, Func>> = LazyLock::new(|| {
     use BinaryFunc as BF;
@@ -4808,10 +4818,14 @@ pub static OP_IMPLS: LazyLock<BTreeMap<&'static str, Func>> = LazyLock::new(|| {
                       .call_binary(rhs, func::JsonbContainsJsonb))
             }) => Bool, oid::OP_CONTAINS_STRING_JSONB_OID;
             params!(MapAnyCompatible, MapAnyCompatible) => BF::from(func::MapContainsMap) => Bool, oid::OP_CONTAINS_MAP_MAP_OID;
-            params!(RangeAny, AnyElement) => Operation::binary(|ecx, lhs, rhs| {
-                let elem_type = ecx.scalar_type(&lhs).unwrap_range_element_type().clone();
-                Ok(lhs.call_binary(rhs, BinaryFunc::RangeContainsElem { elem_type, rev: false }))
+            params!(RangeI32, Int32) => Operation::binary(|ecx, lhs, rhs| {
+                // let elem_type = ecx.scalar_type(&lhs).unwrap_range_element_type().clone();
+                Ok(lhs.call_binary(rhs, BinaryFunc::from(func::RangeContainsI32)))
             }) => Bool, 3889;
+            // params!(RangeAny, AnyElement) => Operation::binary(|ecx, lhs, rhs| {
+            //     let elem_type = ecx.scalar_type(&lhs).unwrap_range_element_type().clone();
+            //     Ok(lhs.call_binary(rhs, BinaryFunc::RangeContainsElem { elem_type, rev: false }))
+            // }) => Bool, 3889;
             params!(RangeAny, RangeAny) => Operation::binary(|_ecx, lhs, rhs| {
                 Ok(lhs.call_binary(rhs, BinaryFunc::RangeContainsRange { rev: false }))
             }) => Bool, 3890;
@@ -4842,10 +4856,10 @@ pub static OP_IMPLS: LazyLock<BTreeMap<&'static str, Func>> = LazyLock::new(|| {
             params!(MapAnyCompatible, MapAnyCompatible) => Operation::binary(|_ecx, lhs, rhs| {
                 Ok(rhs.call_binary(lhs, func::MapContainsMap))
             }) => Bool, oid::OP_CONTAINED_MAP_MAP_OID;
-            params!(AnyElement, RangeAny) => Operation::binary(|ecx, lhs, rhs| {
-                let elem_type = ecx.scalar_type(&rhs).unwrap_range_element_type().clone();
-                Ok(rhs.call_binary(lhs, BF::RangeContainsElem { elem_type, rev: true }))
-            }) => Bool, 3891;
+            // params!(AnyElement, RangeAny) => Operation::binary(|ecx, lhs, rhs| {
+            //     let elem_type = ecx.scalar_type(&rhs).unwrap_range_element_type().clone();
+            //     Ok(rhs.call_binary(lhs, BF::RangeContainsElem { elem_type, rev: true }))
+            // }) => Bool, 3891;
             params!(RangeAny, RangeAny) => Operation::binary(|_ecx, lhs, rhs| {
                 Ok(rhs.call_binary(lhs, BF::RangeContainsRange { rev: true }))
             }) => Bool, 3892;

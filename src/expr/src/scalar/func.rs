@@ -2617,7 +2617,18 @@ pub enum BinaryFunc {
     GetByte(GetByte),
     ConstantTimeEqBytes(ConstantTimeEqBytes),
     ConstantTimeEqString(ConstantTimeEqString),
-    RangeContainsElem { elem_type: SqlScalarType, rev: bool },
+    RangeContainsI32(RangeContainsI32),
+    RangeContainsI32Rev(RangeContainsI32Rev),
+    RangeContainsI64(RangeContainsI64),
+    RangeContainsI64Rev(RangeContainsI64Rev),
+    RangeContainsDate(RangeContainsDate),
+    RangeContainsDateRev(RangeContainsDateRev),
+    RangeContainsNumeric(RangeContainsNumeric),
+    RangeContainsNumericRev(RangeContainsNumericRev),
+    RangeContainsTimestamp(RangeContainsTimestamp),
+    RangeContainsTimestampRev(RangeContainsTimestampRev),
+    RangeContainsTimestampTz(RangeContainsTimestampTz),
+    RangeContainsTimestampTzRev(RangeContainsTimestampTzRev),
     RangeContainsRange { rev: bool },
     RangeOverlaps(RangeOverlaps),
     RangeAfter(RangeAfter),
@@ -2912,21 +2923,38 @@ impl BinaryFunc {
             BinaryFunc::ConstantTimeEqString(s) => {
                 return s.eval(datums, temp_storage, a_expr, b_expr);
             }
-            // BinaryFunc::RangeContainsElem { elem_type, rev: _ } => Ok(match elem_type {
-            //     SqlScalarType::Int32 => contains_range_elem::<i32>(a, b),
-            //     SqlScalarType::Int64 => contains_range_elem::<i64>(a, b),
-            //     SqlScalarType::Date => contains_range_elem::<Date>(a, b),
-            //     SqlScalarType::Numeric { .. } => {
-            //         contains_range_elem::<OrderedDecimal<Numeric>>(a, b)
-            //     }
-            //     SqlScalarType::Timestamp { .. } => {
-            //         contains_range_elem::<CheckedTimestamp<NaiveDateTime>>(a, b)
-            //     }
-            //     SqlScalarType::TimestampTz { .. } => {
-            //         contains_range_elem::<CheckedTimestamp<DateTime<Utc>>>(a, b)
-            //     }
-            //     _ => unreachable!(),
-            // }),
+            BinaryFunc::RangeContainsI32(s) => return s.eval(datums, temp_storage, a_expr, b_expr),
+            BinaryFunc::RangeContainsI32Rev(s) => {
+                return s.eval(datums, temp_storage, a_expr, b_expr);
+            }
+            BinaryFunc::RangeContainsI64(s) => return s.eval(datums, temp_storage, a_expr, b_expr),
+            BinaryFunc::RangeContainsI64Rev(s) => {
+                return s.eval(datums, temp_storage, a_expr, b_expr);
+            }
+            BinaryFunc::RangeContainsDate(s) => {
+                return s.eval(datums, temp_storage, a_expr, b_expr);
+            }
+            BinaryFunc::RangeContainsDateRev(s) => {
+                return s.eval(datums, temp_storage, a_expr, b_expr);
+            }
+            BinaryFunc::RangeContainsNumeric(s) => {
+                return s.eval(datums, temp_storage, a_expr, b_expr);
+            }
+            BinaryFunc::RangeContainsNumericRev(s) => {
+                return s.eval(datums, temp_storage, a_expr, b_expr);
+            }
+            BinaryFunc::RangeContainsTimestamp(s) => {
+                return s.eval(datums, temp_storage, a_expr, b_expr);
+            }
+            BinaryFunc::RangeContainsTimestampRev(s) => {
+                return s.eval(datums, temp_storage, a_expr, b_expr);
+            }
+            BinaryFunc::RangeContainsTimestampTz(s) => {
+                return s.eval(datums, temp_storage, a_expr, b_expr);
+            }
+            BinaryFunc::RangeContainsTimestampTzRev(s) => {
+                return s.eval(datums, temp_storage, a_expr, b_expr);
+            }
             // BinaryFunc::RangeContainsRange { rev: false } => Ok(range_contains_range(a, b)),
             // BinaryFunc::RangeContainsRange { rev: true } => Ok(range_contains_range_rev(a, b)),
             BinaryFunc::RangeOverlaps(s) => return s.eval(datums, temp_storage, a_expr, b_expr),
@@ -2973,21 +3001,6 @@ impl BinaryFunc {
             BinaryFunc::TimezoneIntervalTime => timezone_interval_time(a, b),
             BinaryFunc::RepeatString => repeat_string(a, b, temp_storage),
             BinaryFunc::Normalize => normalize_with_form(a, b, temp_storage),
-            BinaryFunc::RangeContainsElem { elem_type, rev: _ } => Ok(match elem_type {
-                SqlScalarType::Int32 => contains_range_elem::<i32>(a, b),
-                SqlScalarType::Int64 => contains_range_elem::<i64>(a, b),
-                SqlScalarType::Date => contains_range_elem::<Date>(a, b),
-                SqlScalarType::Numeric { .. } => {
-                    contains_range_elem::<OrderedDecimal<Numeric>>(a, b)
-                }
-                SqlScalarType::Timestamp { .. } => {
-                    contains_range_elem::<CheckedTimestamp<NaiveDateTime>>(a, b)
-                }
-                SqlScalarType::TimestampTz { .. } => {
-                    contains_range_elem::<CheckedTimestamp<DateTime<Utc>>>(a, b)
-                }
-                _ => unreachable!(),
-            }),
             BinaryFunc::RangeContainsRange { rev: false } => Ok(range_contains_range(a, b)),
             BinaryFunc::RangeContainsRange { rev: true } => Ok(range_contains_range_rev(a, b)),
             BinaryFunc::RegexpReplace { regex, limit } => {
@@ -3228,9 +3241,20 @@ impl BinaryFunc {
 
             UuidGenerateV5(s) => s.output_type(input1_type, input2_type),
 
-            RangeContainsElem { .. } | RangeContainsRange { .. } => {
-                SqlScalarType::Bool.nullable(in_nullable)
-            }
+            RangeContainsI32(s) => s.output_type(input1_type, input2_type),
+            RangeContainsI32Rev(s) => s.output_type(input1_type, input2_type),
+            RangeContainsI64(s) => s.output_type(input1_type, input2_type),
+            RangeContainsI64Rev(s) => s.output_type(input1_type, input2_type),
+            RangeContainsDate(s) => s.output_type(input1_type, input2_type),
+            RangeContainsDateRev(s) => s.output_type(input1_type, input2_type),
+            RangeContainsNumeric(s) => s.output_type(input1_type, input2_type),
+            RangeContainsNumericRev(s) => s.output_type(input1_type, input2_type),
+            RangeContainsTimestamp(s) => s.output_type(input1_type, input2_type),
+            RangeContainsTimestampRev(s) => s.output_type(input1_type, input2_type),
+            RangeContainsTimestampTz(s) => s.output_type(input1_type, input2_type),
+            RangeContainsTimestampTzRev(s) => s.output_type(input1_type, input2_type),
+
+            RangeContainsRange { .. } => SqlScalarType::Bool.nullable(in_nullable),
             RangeOverlaps(s) => s.output_type(input1_type, input2_type),
             RangeAfter(s) => s.output_type(input1_type, input2_type),
             RangeBefore(s) => s.output_type(input1_type, input2_type),
@@ -3409,7 +3433,18 @@ impl BinaryFunc {
             BinaryFunc::RangeAdjacent(s) => s.propagates_nulls(),
             BinaryFunc::RangeAfter(s) => s.propagates_nulls(),
             BinaryFunc::RangeBefore(s) => s.propagates_nulls(),
-            BinaryFunc::RangeContainsElem { .. } => true,
+            BinaryFunc::RangeContainsI32(s) => s.propagates_nulls(),
+            BinaryFunc::RangeContainsI32Rev(s) => s.propagates_nulls(),
+            BinaryFunc::RangeContainsI64(s) => s.propagates_nulls(),
+            BinaryFunc::RangeContainsI64Rev(s) => s.propagates_nulls(),
+            BinaryFunc::RangeContainsDate(s) => s.propagates_nulls(),
+            BinaryFunc::RangeContainsDateRev(s) => s.propagates_nulls(),
+            BinaryFunc::RangeContainsNumeric(s) => s.propagates_nulls(),
+            BinaryFunc::RangeContainsNumericRev(s) => s.propagates_nulls(),
+            BinaryFunc::RangeContainsTimestamp(s) => s.propagates_nulls(),
+            BinaryFunc::RangeContainsTimestampRev(s) => s.propagates_nulls(),
+            BinaryFunc::RangeContainsTimestampTz(s) => s.propagates_nulls(),
+            BinaryFunc::RangeContainsTimestampTzRev(s) => s.propagates_nulls(),
             BinaryFunc::RangeContainsRange { .. } => true,
             BinaryFunc::RangeDifference(s) => s.propagates_nulls(),
             BinaryFunc::RangeIntersection(s) => s.propagates_nulls(),
@@ -3604,7 +3639,18 @@ impl BinaryFunc {
             RangeAdjacent(s) => s.introduces_nulls(),
             RangeAfter(s) => s.introduces_nulls(),
             RangeBefore(s) => s.introduces_nulls(),
-            RangeContainsElem { .. } => false,
+            RangeContainsI32(s) => s.introduces_nulls(),
+            RangeContainsI32Rev(s) => s.introduces_nulls(),
+            RangeContainsI64(s) => s.introduces_nulls(),
+            RangeContainsI64Rev(s) => s.introduces_nulls(),
+            RangeContainsDate(s) => s.introduces_nulls(),
+            RangeContainsDateRev(s) => s.introduces_nulls(),
+            RangeContainsNumeric(s) => s.introduces_nulls(),
+            RangeContainsNumericRev(s) => s.introduces_nulls(),
+            RangeContainsTimestamp(s) => s.introduces_nulls(),
+            RangeContainsTimestampRev(s) => s.introduces_nulls(),
+            RangeContainsTimestampTz(s) => s.introduces_nulls(),
+            RangeContainsTimestampTzRev(s) => s.introduces_nulls(),
             RangeContainsRange { .. } => false,
             RangeDifference(s) => s.introduces_nulls(),
             RangeIntersection(s) => s.introduces_nulls(),
@@ -3783,7 +3829,18 @@ impl BinaryFunc {
             RangeAdjacent(s) => s.is_infix_op(),
             RangeAfter(s) => s.is_infix_op(),
             RangeBefore(s) => s.is_infix_op(),
-            RangeContainsElem { .. } => true,
+            RangeContainsI32(s) => s.is_infix_op(),
+            RangeContainsI32Rev(s) => s.is_infix_op(),
+            RangeContainsI64(s) => s.is_infix_op(),
+            RangeContainsI64Rev(s) => s.is_infix_op(),
+            RangeContainsDate(s) => s.is_infix_op(),
+            RangeContainsDateRev(s) => s.is_infix_op(),
+            RangeContainsNumeric(s) => s.is_infix_op(),
+            RangeContainsNumericRev(s) => s.is_infix_op(),
+            RangeContainsTimestamp(s) => s.is_infix_op(),
+            RangeContainsTimestampRev(s) => s.is_infix_op(),
+            RangeContainsTimestampTz(s) => s.is_infix_op(),
+            RangeContainsTimestampTzRev(s) => s.is_infix_op(),
             RangeContainsRange { .. } => true,
             RangeDifference(s) => s.is_infix_op(),
             RangeIntersection(s) => s.is_infix_op(),
@@ -4028,7 +4085,18 @@ impl BinaryFunc {
             BinaryFunc::RangeAdjacent(s) => s.negate(),
             BinaryFunc::RangeAfter(s) => s.negate(),
             BinaryFunc::RangeBefore(s) => s.negate(),
-            BinaryFunc::RangeContainsElem { .. } => None,
+            BinaryFunc::RangeContainsI32(s) => s.negate(),
+            BinaryFunc::RangeContainsI32Rev(s) => s.negate(),
+            BinaryFunc::RangeContainsI64(s) => s.negate(),
+            BinaryFunc::RangeContainsI64Rev(s) => s.negate(),
+            BinaryFunc::RangeContainsDate(s) => s.negate(),
+            BinaryFunc::RangeContainsDateRev(s) => s.negate(),
+            BinaryFunc::RangeContainsNumeric(s) => s.negate(),
+            BinaryFunc::RangeContainsNumericRev(s) => s.negate(),
+            BinaryFunc::RangeContainsTimestamp(s) => s.negate(),
+            BinaryFunc::RangeContainsTimestampRev(s) => s.negate(),
+            BinaryFunc::RangeContainsTimestampTz(s) => s.negate(),
+            BinaryFunc::RangeContainsTimestampTzRev(s) => s.negate(),
             BinaryFunc::RangeContainsRange { .. } => None,
             BinaryFunc::RangeDifference(s) => s.negate(),
             BinaryFunc::RangeIntersection(s) => s.negate(),
@@ -4141,7 +4209,18 @@ impl BinaryFunc {
             BinaryFunc::RangeAdjacent(s) => s.could_error(),
             BinaryFunc::RangeAfter(s) => s.could_error(),
             BinaryFunc::RangeBefore(s) => s.could_error(),
-            BinaryFunc::RangeContainsElem { .. } => false,
+            BinaryFunc::RangeContainsI32(s) => s.could_error(),
+            BinaryFunc::RangeContainsI32Rev(s) => s.could_error(),
+            BinaryFunc::RangeContainsI64(s) => s.could_error(),
+            BinaryFunc::RangeContainsI64Rev(s) => s.could_error(),
+            BinaryFunc::RangeContainsDate(s) => s.could_error(),
+            BinaryFunc::RangeContainsDateRev(s) => s.could_error(),
+            BinaryFunc::RangeContainsNumeric(s) => s.could_error(),
+            BinaryFunc::RangeContainsNumericRev(s) => s.could_error(),
+            BinaryFunc::RangeContainsTimestamp(s) => s.could_error(),
+            BinaryFunc::RangeContainsTimestampRev(s) => s.could_error(),
+            BinaryFunc::RangeContainsTimestampTz(s) => s.could_error(),
+            BinaryFunc::RangeContainsTimestampTzRev(s) => s.could_error(),
             BinaryFunc::RangeContainsRange { .. } => false,
             BinaryFunc::RangeOverlaps(s) => s.could_error(),
             BinaryFunc::RangeOverleft(s) => s.could_error(),
@@ -4479,7 +4558,18 @@ impl BinaryFunc {
             BinaryFunc::PowerNumeric(s) => s.is_monotone(),
             BinaryFunc::GetBit(s) => s.is_monotone(),
             BinaryFunc::GetByte(s) => s.is_monotone(),
-            BinaryFunc::RangeContainsElem { .. } => (false, false),
+            BinaryFunc::RangeContainsI32(s) => s.is_monotone(),
+            BinaryFunc::RangeContainsI32Rev(s) => s.is_monotone(),
+            BinaryFunc::RangeContainsI64(s) => s.is_monotone(),
+            BinaryFunc::RangeContainsI64Rev(s) => s.is_monotone(),
+            BinaryFunc::RangeContainsDate(s) => s.is_monotone(),
+            BinaryFunc::RangeContainsDateRev(s) => s.is_monotone(),
+            BinaryFunc::RangeContainsNumeric(s) => s.is_monotone(),
+            BinaryFunc::RangeContainsNumericRev(s) => s.is_monotone(),
+            BinaryFunc::RangeContainsTimestamp(s) => s.is_monotone(),
+            BinaryFunc::RangeContainsTimestampRev(s) => s.is_monotone(),
+            BinaryFunc::RangeContainsTimestampTz(s) => s.is_monotone(),
+            BinaryFunc::RangeContainsTimestampTzRev(s) => s.is_monotone(),
             BinaryFunc::RangeContainsRange { .. } => (false, false),
             BinaryFunc::RangeOverlaps(s) => s.is_monotone(),
             BinaryFunc::RangeAfter(s) => s.is_monotone(),
@@ -4692,9 +4782,18 @@ impl fmt::Display for BinaryFunc {
             BinaryFunc::GetByte(s) => s.fmt(f),
             BinaryFunc::ConstantTimeEqBytes(s) => s.fmt(f),
             BinaryFunc::ConstantTimeEqString(s) => s.fmt(f),
-            BinaryFunc::RangeContainsElem { rev, .. } => {
-                f.write_str(if *rev { "<@" } else { "@>" })
-            }
+            BinaryFunc::RangeContainsI32(s) => s.fmt(f),
+            BinaryFunc::RangeContainsI32Rev(s) => s.fmt(f),
+            BinaryFunc::RangeContainsI64(s) => s.fmt(f),
+            BinaryFunc::RangeContainsI64Rev(s) => s.fmt(f),
+            BinaryFunc::RangeContainsDate(s) => s.fmt(f),
+            BinaryFunc::RangeContainsDateRev(s) => s.fmt(f),
+            BinaryFunc::RangeContainsNumeric(s) => s.fmt(f),
+            BinaryFunc::RangeContainsNumericRev(s) => s.fmt(f),
+            BinaryFunc::RangeContainsTimestamp(s) => s.fmt(f),
+            BinaryFunc::RangeContainsTimestampRev(s) => s.fmt(f),
+            BinaryFunc::RangeContainsTimestampTz(s) => s.fmt(f),
+            BinaryFunc::RangeContainsTimestampTzRev(s) => s.fmt(f),
             BinaryFunc::RangeContainsRange { rev, .. } => {
                 f.write_str(if *rev { "<@" } else { "@>" })
             }
