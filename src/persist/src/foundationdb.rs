@@ -82,7 +82,9 @@ impl FdbConsensusConfig {
     }
 
     pub fn new_for_test() -> Result<Self, Error> {
-        Self::new(SensitiveUrl(Url::parse("foundationdb:").unwrap()))
+        Self::new(SensitiveUrl(
+            Url::parse("foundationdb:?options=--search_path=misc/foundationdb").unwrap(),
+        ))
     }
 }
 

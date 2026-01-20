@@ -350,7 +350,7 @@ class Materialized(Service):
                 volumes += [f"{os.getcwd()}/license_key:/license_key/license_key"]
 
         if (
-            image_version is None or image_version >= "v0.160.0-dev"
+            image_version is None or image_version >= MzVersion.parse_mz("v26.9.0")
         ) and consensus_foundationdb:
             print("Using foundationdb for consensus")
             volumes += [
