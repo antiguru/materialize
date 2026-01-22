@@ -34,7 +34,6 @@ use foundationdb::{
 use futures_util::future::FutureExt;
 use mz_foundationdb::{FdbConfig, init_network};
 use mz_ore::url::SensitiveUrl;
-use url::Url;
 
 use crate::error::Error;
 use crate::location::{
@@ -71,9 +70,10 @@ impl FdbConsensusConfig {
     }
 
     pub fn new_for_test() -> Result<Self, Error> {
-        Self::new(SensitiveUrl(
-            Url::parse("foundationdb:?options=--search_path=misc/foundationdb").unwrap(),
-        ))
+        Self::new(
+            std::str::FromStr::from_str("foundationdb:?options=--search_path=test/consensus")
+                .unwrap(),
+        )
     }
 }
 

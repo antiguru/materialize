@@ -22,6 +22,7 @@ from materialize.cli.run import SANITIZER_TARGET
 from materialize.mzcompose.composition import Composition, WorkflowArgumentParser
 from materialize.mzcompose.services.azurite import Azurite
 from materialize.mzcompose.services.clusterd import Clusterd
+from materialize.mzcompose.services.foundationdb import FoundationDB
 from materialize.mzcompose.services.kafka import Kafka
 from materialize.mzcompose.services.minio import Minio
 from materialize.mzcompose.services.postgres import (
@@ -49,6 +50,7 @@ SERVICES = [
     SchemaRegistry(),
     Postgres(),
     CockroachOrPostgresMetadata(),
+    FoundationDB(),
     Minio(
         # We need a stable port exposed to the host since we can't pass any arguments
         # to the .pt files used in the tests.

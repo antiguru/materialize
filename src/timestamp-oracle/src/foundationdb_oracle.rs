@@ -76,8 +76,6 @@ pub struct FdbTimestampOracleConfig {
 }
 
 impl FdbTimestampOracleConfig {
-    pub(crate) const EXTERNAL_TESTS_FDB_URL: &'static str = "FDB_TIMESTAMP_ORACLE_URL";
-
     /// Returns a new instance of [`FdbTimestampOracleConfig`].
     pub fn new(url: SensitiveUrl, metrics_registry: &MetricsRegistry) -> Self {
         let metrics = Arc::new(Metrics::new(metrics_registry));
@@ -90,21 +88,11 @@ impl FdbTimestampOracleConfig {
     /// on new environments without any configuration. To activate the tests for
     /// [`FdbTimestampOracle`] set the `FDB_TIMESTAMP_ORACLE_URL` environment variable
     /// with a valid connection URL.
-    pub fn new_for_test() -> Option<Self> {
-        let url = match std::env::var(Self::EXTERNAL_TESTS_FDB_URL) {
-            Ok(url) => SensitiveUrl::from_str(&url).expect("invalid FoundationDB URL"),
-            Err(_) => {
-                if mz_ore::env::is_var_truthy("CI") {
-                    panic!("CI is supposed to run this test but something has gone wrong!");
-                }
-                return None;
-            }
-        };
-
-        Some(FdbTimestampOracleConfig {
-            url,
+    pub fn new_for_test() -> Self {
+        FdbTimestampOracleConfig {
+            url: FromStr::from_str("foundationdb:?options=--search_path=test/consensus").unwrap(),
             metrics: Arc::new(Metrics::new(&MetricsRegistry::new())),
-        })
+        }
     }
 
     /// Returns the metrics associated with this config.
@@ -609,16 +597,7 @@ mod tests {
     #[mz_ore::test(tokio::test)]
     #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function
     async fn test_fdb_timestamp_oracle() -> Result<(), anyhow::Error> {
-        let config = match FdbTimestampOracleConfig::new_for_test() {
-            Some(config) => config,
-            None => {
-                info!(
-                    "{} env not set: skipping test that uses external service",
-                    FdbTimestampOracleConfig::EXTERNAL_TESTS_FDB_URL
-                );
-                return Ok(());
-            }
-        };
+        let config = FdbTimestampOracleConfig::new_for_test();
 
         crate::tests::timestamp_oracle_impl_test(|timeline, now_fn: NowFn, initial_ts| {
             let config = config.clone();

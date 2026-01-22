@@ -1197,7 +1197,7 @@ class Composition:
             )
 
     def metadata_store(self) -> str:
-        for name in ["cockroach", "postgres-metadata"]:
+        for name in ["cockroach", "postgres-metadata", "foundationdb"]:
             if name in self.compose["services"]:
                 return name
         raise RuntimeError(
