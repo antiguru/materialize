@@ -153,6 +153,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         default_replication_factor=1,
         sanity_restart=False,
         consensus_foundationdb=args.foundationdb,
+        timestamp_oracle_foundationdb=args.foundationdb,
     )
     testdrive = Testdrive(
         kafka_default_partitions=args.kafka_default_partitions,

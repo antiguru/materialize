@@ -41,6 +41,7 @@ differential-dataflow = "0.18.0"
 fail = { version = "0.5.1", features = ["failpoints"] }
 foundationdb = { version = "0.10.0", features = ["embedded-fdb-include", "fdb-7_3"], optional = true }
 futures-util = "0.3.31"
+mz-foundationdb = { path = "../foundationdb", optional = true }
 itertools = "0.14.0"
 md-5 = "0.10.6"
 mz-aws-util = { path = "../aws-util", features = ["s3"] }
@@ -83,6 +84,7 @@ features = ["asm"]
 # On Linux, enable FoundationDB by default
 [target.'cfg(target_os = "linux")'.dependencies]
 foundationdb = { version = "0.10.0", features = ["embedded-fdb-include", "fdb-7_3"] }
+mz-foundationdb = { path = "../foundationdb" }
 
 [dev-dependencies]
 mz-ore = { path = "../ore", default-features = false, features = ["test"] }
@@ -95,7 +97,7 @@ prost-build = "0.13.5"
 
 [features]
 default = ["mz-build-tools/default", "workspace-hack"]
-fdb = ["dep:foundationdb"]
+fdb = ["dep:foundationdb", "dep:mz-foundationdb"]
 turmoil = ["dep:serde_json", "dep:turmoil"]
 
 [package.metadata.cargo-udeps.ignore]

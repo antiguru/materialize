@@ -102,6 +102,7 @@ class Materialized(Service):
             dict[str, dict[str, list[str]]] | dict[str, dict[str, str]] | None
         ) = None,
         consensus_foundationdb: bool = False,
+        timestamp_oracle_foundationdb: bool = False,
     ) -> None:
         if name is None:
             name = "materialized"
@@ -266,6 +267,10 @@ class Materialized(Service):
             command += [
                 "--persist-consensus-url=foundationdb:?options=--search_path=consensus",
             ]
+        if timestamp_oracle_foundationdb:
+            environment += [
+                "MZ_TIMESTAMP_ORACLE_URL=foundationdb:?options=--search_path=ts_oracle",
+            ]
 
         command += [
             "--orchestrator-process-tcp-proxy-listen-addr=0.0.0.0",
@@ -350,9 +355,8 @@ class Materialized(Service):
                 volumes += [f"{os.getcwd()}/license_key:/license_key/license_key"]
 
         if (
-            image_version is None or image_version >= MzVersion.parse_mz("v26.9.0")
-        ) and consensus_foundationdb:
-            print("Using foundationdb for consensus")
+            image_version is None or image_version >= MzVersion.parse_mz("v26.8.0")
+        ) and (consensus_foundationdb or timestamp_oracle_foundationdb):
             volumes += [
                 f"{MZ_ROOT}/misc/foundationdb/fdb.cluster:/etc/foundationdb/fdb.cluster"
             ]

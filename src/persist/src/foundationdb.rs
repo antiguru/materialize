@@ -15,13 +15,11 @@
 //! * `./data/<key>/<seqno> -> <data>`
 
 use std::io::Write;
-use std::sync::OnceLock;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use bytes::Bytes;
-use foundationdb::api::NetworkAutoStop;
 use foundationdb::directory::{
     Directory, DirectoryError, DirectoryLayer, DirectoryOutput, DirectorySubspace,
 };
@@ -34,6 +32,7 @@ use foundationdb::{
     Transaction,
 };
 use futures_util::future::FutureExt;
+use mz_foundationdb::{FdbConfig, init_network};
 use mz_ore::url::SensitiveUrl;
 use url::Url;
 
@@ -57,16 +56,6 @@ impl From<FdbBindingError> for ExternalError {
     fn from(x: FdbBindingError) -> Self {
         ExternalError::Determinate(Determinate::new(x.into()))
     }
-}
-
-/// FoundationDB network singleton.
-///
-/// Normally, we'd need to drop this to clean up the network, but since we
-/// never expect to exit normally, it's fine to leak it.
-static FDB_NETWORK: OnceLock<NetworkAutoStop> = OnceLock::new();
-
-fn init_network() -> &'static NetworkAutoStop {
-    FDB_NETWORK.get_or_init(|| unsafe { foundationdb::boot() })
 }
 
 /// Configuration to connect to a FoundationDB backed implementation of [Consensus].
@@ -172,36 +161,15 @@ impl std::fmt::Debug for FdbConsensus {
 impl FdbConsensus {
     /// Open a FoundationDB [Consensus] instance with `config`.
     pub async fn open(config: FdbConsensusConfig) -> Result<Self, ExternalError> {
-        let mut prefix = Vec::new();
-        for (key, value) in config.url.query_pairs() {
-            match &*key {
-                "options" => {
-                    if let Some(path) = value.strip_prefix("--search_path=") {
-                        prefix = path.split('/').map(|s| s.to_owned()).collect();
-                    } else {
-                        return Err(ExternalError::from(anyhow!(
-                            "unrecognized FoundationDB URL options parameter: {value}",
-                        )));
-                    }
-                }
-                key => {
-                    return Err(ExternalError::from(anyhow!(
-                        "unrecognized FoundationDB URL query parameter: {key}: {value}",
-                    )));
-                }
-            }
-        }
-        let path = if config.url.0.cannot_be_a_base() {
-            None
-        } else {
-            Some(config.url.0.path())
-        };
+        let fdb_config =
+            FdbConfig::parse(&config.url).map_err(|e| ExternalError::Determinate(e.into()))?;
 
         let _ = init_network();
 
-        let db = Database::new(path)?;
+        let db = Database::new(fdb_config.cluster_file())?;
         let directory = DirectoryLayer::default();
-        let path: Vec<_> = prefix
+        let path: Vec<_> = fdb_config
+            .prefix
             .iter()
             .cloned()
             .chain(std::iter::once("seqno".to_owned()))
@@ -219,7 +187,8 @@ impl FdbConsensus {
                 )));
             }
         };
-        let path: Vec<_> = prefix
+        let path: Vec<_> = fdb_config
+            .prefix
             .into_iter()
             .chain(std::iter::once("data".to_owned()))
             .collect();

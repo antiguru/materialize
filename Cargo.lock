@@ -6595,6 +6595,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mz-foundationdb"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "foundationdb",
+ "mz-ore",
+]
+
+[[package]]
 name = "mz-frontegg-auth"
 version = "0.0.0"
 dependencies = [
@@ -7171,6 +7180,7 @@ dependencies = [
  "mz-aws-util",
  "mz-build-tools",
  "mz-dyncfg",
+ "mz-foundationdb",
  "mz-ore",
  "mz-persist-types",
  "mz-postgres-client",
@@ -8427,8 +8437,11 @@ dependencies = [
  "async-trait",
  "deadpool-postgres",
  "dec",
+ "foundationdb",
  "futures",
+ "futures-util",
  "mz-adapter-types",
+ "mz-foundationdb",
  "mz-ore",
  "mz-pgrepr",
  "mz-postgres-client",
@@ -13550,6 +13563,7 @@ dependencies = [
  "fastrand 2.3.0",
  "flate2",
  "form_urlencoded",
+ "foundationdb",
  "futures-channel",
  "futures-core",
  "futures-executor",
