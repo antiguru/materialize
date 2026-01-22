@@ -147,6 +147,7 @@ impl TimestampOracleConfig {
     /// This is a no-op for non-Postgres backends.
     pub fn apply_parameters(&self, params: TimestampOracleParameters) {
         // Only the Postgres oracle supports parameters for now.
+        #[allow(irrefutable_let_patterns)]
         if let TimestampOracleConfig::Postgres(pg_config) = self {
             params.apply(pg_config)
         }

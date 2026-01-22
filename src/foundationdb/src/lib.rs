@@ -127,7 +127,7 @@ mod tests {
 
     use std::str::FromStr;
 
-    #[test]
+    #[mz_ore::test]
     fn test_parse_url_with_prefix() {
         let url =
             SensitiveUrl::from_str("foundationdb:?options=--search_path=my_app/consensus").unwrap();
@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(config.prefix, vec!["my_app", "consensus"]);
     }
 
-    #[test]
+    #[mz_ore::test]
     fn test_parse_url_with_path_and_prefix() {
         let url = SensitiveUrl::from_str(
             "foundationdb:/etc/foundationdb/fdb.cluster?options=--search_path=test",
@@ -150,7 +150,7 @@ mod tests {
         assert_eq!(config.prefix, vec!["test"]);
     }
 
-    #[test]
+    #[mz_ore::test]
     fn test_parse_url_no_options() {
         let url = SensitiveUrl::from_str("foundationdb:").unwrap();
         let config = FdbConfig::parse(&url).unwrap();
@@ -158,13 +158,13 @@ mod tests {
         assert!(config.prefix.is_empty());
     }
 
-    #[test]
+    #[mz_ore::test]
     fn test_parse_url_invalid_option() {
         let url = SensitiveUrl::from_str("foundationdb:?options=--invalid=value").unwrap();
         assert!(FdbConfig::parse(&url).is_err());
     }
 
-    #[test]
+    #[mz_ore::test]
     fn test_parse_url_invalid_query_param() {
         let url = SensitiveUrl::from_str("foundationdb:?unknown=value").unwrap();
         assert!(FdbConfig::parse(&url).is_err());

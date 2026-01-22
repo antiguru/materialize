@@ -11,7 +11,7 @@ import json
 import random
 from typing import Any
 
-from materialize import buildkite, ui
+from materialize import MZ_ROOT, buildkite, ui
 from materialize.mzcompose import DEFAULT_MZ_VOLUMES, cluster_replica_size_map
 from materialize.mzcompose.service import (
     Service,
@@ -191,9 +191,20 @@ class Testdrive(Service):
                 entrypoint.append("--persist-blob-url=file:///mzdata/persist/blob")
 
             if external_metadata_store:
-                entrypoint.append(
-                    "--persist-consensus-url=postgres://root@cockroach:26257?options=--search_path=consensus"
-                )
+                if metadata_store == "foundationdb":
+                    entrypoint.append(
+                        "--persist-consensus-url=foundationdb:?options=--search_path=consensus"
+                    )
+                    volumes.append(f"{MZ_ROOT}/misc/foundationdb/:/etc/foundationdb/")
+                else:
+                    address = (
+                        metadata_store
+                        if external_metadata_store == True
+                        else external_metadata_store
+                    )
+                    entrypoint.append(
+                        f"--persist-consensus-url=postgres://root@{address}:26257?options=--search_path=consensus"
+                    )
             else:
                 entrypoint.append(
                     f"--persist-consensus-url=postgres://root@{mz_service}:26257?options=--search_path=consensus"

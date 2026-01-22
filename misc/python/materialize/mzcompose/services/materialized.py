@@ -101,8 +101,6 @@ class Materialized(Service):
         networks: (
             dict[str, dict[str, list[str]]] | dict[str, dict[str, str]] | None
         ) = None,
-        consensus_foundationdb: bool = False,
-        timestamp_oracle_foundationdb: bool = False,
     ) -> None:
         if name is None:
             name = "materialized"
@@ -245,32 +243,30 @@ class Materialized(Service):
         )
 
         if external_metadata_store:
-            address = (
-                metadata_store
-                if external_metadata_store == True
-                else external_metadata_store
-            )
             depends_graph[metadata_store] = {"condition": "service_healthy"}
-            command += [
-                f"--persist-consensus-url=postgres://root@{address}:26257?options=--search_path=consensus",
-            ]
-            environment += [
-                f"MZ_TIMESTAMP_ORACLE_URL=postgres://root@{address}:26257?options=--search_path=tsoracle",
-                "MZ_NO_BUILTIN_POSTGRES=1",
-                # For older Materialize versions
-                "MZ_NO_BUILTIN_COCKROACH=1",
-                # Set the adapter stash URL for older environments that need it (versions before
-                # v0.92.0).
-                f"MZ_ADAPTER_STASH_URL=postgres://root@{address}:26257?options=--search_path=adapter",
-            ]
-        if consensus_foundationdb:
-            command += [
-                "--persist-consensus-url=foundationdb:?options=--search_path=consensus",
-            ]
-        if timestamp_oracle_foundationdb:
-            environment += [
-                "MZ_TIMESTAMP_ORACLE_URL=foundationdb:?options=--search_path=ts_oracle",
-            ]
+            if metadata_store == "postgres-metadata" or metadata_store == "cockroach":
+                address = (
+                    metadata_store
+                    if external_metadata_store == True
+                    else external_metadata_store
+                )
+                command += [
+                    f"--persist-consensus-url=postgres://root@{address}:26257?options=--search_path=consensus",
+                ]
+                environment += [
+                    f"MZ_TIMESTAMP_ORACLE_URL=postgres://root@{address}:26257?options=--search_path=tsoracle",
+                    "MZ_NO_BUILTIN_POSTGRES=1",
+                    # For older Materialize versions
+                    "MZ_NO_BUILTIN_COCKROACH=1",
+                    # Set the adapter stash URL for older environments that need it (versions before
+                    # v0.92.0).
+                    f"MZ_ADAPTER_STASH_URL=postgres://root@{address}:26257?options=--search_path=adapter",
+                ]
+            elif metadata_store == "foundationdb":
+                command += [
+                    "--persist-consensus-url=foundationdb:?options=--search_path=consensus",
+                    "--timestamp-oracle-url=foundationdb:?options=--search_path=ts_oracle",
+                ]
 
         command += [
             "--orchestrator-process-tcp-proxy-listen-addr=0.0.0.0",
@@ -356,7 +352,7 @@ class Materialized(Service):
 
         if (
             image_version is None or image_version >= MzVersion.parse_mz("v26.8.0")
-        ) and (consensus_foundationdb or timestamp_oracle_foundationdb):
+        ) and metadata_store == "foundationdb":
             volumes += [
                 f"{MZ_ROOT}/misc/foundationdb/fdb.cluster:/etc/foundationdb/fdb.cluster"
             ]

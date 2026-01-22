@@ -24,10 +24,11 @@ SERVICES = [
     FoundationDB(),
     Materialized(
         external_metadata_store=True,
-        metadata_store="cockroach",
-        timestamp_oracle_foundationdb=True,
+        metadata_store="foundationdb",
     ),
-    Testdrive(no_reset=True),
+    Testdrive(
+        external_metadata_store=True, metadata_store="foundationdb", no_reset=True
+    ),
 ]
 
 
@@ -35,17 +36,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
     """Test that Materialize works with FoundationDB as the timestamp oracle backend."""
 
     c.down(destroy_volumes=True, sanity_restart_mz=False)
-    c.up("cockroach", "foundationdb")
-
-    # Initialize FoundationDB
-    c.run(
-        "foundationdb",
-        "-C",
-        "/etc/foundationdb/fdb.cluster",
-        "--exec",
-        "configure new single memory",
-        entrypoint="fdbcli",
-    )
+    c.up("foundationdb")
 
     c.up("materialized")
 
