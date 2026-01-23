@@ -91,14 +91,6 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
     elif args.consensus == "foundationdb":
         consensus_uri = "foundationdb:"
         c.up("foundationdb")
-        c.run(
-            "foundationdb",
-            "-C",
-            "/etc/foundationdb/fdb.cluster",
-            "--exec",
-            "configure new single memory",
-            entrypoint="fdbcli",
-        )
     else:
         # empty consensus uri defaults to Maelstrom consensus implementation
         consensus_uri = ""

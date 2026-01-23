@@ -116,11 +116,6 @@ def main() -> int:
         default=os.getenv("MZDEV_POSTGRES", DEFAULT_POSTGRES),
     )
     parser.add_argument(
-        "--consensus",
-        help="Postgres/CockroachDB consensus connection string",
-        default=os.getenv("MZDEV_POSTGRES", DEFAULT_POSTGRES),
-    )
-    parser.add_argument(
         "--blob",
         help="Blob storage connection string",
         default=os.getenv("MZDEV_BLOB", DEFAULT_BLOB),
@@ -261,10 +256,11 @@ def main() -> int:
             _handle_lingering_services(kill=args.reset)
             scratch = MZ_ROOT / "scratch"
             dbconn = _connect_sql(args.postgres)
-            for schema in ["consensus", "tsoracle", "storage"]:
-                if args.reset:
-                    _run_sql(dbconn, f"DROP SCHEMA IF EXISTS {schema} CASCADE")
-                _run_sql(dbconn, f"CREATE SCHEMA IF NOT EXISTS {schema}")
+            if dbconn:
+                for schema in ["consensus", "tsoracle", "storage"]:
+                    if args.reset:
+                        _run_sql(dbconn, f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+                    _run_sql(dbconn, f"CREATE SCHEMA IF NOT EXISTS {schema}")
             # Keep this after clearing out Postgres. Otherwise there is a race
             # where a ctrl-c could leave persist with references in Postgres to
             # files that have been deleted. There's no race if we reset in the
@@ -297,10 +293,6 @@ def main() -> int:
 
             print(f"persist-blob-url: {args.blob}")
             print(f"listeners config path: {args.listeners_config_path}")
-            if args.consensus is not None:
-                consensus = args.consensus
-            else:
-                consensus = args.postgres
             command += [
                 f"--listeners-config-path={args.listeners_config_path}",
                 "--orchestrator=process",
@@ -309,7 +301,7 @@ def main() -> int:
                 f"--orchestrator-process-prometheus-service-discovery-directory={MZDATA}/prometheus",
                 f"--orchestrator-process-scratch-directory={scratch}",
                 "--secrets-controller=local-file",
-                f"--persist-consensus-url={consensus}?options=--search_path=consensus",
+                f"--persist-consensus-url={args.postgres}?options=--search_path=consensus",
                 f"--persist-blob-url={args.blob}",
                 f"--timestamp-oracle-url={args.postgres}?options=--search_path=tsoracle",
                 f"--environment-id={environment_id}",
@@ -373,7 +365,7 @@ def main() -> int:
         env["METADATA_BACKEND_URL"] = args.postgres
         # some tests run into stack overflows
         env["RUST_MIN_STACK"] = RUST_MIN_STACK
-        dbconn = _connect_sql(args.postgres)
+        _ = _connect_sql(args.postgres)
     else:
         raise UIError(f"unknown program {args.program}")
 
@@ -539,7 +531,10 @@ def _macos_codesign(path: str) -> None:
     spawn.runv(command, env=env)
 
 
-def _connect_sql(urlstr: str) -> psycopg.Connection:
+def _connect_sql(urlstr: str) -> psycopg.Connection | None:
+    if urlstr.startswith("foundationdb:"):
+        return None
+
     hint = """Have you correctly configured CockroachDB or PostgreSQL?
 
 For CockroachDB:

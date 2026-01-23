@@ -79,7 +79,7 @@ impl FdbTimestampOracleConfig {
     /// Returns a new instance of [`FdbTimestampOracleConfig`].
     pub fn new(url: SensitiveUrl, metrics_registry: &MetricsRegistry) -> Self {
         let metrics = Arc::new(Metrics::new(metrics_registry));
-        FdbTimestampOracleConfig { url, metrics }
+        Self { url, metrics }
     }
 
     /// Returns a new [`FdbTimestampOracleConfig`] for use in unit tests.
@@ -89,8 +89,8 @@ impl FdbTimestampOracleConfig {
     /// [`FdbTimestampOracle`] set the `FDB_TIMESTAMP_ORACLE_URL` environment variable
     /// with a valid connection URL.
     pub fn new_for_test() -> Self {
-        FdbTimestampOracleConfig {
-            url: FromStr::from_str("foundationdb:?options=--search_path=test/consensus").unwrap(),
+        Self {
+            url: FromStr::from_str("foundationdb:?options=--search_path=test/tsoracle").unwrap(),
             metrics: Arc::new(Metrics::new(&MetricsRegistry::new())),
         }
     }
@@ -602,11 +602,9 @@ mod tests {
         crate::tests::timestamp_oracle_impl_test(|timeline, now_fn: NowFn, initial_ts| {
             let config = config.clone();
             async move {
-                let oracle = FdbTimestampOracle::open(
-                    config, timeline, initial_ts, now_fn, false, /* read-only */
-                )
-                .await
-                .expect("failed to open FdbTimestampOracle");
+                let oracle = FdbTimestampOracle::open(config, timeline, initial_ts, now_fn, false)
+                    .await
+                    .expect("failed to open FdbTimestampOracle");
 
                 let arced_oracle: Arc<dyn TimestampOracle<Timestamp> + Send + Sync> =
                     Arc::new(oracle);

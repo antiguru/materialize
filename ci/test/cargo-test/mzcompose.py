@@ -263,12 +263,19 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
                     def worker() -> None:
                         clusterd = c.compose["services"]["clusterd"]
                         try:
-                            subprocess.run(
-                                ["docker", "pull", clusterd["image"]],
-                                check=True,
+                            # Check if image exists locally before pulling
+                            image_exists = subprocess.run(
+                                ["docker", "images", "-q", clusterd["image"]],
                                 capture_output=True,
-                                stdin=subprocess.DEVNULL,
-                            )
+                                text=True,
+                            ).stdout.strip()
+                            if not image_exists:
+                                subprocess.run(
+                                    ["docker", "pull", clusterd["image"]],
+                                    check=True,
+                                    capture_output=True,
+                                    stdin=subprocess.DEVNULL,
+                                )
                             container_id = subprocess.check_output(
                                 ["docker", "create", clusterd["image"]], text=True
                             ).strip()
@@ -315,9 +322,16 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
                             "--cargo-profile=ci",
                             "--profile=ci",
                             *(
-                                ["--package=mz-environmentd", "--package=mz-balancerd"]
-                                if buildkite.get_parallelism_count() == 2
-                                else ["--workspace"]
+                                args.args
+                                if args.args
+                                else (
+                                    [
+                                        "--package=mz-environmentd",
+                                        "--package=mz-balancerd",
+                                    ]
+                                    if buildkite.get_parallelism_count() == 2
+                                    else ["--workspace"]
+                                )
                             ),
                         ],
                         env=env,
@@ -387,18 +401,21 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
                         # general.
                         f"--test-threads={multiprocessing.cpu_count()}",
                         *(
-                            (
-                                pkgs
-                                if buildkite.get_parallelism_index() == 1
-                                else [
-                                    "--package=mz-environmentd",
-                                    "--package=mz-balancerd",
-                                ]
+                            args.args
+                            if args.args
+                            else (
+                                (
+                                    pkgs
+                                    if buildkite.get_parallelism_index() == 1
+                                    else [
+                                        "--package=mz-environmentd",
+                                        "--package=mz-balancerd",
+                                    ]
+                                )
+                                if buildkite.get_parallelism_count() == 2
+                                else ["--workspace"]
                             )
-                            if buildkite.get_parallelism_count() == 2
-                            else ["--workspace"]
                         ),
-                        *args.args,
                     ],
                     env=env,
                 )
