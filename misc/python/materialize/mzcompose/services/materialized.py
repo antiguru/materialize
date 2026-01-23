@@ -263,9 +263,15 @@ class Materialized(Service):
                     f"MZ_ADAPTER_STASH_URL=postgres://root@{address}:26257?options=--search_path=adapter",
                 ]
             elif metadata_store == "foundationdb":
+                address = (
+                    "foundationdb"
+                    if external_metadata_store == True
+                    else external_metadata_store
+                )
                 command += [
-                    "--persist-consensus-url=foundationdb:?options=--search_path=consensus",
-                    "--timestamp-oracle-url=foundationdb:?options=--search_path=ts_oracle",
+                    f"--persist-consensus-url={address}:?options=--search_path=consensus",
+                    f"--timestamp-oracle-url={address}:?options=--search_path=ts_oracle",
+                ]
                 ]
 
         command += [
