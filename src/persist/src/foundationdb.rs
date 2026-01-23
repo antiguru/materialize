@@ -166,7 +166,7 @@ impl FdbConsensus {
 
         let _ = init_network();
 
-        let db = Database::new(fdb_config.cluster_file())?;
+        let db = Database::new(None)?;
         let directory = DirectoryLayer::default();
         let path: Vec<_> = fdb_config
             .prefix

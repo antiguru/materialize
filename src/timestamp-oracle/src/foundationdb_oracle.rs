@@ -198,7 +198,7 @@ where
 
         let _ = init_network();
 
-        let db = Database::new(fdb_config.cluster_file())?;
+        let db = Database::new(None)?;
         let prefix = fdb_config.prefix;
         let directory = DirectoryLayer::default();
 
@@ -299,7 +299,7 @@ where
 
         let _ = init_network();
 
-        let db = Database::new(fdb_config.cluster_file())?;
+        let db = Database::new(None)?;
         let prefix = fdb_config.prefix;
         let directory = DirectoryLayer::default();
 

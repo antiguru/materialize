@@ -46,14 +46,15 @@ pub fn init_network() -> &'static NetworkAutoStop {
 /// Configuration parsed from a FoundationDB URL.
 ///
 /// FoundationDB URLs have the format:
-/// `foundationdb:[/path/to/cluster/file]?options=--search_path=<prefix>`
+/// `foundationdb:?options=--search_path=<prefix>`
 ///
-/// The cluster file path is optional - if not provided, the default
-/// `/etc/foundationdb/fdb.cluster` is used.
+/// The cluster file is determined by FoundationDB's standard discovery mechanism:
+/// 1. The `FDB_CLUSTER_FILE` environment variable
+/// 2. The default path `/etc/foundationdb/fdb.cluster`
+///
+/// This ensures all components using FoundationDB connect to the same cluster.
 #[derive(Clone, Debug)]
 pub struct FdbConfig {
-    /// The path to the FDB cluster file, or None to use the default.
-    pub cluster_file_path: Option<String>,
     /// The prefix path components for the directory layer.
     pub prefix: Vec<String>,
 }
@@ -63,21 +64,21 @@ impl FdbConfig {
     ///
     /// # URL Format
     ///
-    /// The URL format is: `foundationdb:[/path/to/cluster/file]?options=--search_path=<prefix>`
+    /// The URL format is: `foundationdb:?options=--search_path=<prefix>`
     ///
     /// - The scheme must be `foundationdb`
-    /// - The path (optional) specifies the cluster file location
     /// - The `options` query parameter with `--search_path=<prefix>` specifies
     ///   the directory prefix to use (similar to PostgreSQL's search_path)
+    ///
+    /// The cluster file is NOT specified in the URL. Instead, FoundationDB's
+    /// standard discovery mechanism is used (via `FDB_CLUSTER_FILE` env var
+    /// or the default `/etc/foundationdb/fdb.cluster`).
     ///
     /// # Examples
     ///
     /// ```ignore
     /// // Use default cluster file with a prefix
     /// let url = "foundationdb:?options=--search_path=my_app/consensus";
-    ///
-    /// // Specify cluster file and prefix
-    /// let url = "foundationdb:/etc/foundationdb/fdb.cluster?options=--search_path=my_app";
     /// ```
     pub fn parse(url: &SensitiveUrl) -> Result<Self, anyhow::Error> {
         let mut prefix = Vec::new();
@@ -97,27 +98,7 @@ impl FdbConfig {
             }
         }
 
-        let cluster_file_path = if url.0.cannot_be_a_base() {
-            None
-        } else {
-            let path = url.0.path();
-            if path.is_empty() || path == "/" {
-                None
-            } else {
-                Some(path.to_owned())
-            }
-        };
-
-        Ok(FdbConfig {
-            cluster_file_path,
-            prefix,
-        })
-    }
-
-    /// Returns the cluster file path as an Option<&str> suitable for
-    /// passing to `Database::new()`.
-    pub fn cluster_file(&self) -> Option<&str> {
-        self.cluster_file_path.as_deref()
+        Ok(FdbConfig { prefix })
     }
 }
 
@@ -132,29 +113,20 @@ mod tests {
         let url =
             SensitiveUrl::from_str("foundationdb:?options=--search_path=my_app/consensus").unwrap();
         let config = FdbConfig::parse(&url).unwrap();
-        assert_eq!(config.cluster_file_path, None);
         assert_eq!(config.prefix, vec!["my_app", "consensus"]);
     }
 
     #[mz_ore::test]
-    fn test_parse_url_with_path_and_prefix() {
-        let url = SensitiveUrl::from_str(
-            "foundationdb:/etc/foundationdb/fdb.cluster?options=--search_path=test",
-        )
-        .unwrap();
+    fn test_parse_url_with_nested_prefix() {
+        let url = SensitiveUrl::from_str("foundationdb:?options=--search_path=a/b/c/d").unwrap();
         let config = FdbConfig::parse(&url).unwrap();
-        assert_eq!(
-            config.cluster_file_path,
-            Some("/etc/foundationdb/fdb.cluster".to_owned())
-        );
-        assert_eq!(config.prefix, vec!["test"]);
+        assert_eq!(config.prefix, vec!["a", "b", "c", "d"]);
     }
 
     #[mz_ore::test]
     fn test_parse_url_no_options() {
         let url = SensitiveUrl::from_str("foundationdb:").unwrap();
         let config = FdbConfig::parse(&url).unwrap();
-        assert_eq!(config.cluster_file_path, None);
         assert!(config.prefix.is_empty());
     }
 
