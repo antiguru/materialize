@@ -244,12 +244,12 @@ class Materialized(Service):
 
         if external_metadata_store:
             depends_graph[metadata_store] = {"condition": "service_healthy"}
+            address = (
+                metadata_store
+                if external_metadata_store == True
+                else external_metadata_store
+            )
             if metadata_store == "postgres-metadata" or metadata_store == "cockroach":
-                address = (
-                    metadata_store
-                    if external_metadata_store == True
-                    else external_metadata_store
-                )
                 command += [
                     f"--persist-consensus-url=postgres://root@{address}:26257?options=--search_path=consensus",
                 ]
@@ -263,15 +263,9 @@ class Materialized(Service):
                     f"MZ_ADAPTER_STASH_URL=postgres://root@{address}:26257?options=--search_path=adapter",
                 ]
             elif metadata_store == "foundationdb":
-                address = (
-                    "foundationdb"
-                    if external_metadata_store == True
-                    else external_metadata_store
-                )
                 command += [
                     f"--persist-consensus-url={address}:?options=--search_path=consensus",
                     f"--timestamp-oracle-url={address}:?options=--search_path=ts_oracle",
-                ]
                 ]
 
         command += [
