@@ -68,20 +68,16 @@ impl FdbConsensusConfig {
     pub fn new(url: SensitiveUrl) -> Result<Self, Error> {
         Ok(FdbConsensusConfig { url })
     }
-
-    pub fn new_for_test() -> Result<Self, Error> {
-        Self::new(
-            std::str::FromStr::from_str("foundationdb:?options=--search_path=test/consensus")
-                .unwrap(),
-        )
-    }
 }
 
 /// Implementation of [Consensus] over a Foundation database.
 pub struct FdbConsensus {
-    seqno: DirectorySubspace,
-    data: DirectorySubspace,
-    db: Database,
+    /// Subspace for sequence numbers.
+    pub seqno: DirectorySubspace,
+    /// Subspace for data.
+    pub data: DirectorySubspace,
+    /// The FoundationDB database handle.
+    pub db: Database,
 }
 
 /// An error that can occur during a FoundationDB transaction.
@@ -206,21 +202,6 @@ impl FdbConsensus {
             }
         };
         Ok(FdbConsensus { seqno, data, db })
-    }
-
-    /// Drops and recreates the `consensus` data in FoundationDB.
-    ///
-    /// ONLY FOR TESTING
-    #[cfg(test)]
-    pub async fn drop_and_recreate(&self) -> Result<(), ExternalError> {
-        self.db
-            .run(async |trx, _maybe_commited| {
-                self.seqno.remove(&trx, &[]).await?;
-                self.data.remove(&trx, &[]).await?;
-                Ok(())
-            })
-            .await?;
-        Ok(())
     }
 
     async fn head_trx(
@@ -467,72 +448,5 @@ impl Consensus for FdbConsensus {
 
     fn truncate_counts(&self) -> bool {
         false
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use uuid::Uuid;
-
-    use crate::location::tests::consensus_impl_test;
-
-    use super::*;
-
-    #[mz_ore::test(tokio::test(flavor = "multi_thread"))]
-    #[cfg_attr(miri, ignore)] // error: unsupported operation: can't call foreign function `TLS_client_method` on OS `linux`
-    async fn fdb_consensus() -> Result<(), ExternalError> {
-        let config = FdbConsensusConfig::new_for_test()?;
-
-        {
-            let fdb = FdbConsensus::open(config.clone()).await?;
-            fdb.drop_and_recreate().await?;
-        }
-
-        consensus_impl_test(|| FdbConsensus::open(config.clone())).await?;
-
-        // and now verify the implementation-specific `drop_and_recreate` works as intended
-        let consensus = FdbConsensus::open(config.clone()).await?;
-        let key = Uuid::new_v4().to_string();
-        let mut state = VersionedData {
-            seqno: SeqNo(5),
-            data: Bytes::from("abc"),
-        };
-
-        assert_eq!(
-            consensus.compare_and_set(&key, None, state.clone()).await,
-            Ok(CaSResult::Committed),
-        );
-        state.seqno = SeqNo(6);
-        assert_eq!(
-            consensus
-                .compare_and_set(&key, Some(SeqNo(5)), state.clone())
-                .await,
-            Ok(CaSResult::Committed),
-        );
-        state.seqno = SeqNo(129 + 5);
-        assert_eq!(
-            consensus
-                .compare_and_set(&key, Some(SeqNo(6)), state.clone())
-                .await,
-            Ok(CaSResult::Committed),
-        );
-
-        assert_eq!(consensus.head(&key).await, Ok(Some(state.clone())));
-
-        println!("--- SCANNING ---");
-
-        for data in consensus.scan(&key, SeqNo(129), 10).await? {
-            println!(
-                "scan data: seqno: {:?}, {} bytes",
-                data.seqno,
-                data.data.len()
-            );
-        }
-
-        consensus.drop_and_recreate().await?;
-
-        assert_eq!(consensus.head(&key).await, Ok(None));
-
-        Ok(())
     }
 }

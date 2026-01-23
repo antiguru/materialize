@@ -13,34 +13,51 @@
 //! implementations across Materialize, including network initialization
 //! and URL parsing utilities.
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use foundationdb::api::NetworkAutoStop;
+use foundationdb::options::NetworkOption;
 use mz_ore::url::SensitiveUrl;
 
-/// FoundationDB network singleton.
-///
-/// The FoundationDB client requires exactly one network initialization per process.
-/// This singleton ensures that the network is initialized exactly once and shared
-/// across all FDB users in the process.
-///
-/// Normally, we'd need to drop this to clean up the network, but since we
-/// never expect to exit normally, it's fine to leak it.
-static FDB_NETWORK: OnceLock<NetworkAutoStop> = OnceLock::new();
+/// FoundationDB network handle, stored in a Mutex for proper lifecycle management.
+static FDB_NETWORK: Mutex<Option<NetworkAutoStop>> = Mutex::new(None);
 
 /// Initialize the FoundationDB network.
 ///
 /// This function is safe to call multiple times - only the first call will
-/// actually initialize the network, subsequent calls return the existing
-/// network handle.
+/// actually initialize the network, subsequent calls return immediately.
 ///
 /// # Safety
 ///
 /// The underlying `foundationdb::boot()` call is unsafe because it must only
-/// be called once per process. This function uses a `OnceLock` to ensure
+/// be called once per process. This function uses a mutex to ensure
 /// that guarantee is upheld.
-pub fn init_network() -> &'static NetworkAutoStop {
-    FDB_NETWORK.get_or_init(|| unsafe { foundationdb::boot() })
+pub fn init_network() {
+    let mut guard = FDB_NETWORK.lock().expect("FDB_NETWORK mutex poisoned");
+    if guard.is_none() {
+        let network = unsafe { foundationdb::boot() };
+
+        // Disable client statistics logging to reduce metrics overhead.
+        let _ = unsafe { NetworkOption::DisableClientStatisticsLogging.apply() };
+
+        *guard = Some(network);
+    }
+}
+
+/// Shut down the FoundationDB network.
+///
+/// This properly stops the network thread and cleans up resources.
+/// Should be called at the end of tests that use FoundationDB.
+///
+/// # Warning
+///
+/// FDB can only be initialized once per process. After calling this function,
+/// any subsequent calls to `init_network()` will fail.
+pub fn shutdown_network() {
+    if let Ok(mut guard) = FDB_NETWORK.lock() {
+        // Dropping the NetworkAutoStop calls fdb_stop_network() and joins the thread.
+        drop(guard.take());
+    }
 }
 
 /// Configuration parsed from a FoundationDB URL.
