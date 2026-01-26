@@ -14,9 +14,9 @@ Test that skipping versions when upgrading will fail.
 from materialize.docker import image_registry
 from materialize.mz_version import MzVersion
 from materialize.mzcompose.composition import Composition
-from materialize.mzcompose.services.cockroach import Cockroach
 from materialize.mzcompose.services.materialized import Materialized
 from materialize.mzcompose.services.mz import Mz
+from materialize.mzcompose.services.postgres import CockroachOrPostgresMetadata
 from materialize.mzcompose.services.testdrive import Testdrive
 from materialize.ui import UIError
 from materialize.version_list import (
@@ -26,10 +26,10 @@ from materialize.version_list import (
 mz_options: dict[MzVersion, str] = {}
 
 SERVICES = [
-    Cockroach(setup_materialize=True, in_memory=True),
+    CockroachOrPostgresMetadata(),
     Mz(app_password=""),
-    Materialized(external_metadata_store=True, metadata_store="cockroach"),
-    Testdrive(no_reset=True, metadata_store="cockroach"),
+    Materialized(external_metadata_store=True),
+    Testdrive(no_reset=True),
 ]
 
 
@@ -76,7 +76,6 @@ def workflow_test_version_skips(c: Composition) -> None:
                 for start_version, opt in mz_options.items()
                 if two_minor_releases_before >= start_version
             ],
-            metadata_store="cockroach",
         )
     ):
         c.up("materialized")

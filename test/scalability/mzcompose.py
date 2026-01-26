@@ -24,10 +24,12 @@ from materialize.docker import image_registry
 from materialize.mzcompose import ADDITIONAL_BENCHMARKING_SYSTEM_PARAMETERS
 from materialize.mzcompose.composition import Composition, WorkflowArgumentParser
 from materialize.mzcompose.services.balancerd import Balancerd
-from materialize.mzcompose.services.cockroach import Cockroach
 from materialize.mzcompose.services.materialized import Materialized
 from materialize.mzcompose.services.mz import Mz
-from materialize.mzcompose.services.postgres import Postgres
+from materialize.mzcompose.services.postgres import (
+    CockroachOrPostgresMetadata,
+    Postgres,
+)
 from materialize.mzcompose.test_result import FailedTestExecutionError
 from materialize.scalability.config.benchmark_config import BenchmarkConfiguration
 from materialize.scalability.df import df_totals_cols
@@ -79,13 +81,12 @@ from materialize.version_list import (
 )
 
 SERVICES = [
-    Cockroach(setup_materialize=True, in_memory=True),
+    CockroachOrPostgresMetadata(),
     Materialized(
         image=f"{image_registry()}/materialized:latest",
         sanity_restart=False,
         additional_system_parameter_defaults=ADDITIONAL_BENCHMARKING_SYSTEM_PARAMETERS,
         external_metadata_store=True,
-        metadata_store="cockroach",
     ),
     Postgres(),
     Balancerd(),

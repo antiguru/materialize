@@ -31,7 +31,6 @@ from materialize.mzcompose.services.minio import Mc, Minio
 from materialize.mzcompose.services.mysql import MySql
 from materialize.mzcompose.services.polaris import Polaris, PolarisBootstrap
 from materialize.mzcompose.services.postgres import (
-    FORCE_EXTERNAL_METADATA_STORE,
     METADATA_STORE,
     CockroachOrPostgresMetadata,
     Postgres,
@@ -117,9 +116,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         Materialized(
             external_blob_store=external,
             blob_store_is_azure=args.azurite,
-            external_metadata_store=(
-                "toxiproxy" if external else FORCE_EXTERNAL_METADATA_STORE
-            ),
+            external_metadata_store=("toxiproxy" if external else False),
             ports=["6975:6875", "6976:6876", "6977:6877"],
             sanity_restart=sanity_restart,
             default_replication_factor=1,

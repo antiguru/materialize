@@ -36,9 +36,13 @@ if read_list BUILDKITE_PLUGIN_MZCOMPOSE_ARGS; then
 fi
 
 # Export environment variables passed via the env parameter
+# Buildkite creates vars like BUILDKITE_PLUGIN_MZCOMPOSE_ENV_0_VARNAME=value
+# We need to strip the prefix and the index number (0_, 1_, etc.)
 while IFS='=' read -r name value; do
-    # Strip the BUILDKITE_PLUGIN_MZCOMPOSE_ENV_ prefix to get the actual env var name
+    # Strip the BUILDKITE_PLUGIN_MZCOMPOSE_ENV_ prefix
     env_name="${name#BUILDKITE_PLUGIN_MZCOMPOSE_ENV_}"
+    # Strip the index number and underscore (e.g., "0_VARNAME" -> "VARNAME")
+    env_name="${env_name#*_}"
     export "$env_name=$value"
 done < <(env | grep "^BUILDKITE_PLUGIN_MZCOMPOSE_ENV_" || true)
 

@@ -79,6 +79,7 @@ def create_mzs(
         TestdriveService(
             default_timeout=TESTDRIVE_DEFAULT_TIMEOUT,
             materialize_params={"statement_timeout": f"'{TESTDRIVE_DEFAULT_TIMEOUT}'"},
+            external_metadata_store=external_metadata_store,
             external_blob_store=external_blob_store,
             blob_store_is_azure=azurite,
             no_reset=True,

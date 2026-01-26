@@ -1055,6 +1055,7 @@ def workflow_kafka_source_rehydration(c: Composition) -> None:
         Testdrive(
             materialize_url="postgres://materialize@mz_new:6875",
             materialize_url_internal="postgres://materialize@mz_new:6877",
+            external_metadata_store=True,
             mz_service="mz_new",
             materialize_params={"cluster": "cluster"},
             no_reset=True,
@@ -1188,6 +1189,7 @@ def workflow_kafka_source_rehydration_large_initial(c: Composition) -> None:
             default_replication_factor=2,
         ),
         Testdrive(
+            external_metadata_store=True,
             materialize_url="postgres://materialize@mz_new:6875",
             materialize_url_internal="postgres://materialize@mz_new:6877",
             mz_service="mz_new",
@@ -1330,6 +1332,7 @@ def workflow_pg_source_rehydration(c: Composition) -> None:
             default_replication_factor=2,
         ),
         Testdrive(
+            external_metadata_store=True,
             materialize_url="postgres://materialize@mz_new:6875",
             materialize_url_internal="postgres://materialize@mz_new:6877",
             mz_service="mz_new",
@@ -1467,6 +1470,7 @@ def workflow_mysql_source_rehydration(c: Composition) -> None:
             default_replication_factor=2,
         ),
         Testdrive(
+            external_metadata_store=True,
             materialize_url="postgres://materialize@mz_new:6875",
             materialize_url_internal="postgres://materialize@mz_new:6877",
             mz_service="mz_new",
@@ -1609,6 +1613,7 @@ def workflow_sql_server_source_rehydration(c: Composition) -> None:
             default_replication_factor=2,
         ),
         Testdrive(
+            external_metadata_store=True,
             materialize_url="postgres://materialize@mz_new:6875",
             materialize_url_internal="postgres://materialize@mz_new:6877",
             mz_service="mz_new",
@@ -1741,6 +1746,7 @@ def workflow_kafka_source_failpoint(c: Composition) -> None:
             default_replication_factor=2,
         ),
         Testdrive(
+            external_metadata_store=True,
             materialize_url="postgres://materialize@mz_new:6875",
             materialize_url_internal="postgres://materialize@mz_new:6877",
             mz_service="mz_new",
@@ -2160,6 +2166,7 @@ def workflow_upsert_sources(c: Composition) -> None:
                 default_replication_factor=2,
             ),
             Testdrive(
+                external_metadata_store=True,
                 materialize_url=f"postgres://materialize@{mz1}:6875",
                 materialize_url_internal=f"postgres://materialize@{mz1}:6877",
                 mz_service=mz1,

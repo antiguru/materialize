@@ -31,13 +31,15 @@ from materialize.mzcompose.composition import (
 )
 from materialize.mzcompose.services.balancerd import Balancerd
 from materialize.mzcompose.services.clusterd import Clusterd
-from materialize.mzcompose.services.cockroach import Cockroach
 from materialize.mzcompose.services.frontegg import FronteggMock
 from materialize.mzcompose.services.kafka import Kafka
 from materialize.mzcompose.services.materialized import Materialized
 from materialize.mzcompose.services.mysql import MySql
 from materialize.mzcompose.services.mz import Mz
-from materialize.mzcompose.services.postgres import Postgres
+from materialize.mzcompose.services.postgres import (
+    CockroachOrPostgresMetadata,
+    Postgres,
+)
 from materialize.mzcompose.services.schema_registry import SchemaRegistry
 from materialize.mzcompose.services.sql_server import (
     SqlServer,
@@ -1889,7 +1891,7 @@ SERVICES = [
             "secrets:/secrets",
         ],
     ),
-    Cockroach(in_memory=True),
+    CockroachOrPostgresMetadata(),
     Materialized(
         memory="8G",
         cpu="2",
@@ -1910,7 +1912,6 @@ SERVICES = [
         ],
         sanity_restart=False,
         external_metadata_store=True,
-        metadata_store="cockroach",
         listeners_config_path=f"{MZ_ROOT}/src/materialized/ci/listener_configs/no_auth_https.json",
         support_external_clusterd=True,
     ),

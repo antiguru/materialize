@@ -451,12 +451,11 @@ def run_once(
                 sanity_restart=False,
                 additional_system_parameter_defaults=ADDITIONAL_BENCHMARKING_SYSTEM_PARAMETERS
                 | {"max_connections": "100000"},
-                metadata_store="cockroach",
             ),
             Testdrive(
                 no_reset=True,
                 seed=1,
-                metadata_store="cockroach",
+                external_metadata_store=True,
                 external_blob_store=True,
                 # TODO: Better azurite support detection
                 blob_store_is_azure=args.azurite and bool(tag),

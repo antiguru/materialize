@@ -8,7 +8,6 @@
 # by the Apache License, Version 2.0.
 
 
-import hashlib
 import json
 import os
 import shutil
@@ -25,17 +24,16 @@ from materialize.mzcompose import (
     bootstrap_cluster_replica_size,
     cluster_replica_size_map,
     get_default_system_parameters,
-    loader,
 )
 from materialize.mzcompose.service import (
     Service,
     ServiceConfig,
     ServiceDependency,
 )
+from materialize.mzcompose.services import foundationdb
 from materialize.mzcompose.services.azurite import azure_blob_uri
 from materialize.mzcompose.services.minio import minio_blob_uri
 from materialize.mzcompose.services.postgres import (
-    FORCE_EXTERNAL_METADATA_STORE,
     METADATA_STORE,
 )
 
@@ -78,7 +76,7 @@ class Materialized(Service):
         default_size: int | str = Size.DEFAULT_SIZE,
         environment_id: str | None = None,
         propagate_crashes: bool = True,
-        external_metadata_store: str | bool = FORCE_EXTERNAL_METADATA_STORE,
+        external_metadata_store: str | bool = False,
         external_blob_store: str | bool = False,
         blob_store_is_azure: bool = False,
         unsafe_mode: bool = True,
@@ -355,24 +353,11 @@ class Materialized(Service):
 
                 volumes += [f"{os.getcwd()}/license_key:/license_key/license_key"]
 
-        if (
-            image_version is None or image_version >= MzVersion.parse_mz("v26.8.0")
-        ) and metadata_store == "foundationdb":
+        if image_version is None or image_version >= MzVersion.parse_mz("v26.8.0"):
             # Generate fdb.cluster file dynamically based on the metadata store address
-            fdb_host = (
-                external_metadata_store
-                if isinstance(external_metadata_store, str)
-                else "foundationdb"
+            volumes += foundationdb.fdb_cluster_file(
+                metadata_store, external_metadata_store
             )
-            fdb_cluster_content = f"docker:docker@{fdb_host}:4500"
-            fdb_cluster_hash = hashlib.sha256(fdb_cluster_content.encode()).hexdigest()
-            fdb_cluster_path = (
-                loader.composition_path or MZ_ROOT
-            ) / f"fdb_cluster_{fdb_cluster_hash}.cluster"
-            with open(fdb_cluster_path, "w") as f:
-                f.write(fdb_cluster_content)
-            os.chmod(fdb_cluster_path, 0o644)
-            volumes += [f"{fdb_cluster_path}:/etc/foundationdb/fdb.cluster"]
 
         if use_default_volumes:
             volumes += DEFAULT_MZ_VOLUMES

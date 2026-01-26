@@ -30,7 +30,7 @@ SERVICES = [
         sanity_restart=False,
         metadata_store="cockroach",
     ),
-    Testdrive(no_reset=True, metadata_store="cockroach"),
+    Testdrive(no_reset=True, metadata_store="cockroach", external_metadata_store=True),
     Persistcli(),
 ]
 

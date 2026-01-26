@@ -35,7 +35,11 @@ from materialize.mzcompose.services.materialized import Materialized
 from materialize.mzcompose.services.minio import Mc, Minio
 from materialize.mzcompose.services.mysql import MySql
 from materialize.mzcompose.services.persistcli import Persistcli
-from materialize.mzcompose.services.postgres import Postgres
+from materialize.mzcompose.services.postgres import (
+    METADATA_STORE,
+    CockroachOrPostgresMetadata,
+    Postgres,
+)
 from materialize.mzcompose.services.prometheus import Prometheus
 from materialize.mzcompose.services.redpanda import Redpanda
 from materialize.mzcompose.services.sql_server import (
@@ -64,7 +68,6 @@ def create_mzs(
             blob_store_is_azure=azurite,
             external_metadata_store=True,
             sanity_restart=False,
-            metadata_store="cockroach",
             additional_system_parameter_defaults=additional_system_parameter_defaults,
             default_replication_factor=2,
             support_external_clusterd=True,
@@ -93,7 +96,7 @@ SERVICES = [
     Redpanda(auto_create_topics=True),
     Debezium(redpanda=True),
     Postgres(),
-    Cockroach(),
+    CockroachOrPostgresMetadata(),
     Minio(setup_materialize=True, additional_directories=["copytos3"]),
     Azurite(),
     Mc(),
@@ -221,19 +224,25 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
             ), f"CI_MZ_SYSTEM_PARAMETER_DEFAULT '{val}' should be the format <key>=<val>"
             additional_system_parameter_defaults[x[0]] = x[1]
 
-    with c.override(
-        Cockroach(
-            image=f"cockroachdb/cockroach:{args.cockroach_tag}",
-            # Workaround for database-issues#5719
-            restart="on-failure:5",
-            setup_materialize=True,
-        ),
-        *create_mzs(
+    overrides = []
+    if METADATA_STORE == "cockroach":
+        overrides.append(
+            Cockroach(
+                image=f"cockroachdb/cockroach:{args.cockroach_tag}",
+                # Workaround for database-issues#5719
+                restart="on-failure:5",
+                setup_materialize=True,
+            )
+        )
+    overrides.extend(
+        create_mzs(
             args.azurite,
             args.transaction_isolation,
             additional_system_parameter_defaults,
-        ),
-    ):
+        )
+    )
+
+    with c.override(*overrides):
         c.up("materialized")
 
         c.sql(

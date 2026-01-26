@@ -6,8 +6,11 @@
 # As of the Change Date specified in that file, in accordance with
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0.
+import hashlib
+import os
 
 from materialize import MZ_ROOT
+from materialize.mzcompose import loader
 from materialize.mzcompose.service import (
     Service,
     ServiceConfig,
@@ -51,3 +54,26 @@ class FoundationDB(Service):
             }
         )
         super().__init__(name=name, config=config)
+
+
+def fdb_cluster_file(
+    metadata_store: str, external_metadata_store: str | bool
+) -> list[str]:
+    if metadata_store != "foundationdb" or external_metadata_store is False:
+        return []
+    # Generate fdb.cluster file dynamically based on the metadata store address
+    fdb_host = (
+        external_metadata_store
+        if isinstance(external_metadata_store, str)
+        else "foundationdb"
+    )
+    fdb_cluster_content = f"docker:docker@{fdb_host}:4500"
+    fdb_cluster_hash = hashlib.sha256(fdb_cluster_content.encode()).hexdigest()
+    fdb_cluster_path = (
+        loader.composition_path or MZ_ROOT
+    ) / f"fdb_cluster_{fdb_cluster_hash}.cluster"
+    with open(fdb_cluster_path, "w") as f:
+        f.write(fdb_cluster_content)
+    os.chmod(fdb_cluster_path, 0o644)
+
+    return [f"{fdb_cluster_path}:/etc/foundationdb/fdb.cluster"]

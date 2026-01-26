@@ -19,11 +19,13 @@ from materialize.docker import image_of_release_version_exists, image_registry
 from materialize.mz_version import MzVersion
 from materialize.mzcompose import get_default_system_parameters
 from materialize.mzcompose.composition import Composition, WorkflowArgumentParser
-from materialize.mzcompose.services.cockroach import Cockroach
 from materialize.mzcompose.services.kafka import Kafka
 from materialize.mzcompose.services.materialized import DeploymentStatus, Materialized
 from materialize.mzcompose.services.mysql import MySql
-from materialize.mzcompose.services.postgres import Postgres
+from materialize.mzcompose.services.postgres import (
+    CockroachOrPostgresMetadata,
+    Postgres,
+)
 from materialize.mzcompose.services.schema_registry import SchemaRegistry
 from materialize.mzcompose.services.test_certs import TestCerts
 from materialize.mzcompose.services.testdrive import Testdrive
@@ -43,7 +45,7 @@ SERVICES = [
     SchemaRegistry(),
     Postgres(),
     MySql(),
-    Cockroach(setup_materialize=True, in_memory=True),
+    CockroachOrPostgresMetadata(),
     # Overridden below
     Materialized(),
     Materialized(name="materialized2"),
@@ -62,7 +64,6 @@ SERVICES = [
         external_metadata_store=True,
         validate_catalog_store=False,
         volumes_extra=["secrets:/share/secrets", "mzdata:/mzdata"],
-        metadata_store="cockroach",
     ),
 ]
 
@@ -213,7 +214,6 @@ def test_upgrade_from_version(
             deploy_generation=deploy_generation,
             restart="on-failure",
             sanity_restart=False,
-            metadata_store="cockroach",
         )
         with c.override(mz_from):
             c.up(mz_service)
@@ -229,7 +229,6 @@ def test_upgrade_from_version(
             system_parameter_defaults=system_parameter_defaults,
             restart="on-failure",
             sanity_restart=False,
-            metadata_store="cockroach",
         )
         with c.override(mz_from):
             c.up(mz_service)
@@ -285,7 +284,6 @@ def test_upgrade_from_version(
                     deploy_generation=deploy_generation,
                     restart="on-failure",
                     sanity_restart=False,
-                    metadata_store="cockroach",
                 )
             ):
                 c.up(mz_service)
@@ -315,7 +313,6 @@ def test_upgrade_from_version(
         deploy_generation=deploy_generation,
         restart="on-failure",
         sanity_restart=False,
-        metadata_store="cockroach",
     )
     with c.override(mz_to):
         c.up(mz_service)

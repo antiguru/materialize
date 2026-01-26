@@ -11,16 +11,16 @@ import json
 import random
 from typing import Any
 
-from materialize import MZ_ROOT, buildkite, ui
+from materialize import buildkite, ui
 from materialize.mzcompose import DEFAULT_MZ_VOLUMES, cluster_replica_size_map
 from materialize.mzcompose.service import (
     Service,
     ServiceConfig,
 )
+from materialize.mzcompose.services import foundationdb
 from materialize.mzcompose.services.azurite import azure_blob_uri
 from materialize.mzcompose.services.minio import minio_blob_uri
 from materialize.mzcompose.services.postgres import (
-    FORCE_EXTERNAL_METADATA_STORE,
     METADATA_STORE,
 )
 
@@ -56,7 +56,7 @@ class Testdrive(Service):
         aws_secret_access_key: str | None = "minioadmin",
         no_consistency_checks: bool = False,
         check_statement_logging: bool = False,
-        external_metadata_store: bool = FORCE_EXTERNAL_METADATA_STORE,
+        external_metadata_store: bool = False,
         external_blob_store: bool = False,
         blob_store_is_azure: bool = False,
         fivetran_destination: bool = False,
@@ -198,7 +198,9 @@ class Testdrive(Service):
                     entrypoint.append(
                         "--persist-consensus-url=foundationdb:?options=--search_path=consensus"
                     )
-                    volumes.append(f"{MZ_ROOT}/misc/foundationdb/:/etc/foundationdb/")
+                    volumes += foundationdb.fdb_cluster_file(
+                        metadata_store, external_metadata_store
+                    )
                 else:
                     address = (
                         metadata_store

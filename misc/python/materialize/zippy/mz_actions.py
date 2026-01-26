@@ -105,7 +105,6 @@ class MzStart(Action):
                 sanity_restart=False,
                 restart="on-failure",
                 additional_system_parameter_defaults=self.additional_system_parameter_defaults,
-                metadata_store="cockroach",
                 default_replication_factor=2,
             )
         ):
@@ -183,7 +182,6 @@ class MzRestart(Action):
                 system_parameter_defaults=state.system_parameter_defaults,
                 sanity_restart=False,
                 restart="on-failure",
-                metadata_store="cockroach",
                 default_replication_factor=2,
             )
         ):
@@ -218,7 +216,6 @@ class Mz0dtDeploy(Mz0dtDeployBaseAction):
                 sanity_restart=False,
                 restart="on-failure",
                 healthcheck=LEADER_STATUS_HEALTHCHECK,
-                metadata_store="cockroach",
                 default_replication_factor=2,
             ),
         ):
