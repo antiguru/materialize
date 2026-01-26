@@ -30,7 +30,10 @@ from materialize.mzcompose.composition import (
     WorkflowArgumentParser,
 )
 from materialize.mzcompose.services.mz import Mz
-from materialize.mzcompose.services.postgres import CockroachOrPostgresMetadata
+from materialize.mzcompose.services.postgres import (
+    METADATA_STORE,
+    CockroachOrPostgresMetadata,
+)
 from materialize.mzcompose.services.sql_logic_test import SqlLogicTest
 from materialize.ui import CommandFailureCausedUIError
 
@@ -102,6 +105,10 @@ def run_sqllogictest(
     parser.add_argument("--replicas", default=1, type=int)
     parser.add_argument("--parallelism", default=MAX_SLTS, type=int)
     args = parser.parse_args()
+
+    if METADATA_STORE == "foundationdb":
+        # Sqllogictest is not compatible with foundation db yet.
+        raise RuntimeError("sqllogictest does not support foundationdb metadata store")
 
     assert (
         1 <= args.parallelism <= MAX_SLTS
