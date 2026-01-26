@@ -144,6 +144,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
     materialized = Materialized(
         default_size=args.default_size,
         external_blob_store=True,
+        external_metadata_store=True,
         blob_store_is_azure=args.azurite,
         additional_system_parameter_defaults=additional_system_parameter_defaults,
         default_replication_factor=1,
@@ -156,6 +157,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         default_timeout=args.default_timeout,
         volumes_extra=["mzdata:/mzdata"],
         external_blob_store=True,
+        external_metadata_store=True,
         blob_store_is_azure=args.azurite,
         fivetran_destination=True,
         fivetran_destination_files_path="/share/tmp",
