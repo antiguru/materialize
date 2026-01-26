@@ -25,13 +25,17 @@ from materialize.mzcompose.composition import (
 )
 from materialize.mzcompose.service import Service as MzComposeService
 from materialize.mzcompose.services.azurite import Azurite
-from materialize.mzcompose.services.cockroach import Cockroach
 from materialize.mzcompose.services.kafka import Kafka
 from materialize.mzcompose.services.materialized import Materialized
 from materialize.mzcompose.services.minio import Mc, Minio
 from materialize.mzcompose.services.mysql import MySql
 from materialize.mzcompose.services.polaris import Polaris, PolarisBootstrap
-from materialize.mzcompose.services.postgres import Postgres
+from materialize.mzcompose.services.postgres import (
+    FORCE_EXTERNAL_METADATA_STORE,
+    METADATA_STORE,
+    CockroachOrPostgresMetadata,
+    Postgres,
+)
 from materialize.mzcompose.services.schema_registry import SchemaRegistry
 from materialize.mzcompose.services.sql_server import (
     SqlServer,
@@ -48,7 +52,7 @@ from materialize.parallel_workload.settings import (
 )
 
 SERVICES = [
-    Cockroach(setup_materialize=True, in_memory=True),
+    CockroachOrPostgresMetadata(),
     Postgres(),
     MySql(),
     SqlServer(),
@@ -86,7 +90,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
 
     print(f"--- Random seed is {args.seed}")
     service_names = [
-        "cockroach",
+        METADATA_STORE,
         "postgres",
         "mysql",
         "sql-server",
@@ -113,8 +117,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         Materialized(
             external_blob_store=external,
             blob_store_is_azure=args.azurite,
-            external_metadata_store=("toxiproxy" if external else False),
-            metadata_store=("cockroach" if external else "postgres-metadata"),
+            external_metadata_store=(
+                "toxiproxy" if external else FORCE_EXTERNAL_METADATA_STORE
+            ),
             ports=["6975:6875", "6976:6876", "6977:6877"],
             sanity_restart=sanity_restart,
             default_replication_factor=1,
@@ -199,6 +204,16 @@ def toxiproxy_start(c: Composition) -> None:
     r = requests.post(
         f"http://localhost:{port}/proxies",
         json={
+            "name": "foundationdb",
+            "listen": "0.0.0.0:4500",
+            "upstream": "foundationdb:4500",
+            "enabled": True,
+        },
+    )
+    assert r.status_code == 201, r
+    r = requests.post(
+        f"http://localhost:{port}/proxies",
+        json={
             "name": "azurite",
             "listen": "0.0.0.0:10000",
             "upstream": "azurite:10000",
@@ -208,6 +223,15 @@ def toxiproxy_start(c: Composition) -> None:
     assert r.status_code == 201, r
     r = requests.post(
         f"http://localhost:{port}/proxies/cockroach/toxics",
+        json={
+            "name": "cockroach",
+            "type": "latency",
+            "attributes": {"latency": 0, "jitter": 10},
+        },
+    )
+    assert r.status_code == 200, r
+    r = requests.post(
+        f"http://localhost:{port}/proxies/foundationdb/toxics",
         json={
             "name": "cockroach",
             "type": "latency",

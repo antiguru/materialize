@@ -23,15 +23,16 @@ from materialize.mzcompose.composition import (
     WorkflowArgumentParser,
 )
 from materialize.mzcompose.services.azurite import Azurite
-from materialize.mzcompose.services.cockroach import Cockroach
 from materialize.mzcompose.services.fivetran_destination import FivetranDestination
-from materialize.mzcompose.services.foundationdb import FoundationDB
 from materialize.mzcompose.services.kafka import Kafka
 from materialize.mzcompose.services.materialized import Materialized
 from materialize.mzcompose.services.minio import Minio
 from materialize.mzcompose.services.mysql import MySql
 from materialize.mzcompose.services.mz import Mz
-from materialize.mzcompose.services.postgres import Postgres, PostgresMetadata
+from materialize.mzcompose.services.postgres import (
+    CockroachOrPostgresMetadata,
+    Postgres,
+)
 from materialize.mzcompose.services.redpanda import Redpanda
 from materialize.mzcompose.services.schema_registry import SchemaRegistry
 from materialize.mzcompose.services.testdrive import Testdrive
@@ -40,6 +41,7 @@ from materialize.mzcompose.services.zookeeper import Zookeeper
 SERVICES = [
     Zookeeper(),
     Kafka(),
+    CockroachOrPostgresMetadata(),
     SchemaRegistry(),
     Redpanda(),
     Postgres(),
@@ -50,9 +52,6 @@ SERVICES = [
     Materialized(external_blob_store=True, sanity_restart=False),
     FivetranDestination(volumes_extra=["tmp:/share/tmp"]),
     Testdrive(external_blob_store=True),
-    FoundationDB(),
-    Cockroach(),
-    PostgresMetadata(),
 ]
 
 
@@ -117,11 +116,6 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
     )
 
     parser.add_argument(
-        "--metadata-store",
-        help="External metadata store to use (postgres-metadata, cockroach, or foundationdb)",
-    )
-
-    parser.add_argument(
         "files",
         nargs="*",
         default=["*.td"],
@@ -141,9 +135,6 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
     else:
         dependencies += ["zookeeper", "kafka", "schema-registry"]
 
-    if args.metadata_store:
-        dependencies.append(args.metadata_store)
-
     additional_system_parameter_defaults = {"default_cluster_replication_factor": "1"}
     for val in args.system_param or []:
         x = val[0].split("=", maxsplit=1)
@@ -157,8 +148,6 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         additional_system_parameter_defaults=additional_system_parameter_defaults,
         default_replication_factor=1,
         sanity_restart=False,
-        external_metadata_store=args.metadata_store is not None,
-        metadata_store=args.metadata_store,
     )
     testdrive = Testdrive(
         kafka_default_partitions=args.kafka_default_partitions,
@@ -171,16 +160,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         fivetran_destination=True,
         fivetran_destination_files_path="/share/tmp",
         check_statement_logging=args.check_statement_logging,
-        external_metadata_store=args.metadata_store is not None,
-        metadata_store=args.metadata_store,
-        entrypoint_extra=(
-            [
-                f"--var=uses-redpanda={args.redpanda}",
-            ]
-            # + ["--consistency-checks=disable"]
-            # if args.metadata_store == "foundationdb"
-            # else []
-        ),
+        entrypoint_extra=[
+            f"--var=uses-redpanda={args.redpanda}",
+        ],
     )
 
     with c.override(testdrive, materialized):

@@ -35,6 +35,13 @@ if read_list BUILDKITE_PLUGIN_MZCOMPOSE_ARGS; then
     done
 fi
 
+# Export environment variables passed via the env parameter
+while IFS='=' read -r name value; do
+    # Strip the BUILDKITE_PLUGIN_MZCOMPOSE_ENV_ prefix to get the actual env var name
+    env_name="${name#BUILDKITE_PLUGIN_MZCOMPOSE_ENV_}"
+    export "$env_name=$value"
+done < <(env | grep "^BUILDKITE_PLUGIN_MZCOMPOSE_ENV_" || true)
+
 STEP_START_TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
 
 # Clean up cores here so that just killed processes' core files are ignored

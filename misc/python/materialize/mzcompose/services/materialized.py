@@ -8,6 +8,7 @@
 # by the Apache License, Version 2.0.
 
 
+import hashlib
 import json
 import os
 import shutil
@@ -24,6 +25,7 @@ from materialize.mzcompose import (
     bootstrap_cluster_replica_size,
     cluster_replica_size_map,
     get_default_system_parameters,
+    loader,
 )
 from materialize.mzcompose.service import (
     Service,
@@ -32,7 +34,10 @@ from materialize.mzcompose.service import (
 )
 from materialize.mzcompose.services.azurite import azure_blob_uri
 from materialize.mzcompose.services.minio import minio_blob_uri
-from materialize.mzcompose.services.postgres import METADATA_STORE
+from materialize.mzcompose.services.postgres import (
+    FORCE_EXTERNAL_METADATA_STORE,
+    METADATA_STORE,
+)
 
 
 class MaterializeEmulator(Service):
@@ -73,7 +78,7 @@ class Materialized(Service):
         default_size: int | str = Size.DEFAULT_SIZE,
         environment_id: str | None = None,
         propagate_crashes: bool = True,
-        external_metadata_store: str | bool = False,
+        external_metadata_store: str | bool = FORCE_EXTERNAL_METADATA_STORE,
         external_blob_store: str | bool = False,
         blob_store_is_azure: bool = False,
         unsafe_mode: bool = True,
@@ -264,8 +269,8 @@ class Materialized(Service):
                 ]
             elif metadata_store == "foundationdb":
                 command += [
-                    f"--persist-consensus-url={address}:?options=--search_path=consensus",
-                    f"--timestamp-oracle-url={address}:?options=--search_path=ts_oracle",
+                    "--persist-consensus-url=foundationdb:?options=--search_path=consensus",
+                    "--timestamp-oracle-url=foundationdb:?options=--search_path=ts_oracle",
                 ]
 
         command += [
@@ -353,9 +358,21 @@ class Materialized(Service):
         if (
             image_version is None or image_version >= MzVersion.parse_mz("v26.8.0")
         ) and metadata_store == "foundationdb":
-            volumes += [
-                f"{MZ_ROOT}/misc/foundationdb/fdb.cluster:/etc/foundationdb/fdb.cluster"
-            ]
+            # Generate fdb.cluster file dynamically based on the metadata store address
+            fdb_host = (
+                external_metadata_store
+                if isinstance(external_metadata_store, str)
+                else "foundationdb"
+            )
+            fdb_cluster_content = f"docker:docker@{fdb_host}:4500"
+            fdb_cluster_hash = hashlib.sha256(fdb_cluster_content.encode()).hexdigest()
+            fdb_cluster_path = (
+                loader.composition_path or MZ_ROOT
+            ) / f"fdb_cluster_{fdb_cluster_hash}.cluster"
+            with open(fdb_cluster_path, "w") as f:
+                f.write(fdb_cluster_content)
+            os.chmod(fdb_cluster_path, 0o644)
+            volumes += [f"{fdb_cluster_path}:/etc/foundationdb/fdb.cluster"]
 
         if use_default_volumes:
             volumes += DEFAULT_MZ_VOLUMES
