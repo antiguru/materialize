@@ -103,9 +103,7 @@ def determine_external_metadata_store() -> (
         return PostgresMetadata
     elif external_metadata_store is not None:
         raise ValueError(f"Unknown EXTERNAL_METADATA_STORE: {external_metadata_store}")
-    # TODO: Just for testing, change before merging.
-    return FoundationDB
-    # return Cockroach if os.getenv("BUILDKITE_TAG", "") != "" else PostgresMetadata
+    return Cockroach if os.getenv("BUILDKITE_TAG", "") != "" else PostgresMetadata
 
 
 CockroachOrPostgresMetadata = determine_external_metadata_store()

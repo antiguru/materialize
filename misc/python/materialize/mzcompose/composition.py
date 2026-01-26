@@ -1622,8 +1622,12 @@ class Composition:
     def backup(self) -> None:
         if self.metadata_store() == "cockroach":
             self.backup_cockroach()
-        else:
+        elif self.metadata_store() == "postgres-metadata":
             self.backup_postgres()
+        else:
+            raise RuntimeError(
+                f"Unsupported metadata store {self.metadata_store()} for backup"
+            )
 
     def restore(
         self, mz_service: str = "materialized", restart_mz: bool = True

@@ -1936,7 +1936,6 @@ service_names = [
     "materialized",
     "balancerd",
     "frontegg-mock",
-    "cockroach",
     "clusterd_1_1_1",
     "clusterd_1_1_2",
     "clusterd_1_2_1",
