@@ -57,7 +57,7 @@ class FoundationDB(Service):
 
 
 def fdb_cluster_file(
-    metadata_store: str, external_metadata_store: str | bool
+    metadata_store: str | None, external_metadata_store: str | bool
 ) -> list[str]:
     if metadata_store != "foundationdb" or external_metadata_store is False:
         return []

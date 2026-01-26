@@ -83,6 +83,7 @@ SERVICES = [
     Redpanda(),
     Toxiproxy(),
     Testdrive(
+        external_metadata_store=True,
         volume_workdir="../testdrive:/workdir/testdrive",
         volumes_extra=[".:/workdir/smoke"],
         materialize_params={"cluster": "cluster1"},
@@ -550,7 +551,10 @@ def workflow_test_github_4587(c: Composition) -> None:
     """
 
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(
+            no_reset=True,
+            external_metadata_store=True,
+        ),
     ):
         c.up("materialized", "clusterd1", Service("testdrive", idle=True))
 
@@ -652,7 +656,10 @@ def workflow_test_github_4433(c: Composition) -> None:
             ],
             workers=2,
         ),
-        Testdrive(no_reset=True),
+        Testdrive(
+            no_reset=True,
+            external_metadata_store=True,
+        ),
     ):
         c.up("materialized", "clusterd1", Service("testdrive", idle=True))
 
@@ -722,7 +729,10 @@ def workflow_test_github_4966(c: Composition) -> None:
     """
 
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(
+            no_reset=True,
+            external_metadata_store=True,
+        ),
     ):
         c.up("materialized", "clusterd1", Service("testdrive", idle=True))
 
@@ -798,7 +808,10 @@ def workflow_test_github_5087(c: Composition) -> None:
     """
 
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(
+            no_reset=True,
+            external_metadata_store=True,
+        ),
     ):
         c.up("materialized", "clusterd1", Service("testdrive", idle=True))
 
@@ -957,7 +970,10 @@ def workflow_test_github_5086(c: Composition) -> None:
             ],
             workers=2,
         ),
-        Testdrive(no_reset=True),
+        Testdrive(
+            no_reset=True,
+            external_metadata_store=True,
+        ),
     ):
         c.up("materialized", "clusterd1", Service("testdrive", idle=True))
 
@@ -1049,7 +1065,10 @@ def workflow_test_github_5831(c: Composition) -> None:
             ],
             workers=4,
         ),
-        Testdrive(no_reset=True),
+        Testdrive(
+            no_reset=True,
+            external_metadata_store=True,
+        ),
     ):
         c.up("materialized", "clusterd1", Service("testdrive", idle=True))
 
@@ -1155,7 +1174,10 @@ def workflow_test_single_time_monotonicity_enforcers(c: Composition) -> None:
             ],
             workers=4,
         ),
-        Testdrive(no_reset=True),
+        Testdrive(
+            no_reset=True,
+            external_metadata_store=True,
+        ),
     ):
         c.up("materialized", "clusterd1", Service("testdrive", idle=True))
 
@@ -1249,7 +1271,11 @@ def workflow_test_github_7645(c: Composition) -> None:
     """Regression test for database-issues#7645"""
 
     with c.override(
-        Testdrive(no_reset=True, consistent_seed=True),
+        Testdrive(
+            no_reset=True,
+            external_metadata_store=True,
+            consistent_seed=True,
+        ),
     ):
         c.up(
             "materialized",
@@ -1279,7 +1305,12 @@ def workflow_test_github_7645(c: Composition) -> None:
 def workflow_test_upsert(c: Composition) -> None:
     """Test creating upsert sources and continuing to ingest them after a restart."""
     with c.override(
-        Testdrive(default_timeout="30s", no_reset=True, consistent_seed=True),
+        Testdrive(
+            external_metadata_store=True,
+            default_timeout="30s",
+            no_reset=True,
+            consistent_seed=True,
+        ),
     ):
         c.up("materialized", "zookeeper", "kafka", "schema-registry")
 
@@ -1300,7 +1331,7 @@ def workflow_test_remote_storage(c: Composition) -> None:
     """Test creating sources in a remote clusterd process."""
 
     with c.override(
-        Testdrive(no_reset=True, consistent_seed=True),
+        Testdrive(external_metadata_store=True, no_reset=True, consistent_seed=True),
         Clusterd(
             name="clusterd1",
             workers=4,
@@ -1356,8 +1387,12 @@ def workflow_test_resource_limits(c: Composition) -> None:
     """Test resource limits in Materialize."""
 
     with c.override(
-        Testdrive(),
-        Materialized(),
+        Testdrive(
+            external_metadata_store=True,
+        ),
+        Materialized(
+            external_metadata_store=True,
+        ),
     ):
         c.up("materialized", "postgres")
 
@@ -1369,7 +1404,7 @@ def workflow_pg_snapshot_resumption(c: Composition) -> None:
 
     with c.override(
         # Start postgres for the pg source
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
         Clusterd(
             name="clusterd1",
             environment_extra=["FAILPOINTS=pg_snapshot_failure=return"],
@@ -1400,7 +1435,7 @@ def workflow_sink_failure(c: Composition) -> None:
 
     with c.override(
         # Start postgres for the pg source
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
         Clusterd(
             name="clusterd1",
             environment_extra=["FAILPOINTS=kafka_sink_creation_error=return"],
@@ -1424,7 +1459,7 @@ def workflow_test_bootstrap_vars(c: Composition) -> None:
     """Test default system vars values passed with a CLI option."""
 
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
         Materialized(
             options=[
                 "--system-parameter-default=allowed_cluster_replica_sizes='1', '2', 'oops'"
@@ -1436,7 +1471,7 @@ def workflow_test_bootstrap_vars(c: Composition) -> None:
         c.run_testdrive_files("resources/bootstrapped-system-vars.td")
 
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
         Materialized(
             additional_system_parameter_defaults={
                 "allowed_cluster_replica_sizes": "'1', '2', 'oops'"
@@ -1451,8 +1486,12 @@ def workflow_test_system_table_indexes(c: Composition) -> None:
     """Test system table indexes."""
 
     with c.override(
-        Testdrive(),
-        Materialized(),
+        Testdrive(
+            external_metadata_store=True,
+        ),
+        Materialized(
+            external_metadata_store=True,
+        ),
     ):
         c.up("materialized", Service("testdrive", idle=True))
         c.testdrive(
@@ -1482,8 +1521,10 @@ def workflow_test_system_table_indexes(c: Composition) -> None:
         c.kill("materialized")
 
     with c.override(
-        Testdrive(no_reset=True),
-        Materialized(),
+        Testdrive(external_metadata_store=True, no_reset=True),
+        Materialized(
+            external_metadata_store=True,
+        ),
     ):
         c.up("materialized", Service("testdrive", idle=True))
         c.testdrive(
@@ -2017,6 +2058,7 @@ def workflow_test_drop_during_reconciliation(c: Composition) -> None:
                 "unsafe_enable_unorchestrated_cluster_replicas": "true",
             },
             support_external_clusterd=True,
+            external_metadata_store=True,
         ),
         Clusterd(
             name="clusterd1",
@@ -2266,8 +2308,12 @@ def workflow_test_query_without_default_cluster(c: Composition) -> None:
     """Test queries without a default cluster in Materialize."""
 
     with c.override(
-        Testdrive(),
-        Materialized(),
+        Testdrive(
+            external_metadata_store=True,
+        ),
+        Materialized(
+            external_metadata_store=True,
+        ),
     ):
         c.up("materialized", "postgres")
 
@@ -3011,7 +3057,7 @@ def workflow_test_pgwire_metrics(c: Composition) -> None:
         return Metrics(resp)
 
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
     ):
         c.up("materialized", Service("testdrive", idle=True))
 
@@ -3769,9 +3815,10 @@ def workflow_test_github_cloud_7998(
     """Regression test for MaterializeInc/cloud#7998."""
 
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
         Clusterd(name="clusterd1"),
         Materialized(
+            external_metadata_store=True,
             support_external_clusterd=True,
         ),
     ):
@@ -3798,7 +3845,7 @@ def workflow_test_github_7000(c: Composition, parser: WorkflowArgumentParser) ->
     """Regression test for database-issues#7000."""
 
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
     ):
         c.up("materialized", Service("testdrive", idle=True))
 
@@ -3842,7 +3889,7 @@ def workflow_statement_logging(c: Composition, parser: WorkflowArgumentParser) -
     """Statement logging test needs to run with 100% logging of tests (as opposed to the default 1% )"""
 
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
         Materialized(),
     ):
         c.up("materialized")
@@ -3923,7 +3970,7 @@ def workflow_blue_green_deployment(
 
     with c.override(
         Testdrive(
-            no_reset=True, default_timeout="300s"
+            external_metadata_store=True, no_reset=True, default_timeout="300s"
         ),  # pending dataflows can take a while
         Clusterd(
             name="clusterd1",
@@ -3945,6 +3992,7 @@ def workflow_blue_green_deployment(
                 "unsafe_enable_unorchestrated_cluster_replicas": "true",
             },
             support_external_clusterd=True,
+            external_metadata_store=True,
         ),
     ):
         c.up("materialized", "clusterd1", "clusterd2", "clusterd3")
@@ -4035,10 +4083,11 @@ def workflow_cluster_drop_concurrent(
 
     with c.override(
         Testdrive(
+            external_metadata_store=True,
             no_reset=True,
         ),
         Clusterd(name="clusterd1"),
-        Materialized(support_external_clusterd=True),
+        Materialized(external_metadata_store=True, support_external_clusterd=True),
     ):
         c.up("materialized", "clusterd1")
         c.run_testdrive_files("cluster-drop-concurrent/setup.td")
@@ -4080,12 +4129,13 @@ def workflow_test_refresh_mv_warmup(
 
     with c.override(
         Materialized(
+            external_metadata_store=True,
             additional_system_parameter_defaults={
                 "enable_refresh_every_mvs": "true",
             },
             support_external_clusterd=True,
         ),
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
     ):
         c.up("materialized", Service("testdrive", idle=True))
 
@@ -4263,13 +4313,14 @@ def workflow_test_refresh_mv_restart(
 
     with c.override(
         Materialized(
+            external_metadata_store=True,
             additional_system_parameter_defaults={
                 "enable_refresh_every_mvs": "true",
                 "enable_cluster_schedule_refresh": "true",
             },
             support_external_clusterd=True,
         ),
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
     ):
         # We'll issue the same SQL commands in 1. and 2. (the only difference is we make the restart slow with a sleep),
         # so save the SQL commands in `before_restart` and `after_restart`.
@@ -4648,12 +4699,13 @@ def workflow_test_github_8734(c: Composition) -> None:
 
     with c.override(
         Materialized(
+            external_metadata_store=True,
             additional_system_parameter_defaults={
                 "enable_refresh_every_mvs": "true",
             },
             support_external_clusterd=True,
         ),
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
     ):
         c.up("materialized", Service("testdrive", idle=True))
 
@@ -4690,6 +4742,7 @@ def workflow_test_github_7798(c: Composition, parser: WorkflowArgumentParser) ->
 
     with c.override(
         Materialized(
+            external_metadata_store=True,
             additional_system_parameter_defaults={
                 "unsafe_enable_unsafe_functions": "true",
                 "unsafe_enable_unorchestrated_cluster_replicas": "true",
@@ -4697,6 +4750,7 @@ def workflow_test_github_7798(c: Composition, parser: WorkflowArgumentParser) ->
             support_external_clusterd=True,
         ),
         Testdrive(
+            external_metadata_store=True,
             no_reset=True,
             default_timeout="10s",
         ),
@@ -5035,7 +5089,7 @@ def workflow_test_mz_introspection_cluster_compat(
     c.up("materialized")
 
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
     ):
         c.up("materialized", Service("testdrive", idle=True))
 
@@ -5129,6 +5183,7 @@ def workflow_test_unified_introspection_during_replica_disconnect(c: Composition
 
     with c.override(
         Materialized(
+            external_metadata_store=True,
             additional_system_parameter_defaults={
                 "unsafe_enable_unsafe_functions": "true",
                 "unsafe_enable_unorchestrated_cluster_replicas": "true",
@@ -5136,6 +5191,7 @@ def workflow_test_unified_introspection_during_replica_disconnect(c: Composition
             support_external_clusterd=True,
         ),
         Testdrive(
+            external_metadata_store=True,
             no_reset=True,
             default_timeout="10s",
         ),
@@ -5232,7 +5288,7 @@ def workflow_test_zero_downtime_reconfigure(
     Tests reconfiguring a managed cluster with zero downtime
     """
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
     ):
         c.up(
             "materialized",
@@ -5527,7 +5583,7 @@ def workflow_replica_expiration_creates_retraction_diffs_after_panic(
     Test that retraction diffs within the expiration time are generated after the replica expires and panics
     """
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
         Clusterd(name="clusterd1", restart="on-failure"),
     ):
 
@@ -5585,7 +5641,7 @@ def workflow_test_constant_sink(c: Composition) -> None:
     Regression test for database-issues#8842.
     """
 
-    with c.override(Testdrive(no_reset=True)):
+    with c.override(Testdrive(external_metadata_store=True, no_reset=True)):
         c.up(
             "materialized",
             "zookeeper",
@@ -5666,13 +5722,14 @@ def workflow_test_memory_limiter(c: Composition) -> None:
                 "unsafe_enable_unorchestrated_cluster_replicas": "true",
             },
             support_external_clusterd=True,
+            external_metadata_store=True,
         ),
         Clusterd(
             name="clusterd1",
             # Enforce a heap limit of 1GiB.
             options=["--heap-limit=1073741824"],
         ),
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
     ):
         c.up("materialized", Service("testdrive", idle=True))
 
@@ -5843,6 +5900,7 @@ def workflow_test_swap_heap_limiting(c: Composition) -> None:
                 },
             },
             bootstrap_replica_size="swap,nolimit",
+            external_metadata_store=True,
         ),
     ):
         c.up("materialized")
@@ -5890,7 +5948,7 @@ def workflow_test_operator_hydration_status_reconciliation(c: Composition) -> No
     correctly reported.
     """
 
-    with c.override(Testdrive(no_reset=True)):
+    with c.override(Testdrive(external_metadata_store=True, no_reset=True)):
         c.up("materialized", "clusterd1")
 
         c.sql(
@@ -5991,8 +6049,9 @@ def workflow_test_sql_cluster_disk(c: Composition) -> None:
                 },
             },
             bootstrap_replica_size="swap,zero",
+            external_metadata_store=True,
         ),
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
     ):
         c.up("materialized")
 
@@ -6036,7 +6095,7 @@ def workflow_websocket_connection(c: Composition) -> None:
     c.down(destroy_volumes=True)
 
     with c.override(
-        Testdrive(no_reset=True),
+        Testdrive(external_metadata_store=True, no_reset=True),
     ):
         c.up("materialized", Service("testdrive", idle=True))
 
@@ -6084,7 +6143,7 @@ def workflow_alter_sink_hang(c: Composition) -> None:
 
     c.down(destroy_volumes=True)
 
-    with c.override(Testdrive(no_reset=True)):
+    with c.override(Testdrive(external_metadata_store=True, no_reset=True)):
         c.up(
             "materialized",
             "kafka",

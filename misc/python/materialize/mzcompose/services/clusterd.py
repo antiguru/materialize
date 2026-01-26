@@ -14,6 +14,8 @@ from materialize.mzcompose.service import (
     Service,
     ServiceConfig,
 )
+from materialize.mzcompose.services import foundationdb
+from materialize.mzcompose.services.postgres import METADATA_STORE
 
 
 class Clusterd(Service):
@@ -33,6 +35,7 @@ class Clusterd(Service):
         workers: int = 1,
         process_names: list[str] = [],
         mz_service: str = "materialized",
+        metadata_store: str | None = METADATA_STORE,
     ) -> None:
         environment = [
             "CLUSTERD_LOG_FILTER",
@@ -80,6 +83,9 @@ class Clusterd(Service):
             if cpu:
                 limits["cpus"] = cpu
             config["deploy"] = {"resources": {"limits": limits}}
+
+        volumes = volumes or DEFAULT_MZ_VOLUMES
+        volumes.extend(foundationdb.fdb_cluster_file(metadata_store, True))
 
         config.update(
             {
