@@ -27,6 +27,7 @@ from materialize.mzcompose.services.foundationdb import FoundationDB
 from materialize.mzcompose.services.kafka import Kafka
 from materialize.mzcompose.services.minio import Minio
 from materialize.mzcompose.services.postgres import (
+    CockroachOrPostgresMetadata,
     Postgres,
 )
 from materialize.mzcompose.services.schema_registry import SchemaRegistry
@@ -51,6 +52,7 @@ SERVICES = [
     ),
     SchemaRegistry(),
     Postgres(),
+    CockroachOrPostgresMetadata(),
     FoundationDB(
         # We need the same port inside and outside because FDB validates
         # that the advertised port matches the connection port.
