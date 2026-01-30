@@ -47,7 +47,7 @@ pub fn init_network() {
 ///
 /// Instead, we exit the process immediately to avoid any cleanup. We only do this
 /// in test builds and if the network was initialized.
-#[cfg(test)]
+#[cfg(feature = "test")]
 #[ctor::dtor]
 fn shutdown_network() {
     if FDB_NETWORK.get().is_none() {

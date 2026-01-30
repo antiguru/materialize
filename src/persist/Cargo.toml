@@ -81,10 +81,13 @@ workspace-hack = { version = "0.0.0", path = "../workspace-hack", optional = tru
 version = "0.10.9"
 features = ["asm"]
 
-# On Linux, FoundationDB support is always enabled.
+# On Linux, enable FoundationDB by default
 [target.'cfg(target_os = "linux")'.dependencies]
 foundationdb = { version = "0.10.0", features = ["embedded-fdb-include", "fdb-7_3"] }
 mz-foundationdb = { path = "../foundationdb" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+mz-foundationdb = { path = "../foundationdb", features = ["test"] }
 
 [dev-dependencies]
 mz-ore = { path = "../ore", default-features = false, features = ["test"] }
@@ -97,7 +100,7 @@ prost-build = "0.14.3"
 
 [features]
 default = ["mz-build-tools/default", "workspace-hack"]
-fdb = ["dep:foundationdb", "dep:mz-foundationdb"]
+fdb = ["dep:foundationdb", "dep:mz-foundationdb", "mz-foundationdb/test"]
 turmoil = ["dep:serde_json", "dep:turmoil"]
 
 [package.metadata.cargo-udeps.ignore]

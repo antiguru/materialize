@@ -11,17 +11,15 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.100"
+ctor = {  version = "0.6.3", optional = true }
 foundationdb = { version = "0.10.0", default-features = false, features = ["embedded-fdb-include", "fdb-7_3"] }
 mz-ore = { path = "../ore", default-features = false}
 tracing = "0.1.44"
 workspace-hack = { version = "0.0.0", path = "../workspace-hack", optional = true }
 
-[dev-dependencies]
-ctor = "0.6.3"
-mz-ore = { path = "../ore", default-features = false, features = ["test", "process"]}
-
 [features]
 default = ["workspace-hack"]
+test = ["mz-ore/test", "mz-ore/process", "dep:ctor"]
 
 [package.metadata.cargo-udeps.ignore]
 normal = ["workspace-hack"]

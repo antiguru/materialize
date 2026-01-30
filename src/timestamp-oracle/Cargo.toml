@@ -36,9 +36,12 @@ workspace-hack = { version = "0.0.0", path = "../workspace-hack", optional = tru
 foundationdb = { version = "0.10.0", features = ["embedded-fdb-include", "fdb-7_3"] }
 mz-foundationdb = { path = "../foundationdb" }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+mz-foundationdb = { path = "../foundationdb", features = ["test"] }
+
 [package.metadata.cargo-udeps.ignore]
 normal = ["workspace-hack"]
 
 [features]
 default = ["workspace-hack"]
-fdb = ["dep:foundationdb", "dep:mz-foundationdb"]
+fdb = ["dep:foundationdb", "dep:mz-foundationdb", "mz-foundationdb/test"]
