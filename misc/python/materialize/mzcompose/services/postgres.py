@@ -28,7 +28,7 @@ class Postgres(Service):
         environment: list[str] = [
             "POSTGRESDB=postgres",
             "POSTGRES_PASSWORD=postgres",
-            "LD_PRELOAD=libeatmydata.so",
+            # "LD_PRELOAD=libeatmydata.so",
         ],
         volumes: list[str] = [],
         max_wal_senders: int = 100,

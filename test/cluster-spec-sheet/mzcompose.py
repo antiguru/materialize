@@ -37,6 +37,10 @@ from materialize.mzcompose.composition import (
 )
 from materialize.mzcompose.service import Service as MzComposeService
 from materialize.mzcompose.services.materialized import Materialized
+from materialize.mzcompose.services.metadata_store import (
+    CockroachOrPostgresMetadata,
+    metadata_store_service_list,
+)
 from materialize.mzcompose.services.mz import Mz
 from materialize.test_analytics.config.test_analytics_db_config import (
     create_test_analytics_config,
@@ -73,6 +77,7 @@ SERVICES = [
         propagate_crashes=True,
         additional_system_parameter_defaults=MATERIALIZED_ADDITIONAL_SYSTEM_PARAMETER_DEFAULTS,
     ),
+    *metadata_store_service_list(),
     # dbbench service built from our mzbuild Dockerfile (test/dbbench)
     MzComposeService(
         "dbbench",
@@ -1872,41 +1877,25 @@ class QpsEnvdStrongScalingScenario(Scenario):
         return []
 
     def run(self, runner: ScenarioRunner) -> None:
-        runner.measure_dbbench(
-            category="peek_qps",
-            name="dbbench_256_conns",
-            setup=[
-                "create view if not exists gen_view as select generate_series as x from generate_series(1, 10)",
-                "create default index on gen_view",
-                "select * from gen_view",  # Wait for hydration
-            ],
-            query=[
-                "select * from gen_view",
-            ],
-            after=[
-                "drop view gen_view cascade",
-            ],
-            duration="40s",
-            concurrency=256,
-        )
-
-        runner.measure_dbbench(
-            category="peek_qps",
-            name="dbbench_512_conns",
-            setup=[
-                "create view if not exists gen_view as select generate_series as x from generate_series(1, 10)",
-                "create default index on gen_view",
-                "select * from gen_view",  # Wait for hydration
-            ],
-            query=[
-                "select * from gen_view",
-            ],
-            after=[
-                "drop view gen_view cascade",
-            ],
-            duration="40s",
-            concurrency=512,
-        )
+        for concurrency in [256, 512]:
+            runner.measure_dbbench(
+                category="peek_qps",
+                name=f"dbbench_{concurrency}_conns",
+                setup=[
+                    "DROP TABLE IF EXISTS gen_table",
+                    "CREATE TABLE gen_table(a int)",
+                    "INSERT INTO gen_table (a) VALUES (1)",
+                    "CREATE DEFAULT INDEX ON gen_table",
+                ],
+                query=[
+                    "SELECT * FROM gen_table",
+                ],
+                after=[
+                    "DROP TABLE gen_table CASCADE",
+                ],
+                duration="40s",
+                concurrency=concurrency,
+            )
 
         # TODO: Add more scenarios as the QPS/CPS work progresses:
         # - different connection counts
@@ -2642,8 +2631,12 @@ class DockerTarget(BenchTarget):
         print("Starting local Materialize instance ...")
         self.composition.up("materialized")
 
+        conn = self.composition.sql_connection(user="mz_system", port=6877)
+        conn.execute("GRANT ALL PRIVILEGES ON CLUSTER quickstart TO materialize")
+        conn.execute("ALTER CLUSTER quickstart OWNER TO materialize")
+
     def new_connection(self) -> psycopg.Connection:
-        return self.composition.sql_connection(user="mz_system", port=6877)
+        return self.composition.sql_connection()
 
     def cleanup(self) -> None:
         print("Stopping local Materialize instance ...")
@@ -2782,6 +2775,20 @@ def run_scenario_envd_strong_scaling(
             runner.envd_cpus = envd_cpus
 
             scenario.run(runner)
+
+            # Fetch and store environmentd metrics
+            if isinstance(target, DockerTarget):
+                try:
+                    envd_metrics = target.composition.exec(
+                        "materialized", "curl", "-s", "localhost:6878/metrics", capture=True
+                    ).stdout
+                    metrics_filename = f"results_{int(time.time())}.envd.{scenario.name()}_{envd_cpus}.metrics"
+                    metrics_path = os.path.join("test", "cluster-spec-sheet", metrics_filename)
+                    with open(metrics_path, "w", encoding="utf-8") as f:
+                        f.write(envd_metrics or "")
+                    print(f"Saved environmentd metrics to {metrics_path}")
+                except Exception as e:
+                    print(f"Warning: Failed to fetch environmentd metrics: {e}")
     finally:
         if isinstance(target, CloudTarget):
             # We reset the cloud envd's core count in any case, to avoid accidentally burning a lot of money.
