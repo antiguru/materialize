@@ -64,7 +64,7 @@ mod unary;
 mod unmaterializable;
 mod variadic;
 
-pub use binary::BinaryFunc;
+pub use binary::{BinaryFunc, EagerBinaryFunc};
 pub use impls::*;
 pub use unary::{EagerUnaryFunc, LazyUnaryFunc, UnaryFunc};
 pub use unmaterializable::UnmaterializableFunc;

@@ -66,7 +66,7 @@ pub(crate) trait LazyBinaryFunc {
 }
 
 #[allow(unused)]
-pub(crate) trait EagerBinaryFunc<'a> {
+pub trait EagerBinaryFunc<'a> {
     type Input1: DatumType<'a, EvalError>;
     type Input2: DatumType<'a, EvalError>;
     type Output: DatumType<'a, EvalError>;
