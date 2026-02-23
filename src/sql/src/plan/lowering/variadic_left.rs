@@ -401,7 +401,7 @@ fn decompose_equations(predicate: &MirScalarExpr) -> Option<Vec<(usize, usize)>>
     while let Some(expr) = todo.pop() {
         match expr {
             MirScalarExpr::CallVariadic {
-                func: VariadicFunc::And(_),
+                func: VariadicFunc::And(..),
                 exprs,
             } => {
                 todo.extend(exprs.iter());

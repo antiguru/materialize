@@ -136,7 +136,7 @@ pub fn split_subquery_predicates(expr: &mut HirRelationExpr) -> Result<(), Recur
     ) -> Result<(), RecursionLimitError> {
         match expr {
             HirScalarExpr::CallVariadic {
-                func: VariadicFunc::And(_),
+                func: VariadicFunc::And(..),
                 exprs,
                 name: _,
             } => {

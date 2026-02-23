@@ -46,10 +46,7 @@ use std::sync::{Arc, LazyLock};
 use std::{iter, mem};
 
 use itertools::Itertools;
-use mz_expr::func::variadic::{
-    ArrayCreate, ArrayIndex, Coalesce, Greatest, Least, ListCreate, ListIndex, ListSliceLinear,
-    MapBuild, RecordCreate,
-};
+use mz_expr::func::variadic::*;
 use mz_expr::virtual_syntax::AlgExcept;
 use mz_expr::{
     Id, LetRecLimit, LocalId, MapFilterProject, MirScalarExpr, RowSetFinishing, TableFunc,

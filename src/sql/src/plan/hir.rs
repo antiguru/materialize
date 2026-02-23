@@ -17,12 +17,12 @@ use std::sync::Arc;
 use std::{fmt, mem};
 
 use itertools::Itertools;
+use mz_expr::func::variadic::{And, Or};
 use mz_expr::virtual_syntax::{AlgExcept, Except, IR};
 use mz_expr::visit::{Visit, VisitChildren};
 use mz_expr::{CollectionPlan, Id, LetRecLimit, RowSetFinishing, func};
 // these happen to be unchanged at the moment, but there might be additions later
 use mz_expr::AggregateFunc::{FusedWindowAggregate, WindowAggregate};
-use mz_expr::func::variadic::{And, Or};
 pub use mz_expr::{
     BinaryFunc, ColumnOrder, TableFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc, WindowFrame,
 };

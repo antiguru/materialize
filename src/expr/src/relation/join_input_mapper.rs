@@ -408,7 +408,7 @@ impl JoinInputMapper {
         } else {
             match expr {
                 MirScalarExpr::CallVariadic {
-                    func: VariadicFunc::Or(_),
+                    func: VariadicFunc::Or(..),
                     exprs: or_args,
                 } => {
                     // Each OR arg should provide a consequence. If they do, we OR them.
@@ -421,7 +421,7 @@ impl JoinInputMapper {
                     Some(MirScalarExpr::call_variadic(Or, consequences_per_arg))
                 }
                 MirScalarExpr::CallVariadic {
-                    func: VariadicFunc::And(_),
+                    func: VariadicFunc::And(..),
                     exprs: and_args,
                 } => {
                     // If any of the AND args provide a consequence, then we take those that do,
