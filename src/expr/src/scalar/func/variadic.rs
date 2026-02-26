@@ -1094,33 +1094,16 @@ fn make_acl_item(
     })
 }
 
-#[derive(
-    Ord,
-    PartialOrd,
-    Clone,
-    Debug,
-    Eq,
-    PartialEq,
-    Serialize,
-    Deserialize,
-    Hash,
-    MzReflect
-)]
-pub struct MakeMzAclItem;
-
-impl fmt::Display for MakeMzAclItem {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("make_mz_aclitem")
-    }
-}
-
-fn make_mz_acl_item<'a>(datums: &[Datum<'a>]) -> Result<Datum<'a>, EvalError> {
-    let grantee: RoleId = datums[0]
-        .unwrap_str()
+#[sqlfunc(sqlname = "make_mz_aclitem")]
+fn make_mz_acl_item(
+    grantee_str: &str,
+    grantor_str: &str,
+    privileges: &str,
+) -> Result<MzAclItem, EvalError> {
+    let grantee: RoleId = grantee_str
         .parse()
         .map_err(|e: anyhow::Error| EvalError::InvalidRoleId(e.to_string().into()))?;
-    let grantor: RoleId = datums[1]
-        .unwrap_str()
+    let grantor: RoleId = grantor_str
         .parse()
         .map_err(|e: anyhow::Error| EvalError::InvalidRoleId(e.to_string().into()))?;
     if grantor == RoleId::Public {
@@ -1128,15 +1111,14 @@ fn make_mz_acl_item<'a>(datums: &[Datum<'a>]) -> Result<Datum<'a>, EvalError> {
             "mz_aclitem grantor cannot be PUBLIC role".into(),
         ));
     }
-    let privileges = datums[2].unwrap_str();
     let acl_mode = AclMode::parse_multiple_privileges(privileges)
         .map_err(|e: anyhow::Error| EvalError::InvalidPrivileges(e.to_string().into()))?;
 
-    Ok(Datum::MzAclItem(MzAclItem {
+    Ok(MzAclItem {
         grantee,
         grantor,
         acl_mode,
-    }))
+    })
 }
 
 #[derive(
@@ -2003,6 +1985,7 @@ impl VariadicFunc {
             VariadicFunc::DateBinTimestampTz(f) => return f.eval(datums, temp_storage, exprs),
             VariadicFunc::TimezoneTimeVariadic(f) => return f.eval(datums, temp_storage, exprs),
             VariadicFunc::MakeAclItem(f) => return f.eval(datums, temp_storage, exprs),
+            VariadicFunc::MakeMzAclItem(f) => return f.eval(datums, temp_storage, exprs),
             _ => {}
         };
 
@@ -2040,6 +2023,7 @@ impl VariadicFunc {
             | VariadicFunc::DateBinTimestampTz(_)
             | VariadicFunc::TimezoneTimeVariadic(_)
             | VariadicFunc::MakeAclItem(_)
+            | VariadicFunc::MakeMzAclItem(_)
             | VariadicFunc::Least(_) => unreachable!(),
             VariadicFunc::MakeTimestamp(_) => make_timestamp(&ds),
             VariadicFunc::JsonbBuildArray(_) => Ok(jsonb_build_array(&ds, temp_storage)),
@@ -2060,7 +2044,6 @@ impl VariadicFunc {
             VariadicFunc::ListSliceLinear(_) => Ok(list_slice_linear(&ds, temp_storage)),
             VariadicFunc::RegexpMatch(_) => regexp_match_dynamic(&ds, temp_storage),
             VariadicFunc::RangeCreate(..) => create_range(&ds, temp_storage),
-            VariadicFunc::MakeMzAclItem(_) => make_mz_acl_item(&ds),
             VariadicFunc::ArrayPosition(_) => array_position(&ds),
             VariadicFunc::ArrayFill(..) => array_fill(&ds, temp_storage),
             VariadicFunc::RegexpSplitToArray(_) => {
