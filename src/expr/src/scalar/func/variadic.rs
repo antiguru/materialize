@@ -232,10 +232,24 @@ pub struct ArrayFill {
     pub elem_type: SqlScalarType,
 }
 
-impl fmt::Display for ArrayFill {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("array_fill")
+#[sqlfunc(
+    ArrayFill,
+    sqlname = "array_fill",
+    output_type_expr = "SqlScalarType::Array(Box::new(self.elem_type.clone())).nullable(false)",
+    introduces_nulls = false
+)]
+fn array_fill_variadic<'a>(
+    &self,
+    fill: Datum<'a>,
+    dims: Datum<'a>,
+    lower_bounds: OptionalArg<Datum<'a>>,
+    temp_storage: &'a RowArena,
+) -> Result<Datum<'a>, EvalError> {
+    let mut datums = vec![fill, dims];
+    if let OptionalArg(Some(lb)) = lower_bounds {
+        datums.push(lb);
     }
+    array_fill(&datums, temp_storage)
 }
 
 fn array_fill<'a>(
@@ -1795,6 +1809,7 @@ impl VariadicFunc {
             VariadicFunc::StringToArray(f) => return f.eval(datums, temp_storage, exprs),
             VariadicFunc::ListIndex(f) => return f.eval(datums, temp_storage, exprs),
             VariadicFunc::ListSliceLinear(f) => return f.eval(datums, temp_storage, exprs),
+            VariadicFunc::ArrayFill(f) => return f.eval(datums, temp_storage, exprs),
             _ => {}
         };
 
@@ -1843,6 +1858,7 @@ impl VariadicFunc {
             | VariadicFunc::StringToArray(_)
             | VariadicFunc::ListIndex(_)
             | VariadicFunc::ListSliceLinear(_)
+            | VariadicFunc::ArrayFill(_)
             | VariadicFunc::Least(_) => unreachable!(),
             VariadicFunc::MapBuild(..) => Ok(map_build(&ds, temp_storage)),
             VariadicFunc::ArrayCreate(ArrayCreate {
@@ -1857,7 +1873,6 @@ impl VariadicFunc {
                 Ok(list_create(&ds, temp_storage))
             }
             VariadicFunc::RangeCreate(..) => create_range(&ds, temp_storage),
-            VariadicFunc::ArrayFill(..) => array_fill(&ds, temp_storage),
         }
     }
 
