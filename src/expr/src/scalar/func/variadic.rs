@@ -1507,47 +1507,28 @@ fn translate(string: &str, from_str: &str, to_str: &str) -> String {
         .collect()
 }
 
-#[derive(
-    Ord,
-    PartialOrd,
-    Clone,
-    Debug,
-    Eq,
-    PartialEq,
-    Serialize,
-    Deserialize,
-    Hash,
-    MzReflect
+#[sqlfunc(
+    output_type_expr = "input_types[0].scalar_type.clone().nullable(false)",
+    introduces_nulls = false
 )]
-pub struct ListSliceLinear;
-
-impl fmt::Display for ListSliceLinear {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("list_slice_linear")
-    }
-}
-
 // TODO(benesch): remove potentially dangerous usage of `as`.
 #[allow(clippy::as_conversions)]
-fn list_slice_linear<'a>(datums: &[Datum<'a>], temp_storage: &'a RowArena) -> Datum<'a> {
-    assert_eq!(
-        datums.len() % 2,
-        1,
-        "expr::scalar::func::list_slice expects an odd number of arguments; 1 for list + 2 \
-        for each start-end pair"
-    );
+fn list_slice_linear<'a>(
+    list: DatumList<'a>,
+    slices: Variadic<(i64, i64)>,
+    temp_storage: &'a RowArena,
+) -> Result<Datum<'a>, EvalError> {
     assert!(
-        datums.len() > 2,
+        slices.len() >= 1,
         "expr::scalar::func::list_slice expects at least 3 arguments; 1 for list + at least \
-        one start-end pair"
+            one start-end pair"
     );
 
     let mut start_idx = 0;
     let mut total_length = usize::MAX;
 
-    for (start, end) in datums[1..].iter().tuples::<(_, _)>() {
-        let start = std::cmp::max(start.unwrap_int64(), 1);
-        let end = end.unwrap_int64();
+    for (start, end) in slices {
+        let start = std::cmp::max(start, 1);
 
         // Result should be empty list.
         if start > end {
@@ -1565,20 +1546,16 @@ fn list_slice_linear<'a>(datums: &[Datum<'a>], temp_storage: &'a RowArena) -> Da
         total_length = std::cmp::min(length_inner, total_length - start_inner);
     }
 
-    let iter = datums[0]
-        .unwrap_list()
-        .iter()
-        .skip(start_idx)
-        .take(total_length);
+    let iter = list.iter().skip(start_idx).take(total_length);
 
-    temp_storage.make_datum(|row| {
+    Ok(temp_storage.make_datum(|row| {
         row.push_list_with(|row| {
             // if iter is empty, will get the appropriate empty list.
             for d in iter {
                 row.push(d);
             }
         });
-    })
+    }))
 }
 
 #[sqlfunc(sqlname = "timestamp_bin")]
@@ -1817,6 +1794,7 @@ impl VariadicFunc {
             VariadicFunc::RegexpSplitToArray(f) => return f.eval(datums, temp_storage, exprs),
             VariadicFunc::StringToArray(f) => return f.eval(datums, temp_storage, exprs),
             VariadicFunc::ListIndex(f) => return f.eval(datums, temp_storage, exprs),
+            VariadicFunc::ListSliceLinear(f) => return f.eval(datums, temp_storage, exprs),
             _ => {}
         };
 
@@ -1864,6 +1842,7 @@ impl VariadicFunc {
             | VariadicFunc::RegexpSplitToArray(_)
             | VariadicFunc::StringToArray(_)
             | VariadicFunc::ListIndex(_)
+            | VariadicFunc::ListSliceLinear(_)
             | VariadicFunc::Least(_) => unreachable!(),
             VariadicFunc::MapBuild(..) => Ok(map_build(&ds, temp_storage)),
             VariadicFunc::ArrayCreate(ArrayCreate {
@@ -1877,7 +1856,6 @@ impl VariadicFunc {
             VariadicFunc::ListCreate(..) | VariadicFunc::RecordCreate(..) => {
                 Ok(list_create(&ds, temp_storage))
             }
-            VariadicFunc::ListSliceLinear(_) => Ok(list_slice_linear(&ds, temp_storage)),
             VariadicFunc::RangeCreate(..) => create_range(&ds, temp_storage),
             VariadicFunc::ArrayFill(..) => array_fill(&ds, temp_storage),
         }
