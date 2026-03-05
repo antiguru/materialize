@@ -116,12 +116,10 @@
 
 use std::any::Any;
 use std::cell::RefCell;
-use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use differential_dataflow::{AsCollection, Hashable, VecCollection};
-use futures::StreamExt;
 use mz_compute_types::sinks::{ComputeSinkDesc, MaterializedViewSinkConnection};
 use mz_dyncfg::ConfigSet;
 use mz_ore::cast::CastFrom;
@@ -137,17 +135,18 @@ use mz_storage_types::StorageDiff;
 use mz_storage_types::controller::CollectionMetadata;
 use mz_storage_types::errors::DataflowError;
 use mz_storage_types::sources::SourceData;
-use mz_timely_util::builder_async::PressOnDropButton;
-use mz_timely_util::builder_async::{Event, OperatorBuilder};
+use mz_timely_util::builder_async::{PressOnDropButton, button};
 use mz_timely_util::probe::{Handle, ProbeNotify};
 use serde::{Deserialize, Serialize};
 use timely::PartialOrder;
-use timely::container::CapacityContainerBuilder;
 use timely::dataflow::channels::pact::{Exchange, Pipeline};
+use timely::dataflow::operators::generic::OutputBuilder;
+use timely::dataflow::operators::generic::builder_rc::OperatorBuilder as OperatorBuilderRc;
 use timely::dataflow::operators::{Broadcast, Capability, CapabilitySet, probe};
 use timely::dataflow::{Scope, Stream};
 use timely::progress::Antichain;
-use tokio::sync::watch;
+use timely::progress::frontier::AntichainRef;
+use tokio::sync::{mpsc, watch};
 use tracing::trace;
 
 use crate::compute_state::ComputeState;
@@ -323,9 +322,10 @@ impl OkErr<Antichain<Timestamp>, Antichain<Timestamp>> {
 /// Advance the given `frontier` to `new`, if the latter one is greater.
 ///
 /// Returns whether `frontier` was advanced.
-fn advance(frontier: &mut Antichain<Timestamp>, new: Antichain<Timestamp>) -> bool {
-    if PartialOrder::less_than(frontier, &new) {
-        *frontier = new;
+fn advance(frontier: &mut Antichain<Timestamp>, new: AntichainRef<'_, Timestamp>) -> bool {
+    if PartialOrder::less_than(&frontier.borrow(), &new) {
+        frontier.clear();
+        frontier.extend(new.iter().cloned());
         true
     } else {
         false
@@ -462,6 +462,7 @@ fn operator_name(sink_id: GlobalId, sub_operator: &str) -> String {
 /// Implementation of the `mint` operator.
 mod mint {
     use super::*;
+    use timely::progress::frontier::AntichainRef;
 
     /// Render the `mint` operator.
     ///
@@ -486,7 +487,7 @@ mod mint {
     where
         S: Scope<Timestamp = Timestamp>,
     {
-        let scope = desired.ok.scope();
+        let mut scope = desired.ok.scope();
         let worker_id = scope.index();
         let worker_count = scope.peers();
 
@@ -497,117 +498,150 @@ mod mint {
         let shared_frontier = Rc::clone(&sink_frontier);
 
         let name = operator_name(sink_id, "mint");
-        let mut op = OperatorBuilder::new(name, scope);
+        let mut builder = OperatorBuilderRc::new(name, scope.clone());
+        let info = builder.operator_info();
+        let (mut shutdown_handle, shutdown_button) = button(&mut scope, Rc::clone(&info.address));
 
-        let (ok_output, ok_stream) = op.new_output::<CapacityContainerBuilder<_>>();
-        let (err_output, err_stream) = op.new_output::<CapacityContainerBuilder<_>>();
-        let desired_outputs = OkErr::new(ok_output, err_output);
-        let desired_output_streams = OkErr::new(ok_stream, err_stream);
+        // Create outputs (before inputs, so no input connections yet).
+        let (ok_output, ok_stream) = builder.new_output();
+        let (err_output, err_stream) = builder.new_output();
+        let (desc_output, desc_stream) = builder.new_output();
 
-        let (desc_output, desc_output_stream) = op.new_output::<CapacityContainerBuilder<_>>();
+        let mut ok_output = OutputBuilder::from(ok_output);
+        let mut err_output = OutputBuilder::from(err_output);
+        let mut desc_output = OutputBuilder::from(desc_output);
 
-        let mut desired_inputs = OkErr {
-            ok: op.new_input_for(&desired.ok, Pipeline, &desired_outputs.ok),
-            err: op.new_input_for(&desired.err, Pipeline, &desired_outputs.err),
-        };
+        // desired_ok -> output 0 (ok passthrough)
+        let mut desired_ok_input = builder.new_input_connection(
+            &desired.ok,
+            Pipeline,
+            vec![
+                (0, Antichain::from_elem(Default::default())),
+                (1, Antichain::new()),
+                (2, Antichain::new()),
+            ],
+        );
+        // desired_err -> output 1 (err passthrough)
+        let mut desired_err_input = builder.new_input_connection(
+            &desired.err,
+            Pipeline,
+            vec![
+                (0, Antichain::new()),
+                (1, Antichain::from_elem(Default::default())),
+                (2, Antichain::new()),
+            ],
+        );
 
-        let button = op.build(move |capabilities| async move {
+        // Channel for persist frontier updates from the Tokio task.
+        let (persist_tx, mut persist_rx) = mpsc::unbounded_channel();
+
+        // Spawn a Tokio task to watch the persist shard's upper frontier (active worker only).
+        //
+        // We collect the persist frontier from a write handle directly, rather than inspecting
+        // the `persist` stream, because the latter has two annoying glitches:
+        //  (a) It starts at the shard's read frontier, not its write frontier.
+        //  (b) It can lag behind if there are spikes in ingested data.
+        if worker_id == active_worker_id {
+            let sync_activator = scope.sync_activator_for(info.address.to_vec());
+            mz_ore::task::spawn(
+                || operator_name(sink_id, "mint::persist_watch"),
+                async move {
+                    let mut writer = persist_api.open_writer().await;
+                    let mut frontier = Antichain::from_elem(Timestamp::MIN);
+                    while !frontier.is_empty() {
+                        writer.wait_for_upper_past(&frontier).await;
+                        frontier = writer.upper().clone();
+                        if persist_tx.send(frontier.clone()).is_err() {
+                            return;
+                        }
+                        if sync_activator.activate().is_err() {
+                            return;
+                        }
+                    }
+                },
+            );
+        }
+
+        // Spawn a Tokio task to wake the operator when read-only mode changes.
+        let read_only = *read_only_rx.borrow_and_update();
+        if read_only && worker_id == active_worker_id {
+            let sync_activator = scope.sync_activator_for(info.address.to_vec());
+            let mut rx = read_only_rx.clone();
+            mz_ore::task::spawn(
+                || format!("mv_sink({sink_id})::mint::read_only_watch"),
+                async move {
+                    let _ = rx.changed().await;
+                    let _ = sync_activator.activate();
+                },
+            );
+        }
+
+        builder.build_reschedule(move |capabilities| {
             // Passing through the `desired` streams only requires data capabilities, so we can
             // immediately drop their initial capabilities here.
             let [_, _, desc_cap]: [_; 3] =
                 capabilities.try_into().expect("one capability per output");
 
-            // Non-active workers just pass the `desired` and `persist` data through.
-            if worker_id != active_worker_id {
+            let mut cap_set = if worker_id == active_worker_id {
+                Some(CapabilitySet::from_elem(desc_cap))
+            } else {
                 drop(desc_cap);
                 shared_frontier.borrow_mut().clear();
+                None
+            };
 
-                loop {
-                    tokio::select! {
-                        Some(event) = desired_inputs.ok.next() => {
-                            if let Event::Data(cap, mut data) = event {
-                                desired_outputs.ok.give_container(&cap, &mut data);
-                            }
-                        }
-                        Some(event) = desired_inputs.err.next() => {
-                            if let Event::Data(cap, mut data) = event {
-                                desired_outputs.err.give_container(&cap, &mut data);
-                            }
-                        }
-                        // All inputs are exhausted, so we can shut down.
-                        else => return,
-                    }
+            let mut state = (worker_id == active_worker_id)
+                .then(|| State::new(sink_id, worker_count, as_of, read_only));
+
+            move |frontiers| {
+                // Check shutdown.
+                if shutdown_handle.all_pressed() {
+                    return false;
                 }
-            }
 
-            let mut cap_set = CapabilitySet::from_elem(desc_cap);
-
-            let read_only = *read_only_rx.borrow_and_update();
-            let mut state = State::new(sink_id, worker_count, as_of, read_only);
-
-            // Create a stream that reports advancements of the target shard's frontier and updates
-            // the shared sink frontier.
-            //
-            // We collect the persist frontier from a write handle directly, rather than inspecting
-            // the `persist` stream, because the latter has two annoying glitches:
-            //  (a) It starts at the shard's read frontier, not its write frontier.
-            //  (b) It can lag behind if there are spikes in ingested data.
-            let mut persist_frontiers = pin!(async_stream::stream! {
-                let mut writer = persist_api.open_writer().await;
-                let mut frontier = Antichain::from_elem(Timestamp::MIN);
-                while !frontier.is_empty() {
-                    writer.wait_for_upper_past(&frontier).await;
-                    frontier = writer.upper().clone();
-                    shared_frontier.borrow_mut().clone_from(&frontier);
-                    yield frontier.clone();
+                // Pass through desired data.
+                {
+                    let mut ok_out = ok_output.activate();
+                    desired_ok_input.for_each(|cap, data| {
+                        ok_out.session(&cap).give_container(data);
+                    });
                 }
-            });
+                {
+                    let mut err_out = err_output.activate();
+                    desired_err_input.for_each(|cap, data| {
+                        err_out.session(&cap).give_container(data);
+                    });
+                }
 
-            loop {
-                // Read from the inputs, pass through all data to the respective outputs, and keep
-                // track of the input frontiers. When a frontier advances we might have to mint a
-                // new batch description.
-                let maybe_desc = tokio::select! {
-                    Some(event) = desired_inputs.ok.next() => {
-                        match event {
-                            Event::Data(cap, mut data) => {
-                                desired_outputs.ok.give_container(&cap, &mut data);
-                                None
-                            }
-                            Event::Progress(frontier) => {
-                                state.advance_desired_ok_frontier(frontier);
-                                state.maybe_mint_batch_description()
-                            }
-                        }
-                    }
-                    Some(event) = desired_inputs.err.next() => {
-                        match event {
-                            Event::Data(cap, mut data) => {
-                                desired_outputs.err.give_container(&cap, &mut data);
-                                None
-                            }
-                            Event::Progress(frontier) => {
-                                state.advance_desired_err_frontier(frontier);
-                                state.maybe_mint_batch_description()
-                            }
-                        }
-                    }
-                    Some(frontier) = persist_frontiers.next() => {
-                        state.advance_persist_frontier(frontier);
-                        state.maybe_mint_batch_description()
-                    }
-                    Ok(()) = read_only_rx.changed(), if read_only => {
-                        state.allow_writes();
-                        state.maybe_mint_batch_description()
-                    }
-                    // All inputs are exhausted, so we can shut down.
-                    else => return,
+                let Some(state) = &mut state else {
+                    // Non-active worker: just pass through data.
+                    return true;
                 };
+                let cap_set = cap_set.as_mut().unwrap();
 
-                if let Some(desc) = maybe_desc {
+                // Track desired frontiers.
+                state.advance_desired_ok_frontier(frontiers[0].frontier());
+                state.advance_desired_err_frontier(frontiers[1].frontier());
+
+                // Receive persist frontier updates from the Tokio task.
+                while let Ok(frontier) = persist_rx.try_recv() {
+                    shared_frontier.borrow_mut().clone_from(&frontier);
+                    state.advance_persist_frontier(frontier.borrow());
+                }
+
+                // Check read-only mode.
+                if state.read_only && read_only_rx.has_changed().unwrap_or(false) {
+                    if !*read_only_rx.borrow_and_update() {
+                        state.allow_writes();
+                    }
+                }
+
+                // Try to mint a batch description.
+                let mut desc_out = desc_output.activate();
+                if let Some(desc) = state.maybe_mint_batch_description() {
                     let lower_ts = *desc.lower.as_option().expect("not empty");
                     let cap = cap_set.delayed(&lower_ts);
-                    desc_output.give(&cap, desc);
+                    desc_out.session(&cap).give(desc);
 
                     // We only emit strictly increasing `lower`s, so we can let our output frontier
                     // advance beyond the current `lower`.
@@ -617,14 +651,17 @@ mod mint {
                     // advance our output frontier as far.
                     let _ = cap_set.try_downgrade(state.persist_frontier.iter());
                 }
+
+                true
             }
         });
 
+        let desired_output_streams = OkErr::new(ok_stream, err_stream);
         (
             desired_output_streams,
-            desc_output_stream,
+            desc_stream,
             sink_frontier,
-            button.press_on_drop(),
+            shutdown_button.press_on_drop(),
         )
     }
 
@@ -682,19 +719,19 @@ mod mint {
             );
         }
 
-        fn advance_desired_ok_frontier(&mut self, frontier: Antichain<Timestamp>) {
+        fn advance_desired_ok_frontier(&mut self, frontier: AntichainRef<Timestamp>) {
             if advance(&mut self.desired_frontiers.ok, frontier) {
                 self.trace("advanced `desired` ok frontier");
             }
         }
 
-        fn advance_desired_err_frontier(&mut self, frontier: Antichain<Timestamp>) {
+        fn advance_desired_err_frontier(&mut self, frontier: AntichainRef<Timestamp>) {
             if advance(&mut self.desired_frontiers.err, frontier) {
                 self.trace("advanced `desired` err frontier");
             }
         }
 
-        fn advance_persist_frontier(&mut self, frontier: Antichain<Timestamp>) {
+        fn advance_persist_frontier(&mut self, frontier: AntichainRef<Timestamp>) {
             if advance(&mut self.persist_frontier, frontier) {
                 self.trace("advanced `persist` frontier");
             }
@@ -742,6 +779,18 @@ mod mint {
 mod write {
     use super::*;
 
+    /// A request to write a batch, sent from the Timely operator to the Tokio task.
+    struct WriteBatchRequest {
+        updates: Vec<((SourceData, ()), Timestamp, StorageDiff)>,
+        lower: Antichain<Timestamp>,
+        upper: Antichain<Timestamp>,
+    }
+
+    /// A response from writing a batch, sent from the Tokio task back to the Timely operator.
+    struct WriteBatchResponse {
+        batch: ProtoBatch,
+    }
+
     /// Render the `write` operator.
     ///
     /// The parameters passed in are:
@@ -763,18 +812,20 @@ mod write {
     where
         S: Scope<Timestamp = Timestamp>,
     {
-        let scope = desired.ok.scope();
+        let mut scope = desired.ok.scope();
         let worker_id = scope.index();
 
         let name = operator_name(sink_id, "write");
-        let mut op = OperatorBuilder::new(name, scope.clone());
+        let mut builder = OperatorBuilderRc::new(name, scope.clone());
+        let info = builder.operator_info();
+        let (mut shutdown_handle, shutdown_button) = button(&mut scope, Rc::clone(&info.address));
 
         let mut logging = None;
         if let (Some(compute_logger), Some(differential_logger)) = (
             scope.logger_for("materialize/compute"),
             scope.logger_for("differential/arrange"),
         ) {
-            let operator_info = op.operator_info();
+            let operator_info = builder.operator_info();
             logging = Some(Logging::new(
                 compute_logger,
                 differential_logger.into(),
@@ -783,124 +834,235 @@ mod write {
             ));
         }
 
-        let (batches_output, batches_output_stream) =
-            op.new_output::<CapacityContainerBuilder<_>>();
+        let (batches_output, batches_output_stream) = builder.new_output();
+        let mut batches_output = OutputBuilder::from(batches_output);
 
         // It is important that we exchange the `desired` and `persist` data the same way, so
         // updates that cancel each other out end up on the same worker.
         let exchange_ok = |(d, _, _): &(Row, Timestamp, Diff)| d.hashed();
         let exchange_err = |(d, _, _): &(DataflowError, Timestamp, Diff)| d.hashed();
 
-        let mut desired_inputs = OkErr::new(
-            op.new_disconnected_input(&desired.ok, Exchange::new(exchange_ok)),
-            op.new_disconnected_input(&desired.err, Exchange::new(exchange_err)),
+        // Disconnected inputs: no connection to any output.
+        let disconnected = vec![(0, Antichain::new())];
+        let mut desired_ok_input = builder.new_input_connection(
+            &desired.ok,
+            Exchange::new(exchange_ok),
+            disconnected.clone(),
         );
-        let mut persist_inputs = OkErr::new(
-            op.new_disconnected_input(&persist.ok, Exchange::new(exchange_ok)),
-            op.new_disconnected_input(&persist.err, Exchange::new(exchange_err)),
+        let mut desired_err_input = builder.new_input_connection(
+            &desired.err,
+            Exchange::new(exchange_err),
+            disconnected.clone(),
         );
-        let mut descs_input = op.new_input_for(&descs.broadcast(), Pipeline, &batches_output);
+        let mut persist_ok_input = builder.new_input_connection(
+            &persist.ok,
+            Exchange::new(exchange_ok),
+            disconnected.clone(),
+        );
+        let mut persist_err_input = builder.new_input_connection(
+            &persist.err,
+            Exchange::new(exchange_err),
+            disconnected.clone(),
+        );
+        // descs -> output 0 (batches)
+        let mut descs_input = builder.new_input_connection(
+            &descs.broadcast(),
+            Pipeline,
+            vec![(0, Antichain::from_elem(Default::default()))],
+        );
 
-        let button = op.build(move |capabilities| async move {
+        // Channels for batch writing: request -> Tokio task, response -> Timely operator.
+        let (batch_req_tx, mut batch_req_rx) = mpsc::unbounded_channel::<WriteBatchRequest>();
+        let (batch_resp_tx, mut batch_resp_rx) = mpsc::unbounded_channel::<WriteBatchResponse>();
+        // Channel for initial metrics from the Tokio task.
+        let (init_tx, mut init_rx) = tokio::sync::oneshot::channel::<SinkMetrics>();
+
+        // Spawn Tokio task that owns the WriteHandle and processes batch requests.
+        {
+            let sync_activator = scope.sync_activator_for(info.address.to_vec());
+            mz_ore::task::spawn(
+                || operator_name(sink_id, "write::batch_writer"),
+                async move {
+                    let writer = persist_api.open_writer().await;
+                    let sink_metrics = persist_api.open_metrics().await;
+                    if init_tx.send(sink_metrics).is_err() {
+                        return;
+                    }
+                    if sync_activator.activate().is_err() {
+                        return;
+                    }
+
+                    write_batch_task(writer, &mut batch_req_rx, &batch_resp_tx, &sync_activator)
+                        .await;
+                },
+            );
+        }
+
+        builder.build_reschedule(move |capabilities| {
             // We will use the data capabilities from the `descs` input to produce output, so no
             // need to hold onto the initial capabilities.
             drop(capabilities);
 
-            let writer = persist_api.open_writer().await;
-            let sink_metrics = persist_api.open_metrics().await;
-            let mut state = State::new(
-                sink_id,
-                worker_id,
-                writer,
-                sink_metrics,
-                logging,
-                as_of,
-                &worker_config,
-            );
+            // State is lazily initialized once the Tokio task sends back the SinkMetrics.
+            let mut state: Option<State> = None;
+            // Buffers for data arriving before state initialization.
+            let mut pending_desired_ok: Vec<Vec<(Row, Timestamp, Diff)>> = Vec::new();
+            let mut pending_desired_err: Vec<Vec<(DataflowError, Timestamp, Diff)>> = Vec::new();
+            let mut pending_persist_ok: Vec<Vec<(Row, Timestamp, Diff)>> = Vec::new();
+            let mut pending_persist_err: Vec<Vec<(DataflowError, Timestamp, Diff)>> = Vec::new();
+            // Batch description pending until state is ready.
+            let mut pending_desc: Option<(BatchDescription, Capability<Timestamp>)> = None;
+            // Whether a batch write is currently in flight in the Tokio task.
+            let mut batch_in_flight: Option<(BatchDescription, Capability<Timestamp>)> = None;
 
-            loop {
-                // Read from the inputs, extract `desired` updates as positive contributions to
-                // `correction` and `persist` updates as negative contributions. If either the
-                // `desired` or `persist` frontier advances, or if we receive a new batch description,
-                // we might have to write a new batch.
-                let maybe_batch = tokio::select! {
-                    Some(event) = desired_inputs.ok.next() => {
-                        match event {
-                            Event::Data(_cap, mut data) => {
-                                state.corrections.ok.insert(&mut data);
-                                None
-                            }
-                            Event::Progress(frontier) => {
-                                state.advance_desired_ok_frontier(frontier);
-                                state.maybe_write_batch().await
-                            }
+            move |frontiers| {
+                // Check shutdown.
+                if shutdown_handle.all_pressed() {
+                    return false;
+                }
+
+                // Try to initialize state if not yet done.
+                if state.is_none() {
+                    if let Ok(metrics) = init_rx.try_recv() {
+                        let mut s = State::new(
+                            sink_id,
+                            worker_id,
+                            metrics,
+                            logging.take(),
+                            as_of.clone(),
+                            &worker_config,
+                        );
+                        // Drain buffered data into corrections.
+                        for mut data in pending_desired_ok.drain(..) {
+                            s.corrections.ok.insert(&mut data);
+                        }
+                        for mut data in pending_desired_err.drain(..) {
+                            s.corrections.err.insert(&mut data);
+                        }
+                        for mut data in pending_persist_ok.drain(..) {
+                            s.corrections.ok.insert_negated(&mut data);
+                        }
+                        for mut data in pending_persist_err.drain(..) {
+                            s.corrections.err.insert_negated(&mut data);
+                        }
+                        if let Some((desc, cap)) = pending_desc.take() {
+                            s.absorb_batch_description(desc, cap);
+                        }
+                        state = Some(s);
+                    }
+                }
+
+                // Accept data from all inputs.
+                desired_ok_input.for_each(|_cap, data| {
+                    if let Some(s) = &mut state {
+                        s.corrections.ok.insert(data);
+                    } else {
+                        pending_desired_ok.push(std::mem::take(data));
+                    }
+                });
+                desired_err_input.for_each(|_cap, data| {
+                    if let Some(s) = &mut state {
+                        s.corrections.err.insert(data);
+                    } else {
+                        pending_desired_err.push(std::mem::take(data));
+                    }
+                });
+                persist_ok_input.for_each(|_cap, data| {
+                    if let Some(s) = &mut state {
+                        s.corrections.ok.insert_negated(data);
+                    } else {
+                        pending_persist_ok.push(std::mem::take(data));
+                    }
+                });
+                persist_err_input.for_each(|_cap, data| {
+                    if let Some(s) = &mut state {
+                        s.corrections.err.insert_negated(data);
+                    } else {
+                        pending_persist_err.push(std::mem::take(data));
+                    }
+                });
+
+                // Accept batch descriptions.
+                descs_input.for_each(|cap, data| {
+                    // Retain a capability for output 0 (batches).
+                    let cap = cap.retain_for_output(0);
+                    for desc in data.drain(..) {
+                        if let Some(s) = &mut state {
+                            s.absorb_batch_description(desc, cap.clone());
+                        } else {
+                            pending_desc = Some((desc, cap.clone()));
                         }
                     }
-                    Some(event) = desired_inputs.err.next() => {
-                        match event {
-                            Event::Data(_cap, mut data) => {
-                                state.corrections.err.insert(&mut data);
-                                None
-                            }
-                            Event::Progress(frontier) => {
-                                state.advance_desired_err_frontier(frontier);
-                                state.maybe_write_batch().await
-                            }
-                        }
-                    }
-                    Some(event) = persist_inputs.ok.next() => {
-                        match event {
-                            Event::Data(_cap, mut data) => {
-                                state.corrections.ok.insert_negated(&mut data);
-                                None
-                            }
-                            Event::Progress(frontier) => {
-                                state.advance_persist_ok_frontier(frontier);
-                                state.maybe_write_batch().await
-                            }
-                        }
-                    }
-                    Some(event) = persist_inputs.err.next() => {
-                        match event {
-                            Event::Data(_cap, mut data) => {
-                                state.corrections.err.insert_negated(&mut data);
-                                None
-                            }
-                            Event::Progress(frontier) => {
-                                state.advance_persist_err_frontier(frontier);
-                                state.maybe_write_batch().await
-                            }
-                        }
-                    }
-                    Some(event) = descs_input.next() => {
-                        match event {
-                            Event::Data(cap, data) => {
-                                for desc in data {
-                                    state.absorb_batch_description(desc, cap.clone());
-                                }
-                                state.maybe_write_batch().await
-                            }
-                            Event::Progress(_frontier) => None,
-                        }
-                    }
-                    // All inputs are exhausted, so we can shut down.
-                    else => return,
+                });
+
+                let Some(state) = &mut state else {
+                    return true;
                 };
 
-                if let Some((index, batch, cap)) = maybe_batch {
-                    batches_output.give(&cap, (index, batch));
+                // Track frontiers.
+                state.advance_desired_ok_frontier(frontiers[0].frontier());
+                state.advance_desired_err_frontier(frontiers[1].frontier());
+                state.advance_persist_ok_frontier(frontiers[2].frontier());
+                state.advance_persist_err_frontier(frontiers[3].frontier());
+
+                // Try to receive batch results from the Tokio task.
+                while let Ok(resp) = batch_resp_rx.try_recv() {
+                    if let Some((desc, cap)) = batch_in_flight.take() {
+                        let mut out = batches_output.activate();
+                        out.session(&cap).give((desc, resp.batch));
+                        state.trace("wrote a batch");
+                    }
                 }
+
+                // If no batch in flight, try to send a new batch request.
+                if batch_in_flight.is_none() {
+                    if let Some((desc, cap, updates)) = state.maybe_prepare_batch() {
+                        if updates.is_empty() {
+                            state.trace("skipping empty batch");
+                        } else {
+                            let req = WriteBatchRequest {
+                                updates,
+                                lower: desc.lower.clone(),
+                                upper: desc.upper.clone(),
+                            };
+                            if batch_req_tx.send(req).is_ok() {
+                                batch_in_flight = Some((desc, cap));
+                            }
+                        }
+                    }
+                }
+
+                true
             }
         });
 
-        (batches_output_stream, button.press_on_drop())
+        (batches_output_stream, shutdown_button.press_on_drop())
+    }
+
+    /// Tokio task that processes batch write requests.
+    async fn write_batch_task(
+        mut writer: WriteHandle<SourceData, (), Timestamp, StorageDiff>,
+        batch_req_rx: &mut mpsc::UnboundedReceiver<WriteBatchRequest>,
+        batch_resp_tx: &mpsc::UnboundedSender<WriteBatchResponse>,
+        sync_activator: &timely::scheduling::SyncActivator,
+    ) {
+        while let Some(req) = batch_req_rx.recv().await {
+            let batch = writer
+                .batch(req.updates, req.lower, req.upper)
+                .await
+                .expect("valid usage")
+                .into_transmittable_batch();
+            if batch_resp_tx.send(WriteBatchResponse { batch }).is_err() {
+                return;
+            }
+            let _ = sync_activator.activate();
+        }
     }
 
     /// State maintained by the `write` operator.
     struct State {
         sink_id: GlobalId,
         worker_id: usize,
-        persist_writer: WriteHandle<SourceData, (), Timestamp, StorageDiff>,
         /// Contains `desired - persist`, reflecting the updates we would like to commit to
         /// `persist` in order to "correct" it to track `desired`. This collection is only modified
         /// by updates received from either the `desired` or `persist` inputs.
@@ -932,7 +1094,6 @@ mod write {
         fn new(
             sink_id: GlobalId,
             worker_id: usize,
-            persist_writer: WriteHandle<SourceData, (), Timestamp, StorageDiff>,
             metrics: SinkMetrics,
             logging: Option<Logging>,
             as_of: Antichain<Timestamp>,
@@ -947,7 +1108,6 @@ mod write {
             Self {
                 sink_id,
                 worker_id,
-                persist_writer,
                 corrections: OkErr::new(
                     Correction::new(
                         metrics.clone(),
@@ -976,28 +1136,28 @@ mod write {
             );
         }
 
-        fn advance_desired_ok_frontier(&mut self, frontier: Antichain<Timestamp>) {
+        fn advance_desired_ok_frontier(&mut self, frontier: AntichainRef<Timestamp>) {
             if advance(&mut self.desired_frontiers.ok, frontier) {
                 self.apply_desired_frontier_advancement();
                 self.trace("advanced `desired` ok frontier");
             }
         }
 
-        fn advance_desired_err_frontier(&mut self, frontier: Antichain<Timestamp>) {
+        fn advance_desired_err_frontier(&mut self, frontier: AntichainRef<Timestamp>) {
             if advance(&mut self.desired_frontiers.err, frontier) {
                 self.apply_desired_frontier_advancement();
                 self.trace("advanced `desired` err frontier");
             }
         }
 
-        fn advance_persist_ok_frontier(&mut self, frontier: Antichain<Timestamp>) {
+        fn advance_persist_ok_frontier(&mut self, frontier: AntichainRef<Timestamp>) {
             if advance(&mut self.persist_frontiers.ok, frontier) {
                 self.apply_persist_frontier_advancement();
                 self.trace("advanced `persist` ok frontier");
             }
         }
 
-        fn advance_persist_err_frontier(&mut self, frontier: Antichain<Timestamp>) {
+        fn advance_persist_err_frontier(&mut self, frontier: AntichainRef<Timestamp>) {
             if advance(&mut self.persist_frontiers.err, frontier) {
                 self.apply_persist_frontier_advancement();
                 self.trace("advanced `persist` err frontier");
@@ -1060,9 +1220,17 @@ mod write {
             self.trace("set batch description");
         }
 
-        async fn maybe_write_batch(
+        /// Check if a batch can be written and prepare the updates if so.
+        ///
+        /// Returns `(desc, cap, updates)` if a batch is ready. The updates Vec may be empty,
+        /// in which case the caller should skip writing.
+        fn maybe_prepare_batch(
             &mut self,
-        ) -> Option<(BatchDescription, ProtoBatch, Capability<Timestamp>)> {
+        ) -> Option<(
+            BatchDescription,
+            Capability<Timestamp>,
+            Vec<((SourceData, ()), Timestamp, StorageDiff)>,
+        )> {
             let (desc, _cap) = self.batch_description.as_ref()?;
 
             // We can write a new batch if we have seen all `persist` updates before `lower` and
@@ -1082,24 +1250,13 @@ mod write {
 
             let oks = ok_updates.map(|(d, t, r)| ((SourceData(Ok(d)), ()), t, r.into_inner()));
             let errs = err_updates.map(|(d, t, r)| ((SourceData(Err(d)), ()), t, r.into_inner()));
-            let mut updates = oks.chain(errs).peekable();
 
-            // Don't write empty batches.
-            if updates.peek().is_none() {
-                drop(updates);
-                self.trace("skipping empty batch");
-                return None;
-            }
+            // TODO(mh): This is a net-new allocation, but we need it because `oks` and `errs`
+            //   borrow the corrections buffer. We also can't write the batch here because it
+            //   requires async.
+            let updates: Vec<_> = oks.chain(errs).collect();
 
-            let batch = self
-                .persist_writer
-                .batch(updates, desc.lower.clone(), desc.upper.clone())
-                .await
-                .expect("valid usage")
-                .into_transmittable_batch();
-
-            self.trace("wrote a batch");
-            Some((desc, batch, cap))
+            Some((desc, cap, updates))
         }
     }
 }
@@ -1107,6 +1264,16 @@ mod write {
 /// Implementation of the `append` operator.
 mod append {
     use super::*;
+
+    /// Commands sent from the Timely operator to the Tokio append task.
+    enum AppendCommand {
+        /// A new batch description has been received.
+        Description(BatchDescription),
+        /// A written batch has been received.
+        Batch(ProtoBatch),
+        /// The batches frontier has advanced.
+        BatchesFrontier(Antichain<Timestamp>),
+    }
 
     /// Render the `append` operator.
     ///
@@ -1124,65 +1291,89 @@ mod append {
     where
         S: Scope<Timestamp = Timestamp>,
     {
-        let scope = descs.scope();
+        let mut scope = descs.scope();
         let worker_id = scope.index();
 
         let name = operator_name(sink_id, "append");
-        let mut op = OperatorBuilder::new(name, scope);
+        let mut builder = OperatorBuilderRc::new(name, scope.clone());
+        let info = builder.operator_info();
+        let (mut shutdown_handle, shutdown_button) = button(&mut scope, Rc::clone(&info.address));
 
         // Broadcast batch descriptions to all workers, regardless of whether or not they are
         // responsible for the append, to give them a chance to clean up any outdated state they
         // might still hold.
-        let mut descs_input = op.new_disconnected_input(&descs.broadcast(), Pipeline);
-        let mut batches_input = op.new_disconnected_input(
-            batches,
-            Exchange::new(move |(desc, _): &(BatchDescription, _)| {
-                u64::cast_from(desc.append_worker)
-            }),
-        );
+        let mut descs_input = builder.new_input(&descs.broadcast(), Pipeline);
+        let batch_exchange = Exchange::new(|(desc, _): &(BatchDescription, _)| {
+            u64::cast_from(desc.append_worker)
+        });
+        let mut batches_input = builder.new_input(batches, batch_exchange);
 
-        let button = op.build(move |_capabilities| async move {
+        // Channel for commands to the Tokio append task.
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<AppendCommand>();
+
+        // Spawn Tokio task that owns the append state machine.
+        mz_ore::task::spawn(|| operator_name(sink_id, "append"), async move {
             let writer = persist_api.open_writer().await;
             let mut state = State::new(sink_id, worker_id, writer);
 
-            loop {
-                // Read from the inputs, absorb batch descriptions and batches. If the `batches`
-                // frontier advances, or if we receive a new batch description, we might have to
-                // append a new batch.
-                tokio::select! {
-                    Some(event) = descs_input.next() => {
-                        if let Event::Data(_cap, data) = event {
-                            for desc in data {
-                                state.absorb_batch_description(desc).await;
-                                state.maybe_append_batches().await;
-                            }
-                        }
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    AppendCommand::Description(desc) => {
+                        state.absorb_batch_description(desc).await;
+                        state.maybe_append_batches().await;
                     }
-                    Some(event) = batches_input.next() => {
-                        match event {
-                            Event::Data(_cap, data) => {
-                                // The batch description is only used for routing and we ignore it
-                                // here since we already get one from `descs_input`.
-                                for (_desc, batch) in data {
-                                    state.absorb_batch(batch).await;
-                                }
-                            }
-                            Event::Progress(frontier) => {
-                                state.advance_batches_frontier(frontier);
-                                state.maybe_append_batches().await;
-                            }
-                        }
+                    AppendCommand::Batch(batch) => {
+                        state.absorb_batch(batch).await;
                     }
-                    // All inputs are exhausted, so we can shut down.
-                    else => return,
+                    AppendCommand::BatchesFrontier(frontier) => {
+                        state.advance_batches_frontier(frontier.borrow());
+                        state.maybe_append_batches().await;
+                    }
                 }
             }
         });
 
-        button.press_on_drop()
+        builder.build_reschedule(move |_capabilities| {
+            let mut prev_batches_frontier = Antichain::from_elem(Timestamp::MIN);
+
+            move |frontiers| {
+                // Check shutdown.
+                if shutdown_handle.all_pressed() {
+                    return false;
+                }
+
+                // Forward batch descriptions to the Tokio task.
+                descs_input.for_each(|_cap, data| {
+                    for desc in data.drain(..) {
+                        let _ = cmd_tx.send(AppendCommand::Description(desc));
+                    }
+                });
+
+                // Forward batches to the Tokio task.
+                batches_input.for_each(|_cap, data| {
+                    for (_desc, batch) in data.drain(..) {
+                        // The batch description is only used for routing and we ignore it
+                        // here since we already get one from `descs_input`.
+                        let _ = cmd_tx.send(AppendCommand::Batch(batch));
+                    }
+                });
+
+                // Forward batches frontier advancements.
+                let new_batches_frontier = frontiers[1].frontier();
+                if PartialOrder::less_than(&prev_batches_frontier.borrow(), &new_batches_frontier) {
+                    prev_batches_frontier.clear();
+                    prev_batches_frontier.extend(new_batches_frontier.iter().cloned());
+                    let _ = cmd_tx.send(AppendCommand::BatchesFrontier(new_batches_frontier.to_owned()));
+                }
+
+                true
+            }
+        });
+
+        shutdown_button.press_on_drop()
     }
 
-    /// State maintained by the `append` operator.
+    /// State maintained by the `append` Tokio task.
     struct State {
         sink_id: GlobalId,
         worker_id: usize,
@@ -1226,7 +1417,7 @@ mod append {
             );
         }
 
-        fn advance_batches_frontier(&mut self, frontier: Antichain<Timestamp>) {
+        fn advance_batches_frontier(&mut self, frontier: AntichainRef<Timestamp>) {
             if advance(&mut self.batches_frontier, frontier) {
                 self.trace("advanced `batches` frontier");
             }
