@@ -35,7 +35,7 @@ use timely::PartialOrder;
 use timely::dataflow::channels::pact::{Exchange, Pipeline};
 use timely::dataflow::operators::generic::OutputBuilder;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder as OperatorBuilderRc;
-use timely::dataflow::operators::{Capability, CapabilitySet, ConnectLoop, Enter, Feedback, Leave};
+use timely::dataflow::operators::{CapabilitySet, ConnectLoop, Enter, Feedback, Leave};
 use timely::dataflow::scopes::Child;
 use timely::dataflow::{Scope, Stream};
 use timely::order::TotalOrder;
@@ -385,7 +385,7 @@ where
         );
     }
 
-    builder.build_reschedule(move |capabilities| {
+    builder.build(move |capabilities| {
         let mut cap_set = CapabilitySet::from_elem(capabilities.into_element());
 
         if worker_index != chosen_worker {
@@ -410,15 +410,6 @@ where
                 // No data expected (Infallible), but we must drain the input.
             });
 
-            if shutdown_handle.all_pressed() {
-                cap_set.downgrade(&[]);
-                return false;
-            }
-
-            if done {
-                return false;
-            }
-
             // Advance lease manager based on completed_fetches frontier.
             let completed_frontier = &frontiers[0];
             leases.advance_to(completed_frontier.frontier());
@@ -430,13 +421,13 @@ where
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                         // Tokio task exited (channel closed), we're done.
-                        if !done {
-                            done = true;
-                            cap_set.downgrade(&[]);
-                        }
+                        done = true;
                         break;
                     }
                 };
+                if done {
+                    break;
+                }
                 match event {
                     DescsEvent::Init {
                         cfg: init_cfg,
@@ -565,7 +556,6 @@ where
                         // contain only times >= `until` and can be dropped entirely.
                         if PartialOrder::less_equal(&until, &current_frontier) {
                             done = true;
-                            cap_set.downgrade(&[]);
                         }
                     }
                     DescsEvent::Error(error) => {
@@ -577,14 +567,15 @@ where
                             ErrorHandler::Signal(callback) => {
                                 callback(error);
                                 done = true;
-                                cap_set.downgrade(&[]);
                             }
                         }
                     }
                 }
             }
 
-            !done
+            if done || shutdown_handle.all_pressed() {
+                cap_set.downgrade(&[]);
+            }
         }
     });
 
@@ -803,23 +794,17 @@ where
         ),
     );
 
-    // VecDeque of capabilities retained for in-flight fetch requests (FIFO order).
-    let mut pending_caps: std::collections::VecDeque<(Capability<G::Timestamp>, Capability<_>)> =
-        std::collections::VecDeque::new();
-    let mut done = false;
+    builder.build(move |_caps| {
+        // VecDeque of capabilities retained for in-flight fetch requests (FIFO order).
+        let mut pending_caps = std::collections::VecDeque::new();
+        let mut done = false;
 
-    builder.build_reschedule(move |mut capabilities| {
-        // Initial capability for fetched output.
-        let mut fetched_cap_set = CapabilitySet::from_elem(capabilities.remove(0));
-        // Initial capability for completed_fetches output (frontier-only).
-        let mut completed_fetches_cap_set = CapabilitySet::from_elem(capabilities.remove(0));
-
-        move |frontiers| {
+        move |_frontiers| {
             // Always drain inputs to avoid holding back frontiers.
             descs_input.for_each(|cap, data| {
                 if !done {
                     for (_idx, part) in data.drain(..) {
-                        pending_caps.push_back((cap.delayed(cap.time()), cap.delayed_for_output(cap.time(), 1)));
+                        pending_caps.push_back(cap.delayed(cap.time()));
                         if parts_tx.send(part).is_err() {
                             // Tokio task shut down unexpectedly.
                             done = true;
@@ -828,23 +813,9 @@ where
                 }
             });
 
-            if shutdown_handle.all_pressed() {
-                pending_caps.clear();
-                fetched_cap_set.downgrade(&[]);
-                completed_fetches_cap_set.downgrade(&[]);
-                return false;
-            }
-
-            if done {
-                pending_caps.clear();
-                fetched_cap_set.downgrade(&[]);
-                completed_fetches_cap_set.downgrade(&[]);
-                return false;
-            }
-
             // Receive fetched results from the Tokio task.
-            while let Ok(result) = results_rx.try_recv() {
-                let (cap, _) = pending_caps
+            while !done && let Ok(result) = results_rx.try_recv() {
+                let cap = pending_caps
                     .pop_front()
                     .expect("received result without matching capability");
                 match result {
@@ -872,28 +843,14 @@ where
                                     blob_key
                                 ));
                                 done = true;
-                                fetched_cap_set.downgrade(&[]);
-                                completed_fetches_cap_set.downgrade(&[]);
-                                return false;
                             }
                         }
                     }
                 }
             }
-
-            // Downgrade capabilities based on input frontier.
-            let input_frontier = frontiers[0].frontier();
-            fetched_cap_set.downgrade(input_frontier.iter());
-            completed_fetches_cap_set.downgrade(input_frontier.iter());
-
-            if input_frontier.is_empty() && pending_caps.is_empty() {
-                // Input is done and all in-flight fetches are complete.
-                fetched_cap_set.downgrade(&[]);
-                completed_fetches_cap_set.downgrade(&[]);
-                return false;
+            if done || shutdown_handle.all_pressed() {
+                pending_caps.clear();
             }
-
-            !shutdown_handle.all_pressed()
         }
     });
 
