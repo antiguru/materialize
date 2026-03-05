@@ -188,6 +188,7 @@ pub fn build_compute_dataflow<A: Allocate>(
     compute_state: &mut ComputeState,
     dataflow: DataflowDescription<RenderPlan, CollectionMetadata>,
     start_signal: StartSignal,
+    start_signal_dropper: StartSignalDropper,
     until: Antichain<mz_repr::Timestamp>,
     dataflow_expiration: Antichain<mz_repr::Timestamp>,
 ) {
@@ -400,6 +401,7 @@ pub fn build_compute_dataflow<A: Allocate>(
                         &idx.typ,
                         snapshot_mode,
                         start_signal.clone(),
+                        &start_signal_dropper,
                     );
                 }
 
@@ -510,6 +512,7 @@ pub fn build_compute_dataflow<A: Allocate>(
                         &idx.typ,
                         snapshot_mode,
                         start_signal.clone(),
+                        &start_signal_dropper,
                     );
                 }
 
@@ -581,6 +584,7 @@ where
         &self,
         arranged: Arranged<G, Tr>,
         start_signal: StartSignal,
+        start_signal_dropper: &StartSignalDropper,
         mut logic: impl FnMut(Tr::Key<'_>, Tr::Val<'_>) -> V + 'static,
     ) -> VecCollection<Child<'g, G, T>, V, Tr::Diff>
     where
@@ -588,10 +592,13 @@ where
         // for our batch-level filtering to be safe, so we document it here regardless.
         G::Timestamp: TotalOrder,
     {
-        let oks = arranged.stream.with_start_signal(start_signal).filter({
-            let as_of = self.as_of_frontier.clone();
-            move |b| !<Antichain<G::Timestamp> as PartialOrder>::less_equal(b.upper(), &as_of)
-        });
+        let oks = arranged
+            .stream
+            .with_start_signal(start_signal, start_signal_dropper)
+            .filter({
+                let as_of = self.as_of_frontier.clone();
+                move |b| !<Antichain<G::Timestamp> as PartialOrder>::less_equal(b.upper(), &as_of)
+            });
         Arranged::<G, Tr>::flat_map_batches(&oks, move |a, b| [logic(a, b)]).enter(&self.scope)
     }
 
@@ -605,6 +612,7 @@ where
         typ: &ReprRelationType,
         snapshot_mode: SnapshotMode,
         start_signal: StartSignal,
+        start_signal_dropper: &StartSignalDropper,
     ) {
         if let Some(traces) = compute_state.traces.get_mut(&idx_id) {
             assert!(
@@ -634,10 +642,10 @@ where
                 SnapshotMode::Include => {
                     let ok_arranged = oks
                         .enter(&self.scope)
-                        .with_start_signal(start_signal.clone());
+                        .with_start_signal(start_signal.clone(), start_signal_dropper);
                     let err_arranged = err_arranged
                         .enter(&self.scope)
-                        .with_start_signal(start_signal);
+                        .with_start_signal(start_signal, start_signal_dropper);
                     CollectionBundle::from_expressions(
                         idx.key.clone(),
                         ArrangementFlavor::Trace(idx_id, ok_arranged, err_arranged),
@@ -657,6 +665,7 @@ where
                         self.import_filtered_index_collection(
                             oks,
                             start_signal.clone(),
+                            start_signal_dropper,
                             move |k: DatumSeq, v: DatumSeq| {
                                 let mut datums_borrow = datums.borrow();
                                 datums_borrow.extend(k);
@@ -668,6 +677,7 @@ where
                     let errs = self.import_filtered_index_collection(
                         err_arranged,
                         start_signal,
+                        start_signal_dropper,
                         |e, _| e.clone(),
                     );
                     CollectionBundle::from_collections(oks, errs)
@@ -1549,13 +1559,14 @@ impl RenderTimestamp for Product<mz_repr::Timestamp, PointStamp<u64>> {
 
 /// A signal that can be awaited by operators to suspend them prior to startup.
 ///
-/// Creating a signal also yields a token, dropping of which causes the signal to fire.
+/// Creating a signal also yields a token and a [`StartSignalDropper`]. Dropping the token causes
+/// the signal to fire.
 ///
-/// `StartSignal` is designed to be usable by both async and sync Timely operators.
+/// `StartSignal` is `Send` and can be passed to spawned Tokio tasks.
 ///
 ///  * Async operators can simply `await` it.
-///  * Sync operators should register an [`ActivateOnDrop`] value via [`StartSignal::drop_on_fire`]
-///    and then check `StartSignal::has_fired()` on each activation.
+///  * Sync operators should use [`StartSignalDropper::drop_on_fire`] to register an
+///    [`ActivateOnDrop`] value and then check [`StartSignal::has_fired`] on each activation.
 #[derive(Clone)]
 pub(crate) struct StartSignal {
     /// A future that completes when the signal fires.
@@ -1563,27 +1574,36 @@ pub(crate) struct StartSignal {
     /// The inner type is `Infallible` because no data is ever expected on this channel. Instead the
     /// signal is activated by dropping the corresponding `Sender`.
     fut: futures::future::Shared<oneshot::Receiver<Infallible>>,
-    /// A weak reference to the token, to register drop-on-fire values.
-    token_ref: Weak<RefCell<Box<dyn Any>>>,
 }
 
 impl StartSignal {
-    /// Create a new `StartSignal` and a corresponding token that activates the signal when
-    /// dropped.
-    pub fn new() -> (Self, Rc<dyn Any>) {
+    /// Create a new `StartSignal`, a [`StartSignalDropper`] for registering drop-on-fire values,
+    /// and a token that activates the signal when dropped.
+    pub fn new() -> (Self, StartSignalDropper, Rc<dyn Any>) {
         let (tx, rx) = oneshot::channel::<Infallible>();
         let token: Rc<RefCell<Box<dyn Any>>> = Rc::new(RefCell::new(Box::new(tx)));
-        let signal = Self {
-            fut: rx.shared(),
+        let signal = Self { fut: rx.shared() };
+        let dropper = StartSignalDropper {
             token_ref: Rc::downgrade(&token),
         };
-        (signal, token)
+        (signal, dropper, token)
     }
 
     pub fn has_fired(&self) -> bool {
-        self.token_ref.strong_count() == 0
+        self.fut.peek().is_some()
     }
+}
 
+/// A `!Send` companion to [`StartSignal`] that allows registering values to be dropped when the
+/// signal fires. Only usable on the Timely thread.
+pub(crate) struct StartSignalDropper {
+    token_ref: Weak<RefCell<Box<dyn Any>>>,
+}
+
+impl StartSignalDropper {
+    /// Register a value to be dropped when the start signal fires.
+    ///
+    /// This is useful for registering [`ActivateOnDrop`] values that wake a sync operator.
     pub fn drop_on_fire(&self, to_drop: Box<dyn Any>) {
         if let Some(token) = self.token_ref.upgrade() {
             let mut token = token.borrow_mut();
@@ -1607,7 +1627,7 @@ pub(crate) trait WithStartSignal {
     ///
     /// Note that this operator needs to buffer all incoming data, so it has some memory footprint,
     /// depending on the amount and shape of its inputs.
-    fn with_start_signal(self, signal: StartSignal) -> Self;
+    fn with_start_signal(self, signal: StartSignal, dropper: &StartSignalDropper) -> Self;
 }
 
 impl<S, Tr> WithStartSignal for Arranged<S, Tr>
@@ -1616,9 +1636,9 @@ where
     S::Timestamp: RenderTimestamp,
     Tr: TraceReader + Clone,
 {
-    fn with_start_signal(self, signal: StartSignal) -> Self {
+    fn with_start_signal(self, signal: StartSignal, dropper: &StartSignalDropper) -> Self {
         Arranged {
-            stream: self.stream.with_start_signal(signal),
+            stream: self.stream.with_start_signal(signal, dropper),
             trace: self.trace,
         }
     }
@@ -1629,14 +1649,14 @@ where
     S: Scope,
     D: timely::Data,
 {
-    fn with_start_signal(self, signal: StartSignal) -> Self {
+    fn with_start_signal(self, signal: StartSignal, dropper: &StartSignalDropper) -> Self {
         self.unary(Pipeline, "StartSignal", |_cap, info| {
             let token = Box::new(ActivateOnDrop::new(
                 (),
                 info.address,
                 self.scope().activations(),
             ));
-            signal.drop_on_fire(token);
+            dropper.drop_on_fire(token);
 
             let mut stash = Vec::new();
 

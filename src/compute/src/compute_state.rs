@@ -536,7 +536,7 @@ impl<'a, A: Allocate + 'static> ActiveComputeState<'a, A> {
             }
         }
 
-        let (start_signal, suspension_token) = StartSignal::new();
+        let (start_signal, start_signal_dropper, suspension_token) = StartSignal::new();
         for id in dataflow.export_ids() {
             self.compute_state
                 .suspended_collections
@@ -548,6 +548,7 @@ impl<'a, A: Allocate + 'static> ActiveComputeState<'a, A> {
             self.compute_state,
             dataflow,
             start_signal,
+            start_signal_dropper,
             until,
             dataflow_expiration,
         );

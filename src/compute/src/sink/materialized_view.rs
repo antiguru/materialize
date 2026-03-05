@@ -1303,9 +1303,8 @@ mod append {
         // responsible for the append, to give them a chance to clean up any outdated state they
         // might still hold.
         let mut descs_input = builder.new_input(&descs.broadcast(), Pipeline);
-        let batch_exchange = Exchange::new(|(desc, _): &(BatchDescription, _)| {
-            u64::cast_from(desc.append_worker)
-        });
+        let batch_exchange =
+            Exchange::new(|(desc, _): &(BatchDescription, _)| u64::cast_from(desc.append_worker));
         let mut batches_input = builder.new_input(batches, batch_exchange);
 
         // Channel for commands to the Tokio append task.
@@ -1363,7 +1362,9 @@ mod append {
                 if PartialOrder::less_than(&prev_batches_frontier.borrow(), &new_batches_frontier) {
                     prev_batches_frontier.clear();
                     prev_batches_frontier.extend(new_batches_frontier.iter().cloned());
-                    let _ = cmd_tx.send(AppendCommand::BatchesFrontier(new_batches_frontier.to_owned()));
+                    let _ = cmd_tx.send(AppendCommand::BatchesFrontier(
+                        new_batches_frontier.to_owned(),
+                    ));
                 }
 
                 true
