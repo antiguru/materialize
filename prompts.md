@@ -389,14 +389,14 @@ done, this already processes columnar data directly — the `flat_map` logic clo
 
 ### Prompt 11.5: Columnar FlatMap input (direct)
 
-[ ] `render_flat_map` calls `as_specific_collection` to get a Vec collection. With 11.2 done,
+[*] `render_flat_map` calls `as_specific_collection` to get a Vec collection. With 11.2 done,
 investigate whether the FlatMap inner loop can operate on columnar refs directly.
 
-[ ] The FlatMap inner loop unpacks `input_row` via `datums.borrow_with(&input_row)` and evaluates
+[*] The FlatMap inner loop unpacks `input_row` via `datums.borrow_with(&input_row)` and evaluates
 expressions. Since `borrow_with` accepts `&RowRef`, the loop body can work on columnar refs.
 However, the `drain_through_mfp` helper also takes `&Row` — update it to accept `&RowRef`.
 
-[ ] The FlatMap operator uses `unary_fallible` which expects a specific input container type.
+[*] The FlatMap operator uses `unary_fallible` which expects a specific input container type.
 Investigate whether it can accept `Column<(Row, T, Diff)>` directly or whether a columnar-aware
 operator variant is needed.
 

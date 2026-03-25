@@ -448,6 +448,7 @@ The current `DatumContainer` is already reasonably efficient (contiguous bytes, 
 ## Prompt 11.4: Columnar Reduce input (direct) — verification
 
 ### What was done
+
 - Verified that `render_reduce` calls `entered.flat_map(input_key.map(|k| (k, None)), max_demand, ...)`.
 - When `input_key` is `None`, `flat_map` uses the columnar path from 11.1 — iterating `&RowRef` directly without Vec conversion.
 - When `input_key` is `Some`, `flat_map` uses the arrangement path (no collection conversion needed).
@@ -461,3 +462,24 @@ The current `DatumContainer` is already reasonably efficient (contiguous bytes, 
 
 ### Issues
 - None.
+
+## Prompt 11.5: Columnar FlatMap input (direct)
+
+### What was done
+- Added a columnar path to `render_flat_map` that uses `unary_fallible` directly on the columnar inner stream (`Column<(Row, T, Diff)>`).
+- `unary_fallible` accepts `Column<...>` because `Column` implements `Container + DrainContainer + Clone + Default`.
+- The inner loop iterates columnar items via `data.borrow().into_index_iter()`, yielding `(&RowRef, T::Ref, Diff::Ref)`. The `&RowRef` is passed directly to `datums.borrow_with(row_ref)` for expression evaluation and to `drain_through_mfp(row_ref, ...)` for MFP application.
+- Changed `drain_through_mfp` parameter from `&Row` to `&RowRef` (transparent since `Row: Deref<Target=RowRef>`).
+- The queue buffers `Column<...>` containers instead of `Vec<...>` containers.
+- Vec fallback retained for arrangement key paths and non-columnar bundles.
+
+### Key decisions
+- Created a full parallel columnar path rather than trying to make the existing code generic, because the iteration patterns differ (`for (row, t, d) in data` for Vec vs `for (ref, t_ref, d_ref) in data.borrow().into_index_iter()` for columnar).
+- The columnar path does not use `'input` labeled break since columnar iteration doesn't yield owned items that can be pattern-matched the same way. Uses `continue` instead.
+- Output is still Vec-based (`ConsolidatingContainerBuilder<Vec<...>>`) for the ok/err streams, with a final `vec_to_columnar` conversion. The inner table function evaluation inherently produces owned Rows.
+
+### Files changed
+- `src/compute/src/render/flat_map.rs` — Added columnar `unary_fallible` path; changed `drain_through_mfp` to accept `&RowRef`.
+
+### Issues
+- `col_errs` needed `.clone()` for `concat` since it's behind a shared reference.

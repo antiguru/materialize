@@ -24,3 +24,4 @@
 | 20 | 11.2: Columnar as_specific_collection — identity path returns columnar directly | Done | 2026-03-25 |
 | 21 | 11.3: Columnar as_collection_core — verified, identity avoids round-trip | Done | 2026-03-25 |
 | 22 | 11.4: Columnar Reduce input — verified, flat_map uses &RowRef directly | Done | 2026-03-25 |
+| 23 | 11.5: Columnar FlatMap — direct &RowRef processing via unary_fallible on Column | Done | 2026-03-25 |
