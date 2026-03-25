@@ -377,11 +377,11 @@ Wire this to return columnar directly.
 
 ### Prompt 11.4: Columnar Reduce input (direct)
 
-[ ] `render_reduce` calls `flat_map` on the entered bundle for key/value extraction. With 11.1
+[*] `render_reduce` calls `flat_map` on the entered bundle for key/value extraction. With 11.1
 done, this already processes columnar data directly — the `flat_map` logic closure receives
 `DatumVecBorrow` populated from `&RowRef`.
 
-[ ] Verify that Reduce works end-to-end with columnar input without any Vec conversion.
+[*] Verify that Reduce works end-to-end with columnar input without any Vec conversion.
 
 **Files**: `src/compute/src/render/reduce.rs`
 

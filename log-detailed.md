@@ -444,3 +444,20 @@ The current `DatumContainer` is already reasonably efficient (contiguous bytes, 
 
 ### Issues
 - None. Verification-only prompt.
+
+## Prompt 11.4: Columnar Reduce input (direct) — verification
+
+### What was done
+- Verified that `render_reduce` calls `entered.flat_map(input_key.map(|k| (k, None)), max_demand, ...)`.
+- When `input_key` is `None`, `flat_map` uses the columnar path from 11.1 — iterating `&RowRef` directly without Vec conversion.
+- When `input_key` is `Some`, `flat_map` uses the arrangement path (no collection conversion needed).
+- The logic closure receives `DatumVecBorrow` populated from `&RowRef` for key/value expression evaluation. No owned Row allocation.
+
+### Key decisions
+- No code changes needed. Reduce automatically benefits from 11.1's columnar `flat_map`.
+
+### Files changed
+- None (verification only).
+
+### Issues
+- None.
