@@ -406,15 +406,15 @@ operator variant is needed.
 
 ### Prompt 11.6: Columnar ArrangeBy input (direct)
 
-[ ] `arrange_collection` takes a `VecCollection<S, Row, Diff>` and iterates `(row, time, diff)`
+[*] `arrange_collection` takes a `VecCollection<S, Row, Diff>` and iterates `(row, time, diff)`
 to evaluate key/value expressions. The inner loop uses `datums.borrow_with(row)`.
 
-[ ] Add a columnar variant `arrange_columnar_collection` that iterates `Column<(Row, T, Diff)>`
+[*] Add a columnar variant `arrange_columnar_collection` that iterates `Column<(Row, T, Diff)>`
 directly. Each `&RowRef` from the columnar container can be passed to `borrow_with` for
 expression evaluation. The key/value `Row`s are built by `SharedRow::pack()` (owned output),
 and the arrangement batcher accepts `((Row, Row), T, Diff)` — these owned outputs are unaffected.
 
-[ ] Wire `ensure_collections` to prefer the columnar path when `columnar_collection` is present.
+[*] Wire `ensure_collections` to prefer the columnar path when `columnar_collection` is present.
 
 **Files**: `src/compute/src/render/context.rs`
 

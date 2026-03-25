@@ -483,3 +483,23 @@ The current `DatumContainer` is already reasonably efficient (contiguous bytes, 
 
 ### Issues
 - `col_errs` needed `.clone()` for `concat` since it's behind a shared reference.
+
+## Prompt 11.6: Columnar ArrangeBy input (direct)
+
+### What was done
+- Added `arrange_columnar_collection` method that takes `ColumnarCollection<S, Row, Diff>` and iterates `&RowRef` directly from columnar containers for key/value expression evaluation.
+- The method mirrors `arrange_collection` but: iterates via `data.borrow().into_index_iter()` yielding `(&RowRef, T::Ref, Diff::Ref)`, passes `&RowRef` to `datums.borrow_with(row_ref)`, and produces a columnar passthrough via `ColumnBuilder<(Row, S::Timestamp, Diff)>`.
+- Modified `ensure_collections` to detect when identity MFP + no input_key + columnar available, and use `arrange_columnar_collection` directly instead of converting columnar→Vec via `as_collection_core`.
+- The columnar path tracks a `cached_col: Option<(ColumnarCollection, VecCollection<Err>)>` through the arrangement loop, keeping the passthrough columnar throughout.
+- The existing Vec fallback path is retained for non-identity MFPs and arrangement-key cases.
+
+### Key decisions
+- Only use the columnar direct path when MFP is identity and `input_key` is None. When MFP is non-identity, `as_collection_core` → `flat_map` already uses the columnar flat_map path from 11.1.
+- The passthrough stream is columnar (`ColumnBuilder<(Row, T, Diff)>`), forwarding each item individually. This is slightly less efficient than the Vec path's `give_container` (which forwards entire containers), but avoids a columnar→Vec→columnar round-trip for subsequent arrangements.
+- Key/value expression evaluation produces owned `Row`s via `key_buf.packer()` / `val_buf.packer()` — this is inherent to the arrangement format and unaffected by the input representation.
+
+### Files changed
+- `src/compute/src/render/context.rs` — Added `arrange_columnar_collection` method; modified `ensure_collections` to prefer columnar path.
+
+### Issues
+- None.

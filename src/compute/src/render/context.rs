@@ -929,13 +929,6 @@ where
         if collections == Default::default() {
             return self;
         }
-        // Cache collection to avoid reforming it each time.
-        //
-        // TODO(mcsherry): In theory this could be faster run out of another arrangement,
-        // as the `map_fallible` that follows could be run against an arrangement itself.
-        //
-        // Note(btv): If we ever do that, we would then only need to make the raw collection here
-        // if `collections.raw` is true.
 
         for (key, _, _) in collections.arranged.iter() {
             soft_assert_or_log!(
@@ -951,8 +944,55 @@ where
                 .iter()
                 .any(|(key, _, _)| !self.arranged.contains_key(key));
 
-        // Materialize a Vec collection for arrangement creation.
-        // This is a local cache; we convert back to columnar at the end if needed.
+        // Determine if we can feed columnar input directly (identity MFP, no key).
+        let mfp_is_identity = {
+            let mut mfp = input_mfp.clone();
+            mfp.optimize();
+            mfp.into_plan().map_or(false, |p| p.is_identity())
+        };
+        let use_columnar_direct =
+            form_raw_collection && mfp_is_identity && input_key.is_none() && self.columnar_collection.is_some();
+
+        if use_columnar_direct {
+            let (col_oks, col_errs) = self
+                .columnar_collection
+                .as_ref()
+                .expect("checked above")
+                .clone();
+
+            // Track the columnar collection and errors through the arrangement loop.
+            let mut cached_col = Some((col_oks, col_errs));
+
+            for (key, _, thinning) in collections.arranged {
+                if !self.arranged.contains_key(&key) {
+                    let name = format!("ArrangeBy[{:?}]", key);
+                    let (col_oks, errs) = cached_col.take().expect("Collection constructed above");
+                    let (oks, errs_keyed, passthrough) = Self::arrange_columnar_collection(
+                        &name,
+                        col_oks,
+                        key.clone(),
+                        thinning.clone(),
+                    );
+                    let errs_concat: KeyCollection<_, _, _> =
+                        errs.clone().concat(errs_keyed).into();
+                    cached_col = Some((passthrough, errs));
+                    let errs = errs_concat
+                        .mz_arrange::<ErrBatcher<_, _>, ErrBuilder<_, _>, ErrSpine<_, _>>(
+                            &format!("{}-errors", name),
+                        );
+                    self.arranged
+                        .insert(key, ArrangementFlavor::Local(oks, errs));
+                }
+            }
+            if collections.raw {
+                if let Some((oks, errs)) = cached_col {
+                    self.columnar_collection = Some((oks, errs));
+                }
+            }
+            return self;
+        }
+
+        // Fallback: materialize a Vec collection for arrangement creation.
         let mut cached_vec: Option<(
             VecCollection<S, Row, Diff>,
             VecCollection<S, DataflowError, Diff>,
@@ -967,7 +1007,6 @@ where
         }
         for (key, _, thinning) in collections.arranged {
             if !self.arranged.contains_key(&key) {
-                // TODO: Consider allowing more expressive names.
                 let name = format!("ArrangeBy[{:?}]", key);
 
                 let (oks, errs) = cached_vec.take().expect("Collection constructed above");
@@ -983,7 +1022,6 @@ where
                     .insert(key, ArrangementFlavor::Local(oks, errs));
             }
         }
-        // If the raw collection was demanded, store the passthrough as columnar.
         if collections.raw {
             if let Some((oks, errs)) = cached_vec {
                 self.columnar_collection =
@@ -1070,6 +1108,87 @@ where
                     columnar_exchange::<Row, Row, S::Timestamp, Diff>,
                 ),
                 name
+            );
+        (
+            oks,
+            err_stream.as_collection(),
+            passthrough_stream.as_collection(),
+        )
+    }
+
+    /// Like `arrange_collection`, but takes columnar input and produces a columnar passthrough.
+    ///
+    /// Iterates `&RowRef` directly from the columnar container without allocating owned Rows
+    /// for key/value expression evaluation.
+    fn arrange_columnar_collection(
+        name: &String,
+        oks: ColumnarCollection<S, Row, Diff>,
+        key: Vec<MirScalarExpr>,
+        thinning: Vec<usize>,
+    ) -> (
+        Arranged<S, RowRowAgent<S::Timestamp, Diff>>,
+        VecCollection<S, DataflowError, Diff>,
+        ColumnarCollection<S, Row, Diff>,
+    ) {
+        let mut builder =
+            OperatorBuilder::new("FormArrangementKeyColumnar".to_string(), oks.inner.scope());
+        let (ok_output, ok_stream) = builder.new_output();
+        let mut ok_output =
+            OutputBuilder::<_, ColumnBuilder<((Row, Row), S::Timestamp, Diff)>>::from(ok_output);
+        let (err_output, err_stream) = builder.new_output();
+        let mut err_output = OutputBuilder::from(err_output);
+        let (passthrough_output, passthrough_stream) = builder.new_output();
+        let mut passthrough_output =
+            OutputBuilder::<_, ColumnBuilder<(Row, S::Timestamp, Diff)>>::from(passthrough_output);
+        let mut input = builder.new_input(oks.inner, Pipeline);
+        builder.set_notify(false);
+        builder.build(move |_capabilities| {
+            let mut key_buf = Row::default();
+            let mut val_buf = Row::default();
+            let mut datums = DatumVec::new();
+            let mut temp_storage = RowArena::new();
+            move |_frontiers| {
+                use columnar::{Columnar, Index};
+                let mut ok_output = ok_output.activate();
+                let mut err_output = err_output.activate();
+                let mut passthrough_output = passthrough_output.activate();
+                input.for_each(|time, data| {
+                    let mut ok_session = ok_output.session_with_builder(&time);
+                    let mut err_session = err_output.session(&time);
+                    let mut pass_session = passthrough_output.session_with_builder(&time);
+                    for (row_ref, t_ref, r_ref) in data.borrow().into_index_iter() {
+                        let t: S::Timestamp = Columnar::into_owned(t_ref);
+                        let r: Diff = Columnar::into_owned(r_ref);
+                        temp_storage.clear();
+                        let datums = datums.borrow_with(row_ref);
+                        let key_iter = key.iter().map(|k| k.eval(&datums, &temp_storage));
+                        match key_buf.packer().try_extend(key_iter) {
+                            Ok(()) => {
+                                let val_datum_iter = thinning.iter().map(|c| datums[*c]);
+                                val_buf.packer().extend(val_datum_iter);
+                                ok_session.give(((&*key_buf, &*val_buf), &t, &r));
+                            }
+                            Err(e) => {
+                                err_session.give((e.into(), t.clone(), r));
+                            }
+                        }
+                        pass_session.give((row_ref, &t, &r));
+                    }
+                });
+            }
+        });
+
+        let oks = ok_stream
+            .mz_arrange_core::<
+                _,
+                Col2ValBatcher<_, _, _, _>,
+                RowRowBuilder<_, _>,
+                RowRowSpine<_, _>,
+            >(
+                ExchangeCore::<ColumnBuilder<_>, _>::new_core(
+                    columnar_exchange::<Row, Row, S::Timestamp, Diff>,
+                ),
+                name,
             );
         (
             oks,
