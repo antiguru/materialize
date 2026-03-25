@@ -427,3 +427,20 @@ The current `DatumContainer` is already reasonably efficient (contiguous bytes, 
 
 ### Issues
 - None.
+
+## Prompt 11.3: Columnar `as_collection_core` (MFP path) — verification
+
+### What was done
+- Verified that `as_columnar_collection_core` no longer needs the Vec round-trip for identity MFPs (handled by 11.2's `as_specific_columnar_collection`).
+- Verified that for non-identity MFPs, `flat_map` (11.1) iterates columnar data directly via `&RowRef` without allocating owned Rows. The output remains Vec-based due to `map_fallible`'s Ok/Err split, with a final `vec_to_columnar` conversion.
+- Updated the doc comment on `as_columnar_collection_core` to accurately describe the current behavior.
+
+### Key decisions
+- No further code changes needed beyond updating documentation. The Vec→columnar conversion on the non-identity MFP output path is inherent to `map_fallible` producing Vec and cannot be avoided without rewriting the Ok/Err split to produce columnar output directly.
+- The important optimization (avoiding owned Row allocation) is already achieved by 11.1's columnar `flat_map`.
+
+### Files changed
+- `src/compute/src/render/context.rs` — Updated doc comment on `as_columnar_collection_core`.
+
+### Issues
+- None. Verification-only prompt.

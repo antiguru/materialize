@@ -886,9 +886,11 @@ where
     /// Columnar variant of `as_collection_core`.
     ///
     /// Applies `MapFilterProject` to the bundle and returns a columnar collection.
-    /// For now, this converts to Vec internally and applies the existing row-at-a-time
-    /// MFP evaluation, then converts the result back to columnar. Vectorized evaluation
-    /// will be added in a future step.
+    ///
+    /// For identity MFPs, returns the columnar collection directly (no conversion).
+    /// For non-identity MFPs, the `flat_map` path iterates columnar data directly via
+    /// `&RowRef` (no owned Row allocation), but the output is Vec-based (due to
+    /// `map_fallible` Ok/Err split) and converted back to columnar at the end.
     pub fn as_columnar_collection_core(
         &self,
         mut mfp: MapFilterProject,

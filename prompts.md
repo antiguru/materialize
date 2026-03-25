@@ -362,14 +362,14 @@ identity) should prefer the columnar variant.
 
 ### Prompt 11.3: Columnar `as_collection_core` (MFP path)
 
-[ ] `as_collection_core` calls `flat_map` (converted in 11.1) and then applies
+[*] `as_collection_core` calls `flat_map` (converted in 11.1) and then applies
 `map_fallible` to split Ok/Err. With 11.1 done, this method already processes columnar
 data without the Vec escape hatch when `key_val` is `None`.
 
-[ ] For the identity MFP case, it currently calls `as_specific_collection` (converted in 11.2).
+[*] For the identity MFP case, it currently calls `as_specific_collection` (converted in 11.2).
 Wire this to return columnar directly.
 
-[ ] Verify that `as_columnar_collection_core` no longer needs the Vec round-trip.
+[*] Verify that `as_columnar_collection_core` no longer needs the Vec round-trip.
 
 **Files**: `src/compute/src/render/context.rs`
 
