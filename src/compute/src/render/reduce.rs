@@ -129,7 +129,7 @@ where
                         key_plan.evaluate_into(&mut datums_local, &temp_storage, &mut row_builder);
                     let key = match key {
                         Err(e) => {
-                            return Some((Err(DataflowError::from(e)), time.clone(), diff.clone()));
+                            return Some((Err(DataflowError::from(e)), time.clone(), *diff));
                         }
                         Ok(Some(key)) => key.clone(),
                         Ok(None) => panic!("Row expected as no predicate was used"),
@@ -142,13 +142,13 @@ where
                         val_plan.evaluate_into(&mut datums_local, &temp_storage, &mut row_builder);
                     let val = match val {
                         Err(e) => {
-                            return Some((Err(DataflowError::from(e)), time.clone(), diff.clone()));
+                            return Some((Err(DataflowError::from(e)), time.clone(), *diff));
                         }
                         Ok(Some(val)) => val.clone(),
                         Ok(None) => panic!("Row expected as no predicate was used"),
                     };
 
-                    Some((Ok((key, val)), time.clone(), diff.clone()))
+                    Some((Ok((key, val)), time.clone(), *diff))
                 },
             );
 

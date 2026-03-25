@@ -129,8 +129,7 @@ pub type KeyValBatcher<K, V, T, D> =
 /// This is the columnar equivalent of `VecCollection<S, D, R>`. Data is stored in
 /// `Column<(D, T, R)>` containers which provide better cache locality and enable
 /// future vectorized evaluation.
-pub type ColumnarCollection<S, D, R> =
-    Collection<S, Column<(D, <S as ScopeParent>::Timestamp, R)>>;
+pub type ColumnarCollection<S, D, R> = Collection<S, Column<(D, <S as ScopeParent>::Timestamp, R)>>;
 
 /// Timestamp trait for rendering, constraint to support [`MzData`] and [timely::progress::Timestamp].
 pub trait MzTimestamp:

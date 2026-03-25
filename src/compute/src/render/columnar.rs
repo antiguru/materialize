@@ -14,9 +14,10 @@ use differential_dataflow::{AsCollection, VecCollection};
 use mz_repr::{Diff, Row};
 use mz_timely_util::columnar::builder::ColumnBuilder;
 use timely::container::CapacityContainerBuilder;
+use timely::dataflow::Scope;
 use timely::dataflow::channels::pact::Pipeline;
 use timely::dataflow::operators::Operator;
-use timely::dataflow::Scope;
+use timely::progress::Timestamp;
 
 use crate::typedefs::{ColumnarCollection, MzTimestamp};
 
@@ -68,15 +69,17 @@ where
             Pipeline,
             "ColumnarToVec",
             |_cap, _info| {
+                let mut row_buf = Row::default();
+                let mut t_buf = S::Timestamp::minimum();
+                let mut r_buf = Diff::default();
                 move |input, output| {
                     input.for_each(|time, data| {
                         let mut session = output.session(&time);
                         for (d, t, r) in data.borrow().into_index_iter() {
-                            session.give((
-                                Columnar::into_owned(d),
-                                Columnar::into_owned(t),
-                                Columnar::into_owned(r),
-                            ));
+                            row_buf.copy_from(d);
+                            t_buf.copy_from(t);
+                            r_buf.copy_from(r);
+                            session.give((row_buf.clone(), t_buf.clone(), r_buf.clone()));
                         }
                     });
                 }
@@ -102,12 +105,13 @@ where
             Pipeline,
             "NegateColumnar",
             |_cap, _info| {
+                let mut r_buf = Diff::default();
                 move |input, output| {
                     input.for_each(|time, data| {
                         let mut session = output.session_with_builder(&time);
                         for (d, t, r) in data.borrow().into_index_iter() {
-                            let owned_r: Diff = Columnar::into_owned(r);
-                            let neg_r = -owned_r;
+                            r_buf.copy_from(r);
+                            let neg_r = -r_buf;
                             session.give((d, t, &neg_r));
                         }
                     });
@@ -126,17 +130,16 @@ mod tests {
 
     use differential_dataflow::input::Input;
     use mz_repr::{Datum, Diff, Row};
-    use timely::dataflow::operators::probe::Probe;
     use timely::dataflow::operators::Inspect;
+    use timely::dataflow::operators::probe::Probe;
 
     /// Round-trip data through vec_to_columnar and then columnar_to_vec,
     /// verifying that all rows survive the conversion unchanged.
     #[mz_ore::test]
     fn round_trip_vec_columnar_vec() {
         timely::execute_directly(|worker| {
-            let results: Rc<RefCell<Vec<(Row, u64, Diff)>>> =
-                Rc::new(RefCell::new(Vec::new()));
-            let results_capture = results.clone();
+            let results: Rc<RefCell<Vec<(Row, u64, Diff)>>> = Rc::new(RefCell::new(Vec::new()));
+            let results_capture = Rc::clone(&results);
 
             let (mut input, probe) = worker.dataflow::<u64, _, _>(|scope| {
                 let (input, collection) = scope.new_collection::<Row, Diff>();
@@ -175,7 +178,7 @@ mod tests {
             let mut actual = results.borrow().clone();
             actual.sort_by(|a, b| a.0.cmp(&b.0));
 
-            let mut expected = vec![
+            let mut expected = [
                 (row1, 0u64, one),
                 (row2, 0u64, one),
                 (row3, 0u64, one),
@@ -184,11 +187,7 @@ mod tests {
             expected.sort_by(|a, b| a.0.cmp(&b.0));
 
             assert_eq!(actual.len(), expected.len(), "Row count mismatch");
-            for (a, e) in actual.iter().zip(expected.iter()) {
-                assert_eq!(a.0, e.0, "Row data mismatch");
-                assert_eq!(a.1, e.1, "Timestamp mismatch");
-                assert_eq!(a.2, e.2, "Diff mismatch");
-            }
+            assert_eq!(actual, expected);
         });
     }
 
@@ -196,9 +195,8 @@ mod tests {
     #[mz_ore::test]
     fn round_trip_multiple_timestamps() {
         timely::execute_directly(|worker| {
-            let results: Rc<RefCell<Vec<(Row, u64, Diff)>>> =
-                Rc::new(RefCell::new(Vec::new()));
-            let results_capture = results.clone();
+            let results: Rc<RefCell<Vec<(Row, u64, Diff)>>> = Rc::new(RefCell::new(Vec::new()));
+            let results_capture = Rc::clone(&results);
 
             let (mut input, probe) = worker.dataflow::<u64, _, _>(|scope| {
                 let (input, collection) = scope.new_collection::<Row, Diff>();
@@ -241,9 +239,8 @@ mod tests {
     #[mz_ore::test]
     fn negate_columnar_flips_diffs() {
         timely::execute_directly(|worker| {
-            let results: Rc<RefCell<Vec<(Row, u64, Diff)>>> =
-                Rc::new(RefCell::new(Vec::new()));
-            let results_capture = results.clone();
+            let results: Rc<RefCell<Vec<(Row, u64, Diff)>>> = Rc::new(RefCell::new(Vec::new()));
+            let results_capture = Rc::clone(&results);
 
             let (mut input, probe) = worker.dataflow::<u64, _, _>(|scope| {
                 let (input, collection) = scope.new_collection::<Row, Diff>();
@@ -296,9 +293,8 @@ mod tests {
     #[mz_ore::test]
     fn union_columnar_concatenates() {
         timely::execute_directly(|worker| {
-            let results: Rc<RefCell<Vec<(Row, u64, Diff)>>> =
-                Rc::new(RefCell::new(Vec::new()));
-            let results_capture = results.clone();
+            let results: Rc<RefCell<Vec<(Row, u64, Diff)>>> = Rc::new(RefCell::new(Vec::new()));
+            let results_capture = Rc::clone(&results);
 
             let (mut input1, mut input2, probe) = worker.dataflow::<u64, _, _>(|scope| {
                 let (input1, collection1) = scope.new_collection::<Row, Diff>();
@@ -307,10 +303,7 @@ mod tests {
                 // Convert both to columnar, concatenate, convert back
                 let col1 = vec_to_columnar(collection1);
                 let col2 = vec_to_columnar(collection2);
-                let union = differential_dataflow::collection::concatenate(
-                    scope,
-                    vec![col1, col2],
-                );
+                let union = differential_dataflow::collection::concatenate(scope, vec![col1, col2]);
                 let result = columnar_to_vec(union);
 
                 let (probe, _stream) = result
@@ -360,9 +353,8 @@ mod tests {
         use timely::dataflow::operators::ToStream;
 
         timely::execute_directly(|worker| {
-            let results: Rc<RefCell<Vec<(Row, u64, Diff)>>> =
-                Rc::new(RefCell::new(Vec::new()));
-            let results_capture = results.clone();
+            let results: Rc<RefCell<Vec<(Row, u64, Diff)>>> = Rc::new(RefCell::new(Vec::new()));
+            let results_capture = Rc::clone(&results);
 
             let probe = worker.dataflow::<u64, _, _>(|scope| {
                 // Simulate the Constant operator: create rows from an iterator,
@@ -377,10 +369,7 @@ mod tests {
                 let constant_data: Vec<(Row, u64, Diff)> =
                     vec![(row1, 0, one), (row2, 0, two), (row3, 0, one)];
 
-                let vec_collection = constant_data
-                    .into_iter()
-                    .to_stream(scope)
-                    .as_collection();
+                let vec_collection = constant_data.into_iter().to_stream(scope).as_collection();
 
                 let columnar = vec_to_columnar(vec_collection);
                 let result = columnar_to_vec(columnar);
@@ -408,9 +397,21 @@ mod tests {
             let one = Diff::from(1);
             let two = Diff::from(2);
 
-            assert!(actual.iter().any(|(r, t, d)| *r == row1 && *t == 0 && *d == one));
-            assert!(actual.iter().any(|(r, t, d)| *r == row2 && *t == 0 && *d == two));
-            assert!(actual.iter().any(|(r, t, d)| *r == row3 && *t == 0 && *d == one));
+            assert!(
+                actual
+                    .iter()
+                    .any(|(r, t, d)| *r == row1 && *t == 0 && *d == one)
+            );
+            assert!(
+                actual
+                    .iter()
+                    .any(|(r, t, d)| *r == row2 && *t == 0 && *d == two)
+            );
+            assert!(
+                actual
+                    .iter()
+                    .any(|(r, t, d)| *r == row3 && *t == 0 && *d == one)
+            );
         });
     }
 }

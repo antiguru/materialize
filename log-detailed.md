@@ -388,3 +388,118 @@ The current `DatumContainer` is already reasonably efficient (contiguous bytes, 
 
 ### Issues
 - None. Research/design prompt only.
+
+## Prompt 11.1: Columnar `flat_map` — direct &RowRef processing
+
+### What was done
+- Added a columnar path to the `flat_map` method in `CollectionBundle` (context.rs).
+- When `key_val` is `None` and `columnar_collection` is present, the new path iterates the columnar container directly using a bespoke `unary` operator named `ColumnarFlatMap`.
+- Each columnar item yields `(&RowRef, T::Ref, Diff::Ref)` via `into_index_iter()`. The `&RowRef` is passed directly to `datums.borrow_with_limit(d, max_demand)` — no owned `Row` is ever allocated.
+- Only the timestamp and diff are converted to owned via `Columnar::into_owned` (these are cheap scalar copies).
+- The existing Vec fallback is retained for bundles that lack a columnar collection (e.g., arrangement-only bundles).
+
+### Key decisions
+- Used `StreamCore::unary` with `CapacityContainerBuilder<Vec<I::Item>>` as the output builder, matching the return type `StreamVec<S, I::Item>`. This avoids changing the method signature.
+- The `logic` closure signature (`FnMut(&mut DatumVecBorrow, T, Diff) -> I`) is unchanged. Callers (MFP evaluate, Reduce key/value extraction) work without modification because `DatumVecBorrow` is populated from `&RowRef` the same way as from `&Row`.
+- The arrangement path (`key_val` is `Some`) is unchanged — it always uses the arrangement's own flat_map.
+
+### Files changed
+- `src/compute/src/render/context.rs` — Added columnar branch in `flat_map` method.
+
+### Issues
+- `unary` takes ownership of the stream, requiring `.clone()` on `col_oks.inner`. Stream clones are cheap (reference-counted handles).
+
+## Prompt 11.2: Columnar `as_specific_collection` (identity path)
+
+### What was done
+- Added `as_specific_columnar_collection` method on `CollectionBundle` that returns `(ColumnarCollection, VecCollection<Err>)`.
+- When `key` is `None`, returns the columnar collection directly by cloning the handles — no conversion at all.
+- When `key` is `Some`, delegates to `as_specific_collection` (arrangement path) and converts the result to columnar.
+- Optimized `as_columnar_collection_core` to detect identity MFPs and use `as_specific_columnar_collection` directly, eliminating the columnar→Vec→columnar round-trip.
+
+### Key decisions
+- Added a new method rather than changing `as_specific_collection`'s return type, since many callers need `VecCollection` and changing the signature would be a larger refactor.
+- The identity MFP detection in `as_columnar_collection_core` mirrors the same logic in `as_collection_core` (check `mfp_plan.is_identity() && !has_key_val`).
+- The arrangement path (`key` is `Some`) still converts Vec→columnar since arrangement output is inherently Vec-based.
+
+### Files changed
+- `src/compute/src/render/context.rs` — Added `as_specific_columnar_collection` method; optimized `as_columnar_collection_core` identity path.
+
+### Issues
+- None.
+
+## Prompt 11.3: Columnar `as_collection_core` (MFP path) — verification
+
+### What was done
+- Verified that `as_columnar_collection_core` no longer needs the Vec round-trip for identity MFPs (handled by 11.2's `as_specific_columnar_collection`).
+- Verified that for non-identity MFPs, `flat_map` (11.1) iterates columnar data directly via `&RowRef` without allocating owned Rows. The output remains Vec-based due to `map_fallible`'s Ok/Err split, with a final `vec_to_columnar` conversion.
+- Updated the doc comment on `as_columnar_collection_core` to accurately describe the current behavior.
+
+### Key decisions
+- No further code changes needed beyond updating documentation. The Vec→columnar conversion on the non-identity MFP output path is inherent to `map_fallible` producing Vec and cannot be avoided without rewriting the Ok/Err split to produce columnar output directly.
+- The important optimization (avoiding owned Row allocation) is already achieved by 11.1's columnar `flat_map`.
+
+### Files changed
+- `src/compute/src/render/context.rs` — Updated doc comment on `as_columnar_collection_core`.
+
+### Issues
+- None. Verification-only prompt.
+
+## Prompt 11.4: Columnar Reduce input (direct) — verification
+
+### What was done
+
+- Verified that `render_reduce` calls `entered.flat_map(input_key.map(|k| (k, None)), max_demand, ...)`.
+- When `input_key` is `None`, `flat_map` uses the columnar path from 11.1 — iterating `&RowRef` directly without Vec conversion.
+- When `input_key` is `Some`, `flat_map` uses the arrangement path (no collection conversion needed).
+- The logic closure receives `DatumVecBorrow` populated from `&RowRef` for key/value expression evaluation. No owned Row allocation.
+
+### Key decisions
+- No code changes needed. Reduce automatically benefits from 11.1's columnar `flat_map`.
+
+### Files changed
+- None (verification only).
+
+### Issues
+- None.
+
+## Prompt 11.5: Columnar FlatMap input (direct)
+
+### What was done
+- Added a columnar path to `render_flat_map` that uses `unary_fallible` directly on the columnar inner stream (`Column<(Row, T, Diff)>`).
+- `unary_fallible` accepts `Column<...>` because `Column` implements `Container + DrainContainer + Clone + Default`.
+- The inner loop iterates columnar items via `data.borrow().into_index_iter()`, yielding `(&RowRef, T::Ref, Diff::Ref)`. The `&RowRef` is passed directly to `datums.borrow_with(row_ref)` for expression evaluation and to `drain_through_mfp(row_ref, ...)` for MFP application.
+- Changed `drain_through_mfp` parameter from `&Row` to `&RowRef` (transparent since `Row: Deref<Target=RowRef>`).
+- The queue buffers `Column<...>` containers instead of `Vec<...>` containers.
+- Vec fallback retained for arrangement key paths and non-columnar bundles.
+
+### Key decisions
+- Created a full parallel columnar path rather than trying to make the existing code generic, because the iteration patterns differ (`for (row, t, d) in data` for Vec vs `for (ref, t_ref, d_ref) in data.borrow().into_index_iter()` for columnar).
+- The columnar path does not use `'input` labeled break since columnar iteration doesn't yield owned items that can be pattern-matched the same way. Uses `continue` instead.
+- Output is still Vec-based (`ConsolidatingContainerBuilder<Vec<...>>`) for the ok/err streams, with a final `vec_to_columnar` conversion. The inner table function evaluation inherently produces owned Rows.
+
+### Files changed
+- `src/compute/src/render/flat_map.rs` — Added columnar `unary_fallible` path; changed `drain_through_mfp` to accept `&RowRef`.
+
+### Issues
+- `col_errs` needed `.clone()` for `concat` since it's behind a shared reference.
+
+## Prompt 11.6: Columnar ArrangeBy input (direct)
+
+### What was done
+- Added `arrange_columnar_collection` method that takes `ColumnarCollection<S, Row, Diff>` and iterates `&RowRef` directly from columnar containers for key/value expression evaluation.
+- The method mirrors `arrange_collection` but: iterates via `data.borrow().into_index_iter()` yielding `(&RowRef, T::Ref, Diff::Ref)`, passes `&RowRef` to `datums.borrow_with(row_ref)`, and produces a columnar passthrough via `ColumnBuilder<(Row, S::Timestamp, Diff)>`.
+- Modified `ensure_collections` to detect when identity MFP + no input_key + columnar available, and use `arrange_columnar_collection` directly instead of converting columnar→Vec via `as_collection_core`.
+- The columnar path tracks a `cached_col: Option<(ColumnarCollection, VecCollection<Err>)>` through the arrangement loop, keeping the passthrough columnar throughout.
+- The existing Vec fallback path is retained for non-identity MFPs and arrangement-key cases.
+
+### Key decisions
+- Only use the columnar direct path when MFP is identity and `input_key` is None. When MFP is non-identity, `as_collection_core` → `flat_map` already uses the columnar flat_map path from 11.1.
+- The passthrough stream is columnar (`ColumnBuilder<(Row, T, Diff)>`), forwarding each item individually. This is slightly less efficient than the Vec path's `give_container` (which forwards entire containers), but avoids a columnar→Vec→columnar round-trip for subsequent arrangements.
+- Key/value expression evaluation produces owned `Row`s via `key_buf.packer()` / `val_buf.packer()` — this is inherent to the arrangement format and unaffected by the input representation.
+
+### Files changed
+- `src/compute/src/render/context.rs` — Added `arrange_columnar_collection` method; modified `ensure_collections` to prefer columnar path.
+
+### Issues
+- None.

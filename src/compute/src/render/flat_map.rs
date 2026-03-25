@@ -14,13 +14,14 @@ use mz_compute_types::dyncfgs::COMPUTE_FLAT_MAP_FUEL;
 use mz_expr::MfpPlan;
 use mz_expr::{MapFilterProject, MirScalarExpr, TableFunc};
 use mz_repr::{DatumVec, RowArena, SharedRow};
-use mz_repr::{Diff, Row, Timestamp};
+use mz_repr::{Diff, Row, RowRef, Timestamp as MzTimestamp};
 use mz_timely_util::operator::StreamExt;
 use timely::dataflow::Scope;
 use timely::dataflow::channels::pact::Pipeline;
 use timely::dataflow::operators::Capability;
 use timely::dataflow::operators::generic::Session;
 use timely::progress::Antichain;
+use timely::progress::Timestamp;
 
 use crate::render::DataflowError;
 use crate::render::context::{CollectionBundle, Context};
@@ -41,17 +42,114 @@ where
     ) -> CollectionBundle<G> {
         let until = self.until.clone();
         let mfp_plan = mfp.into_plan().expect("MapFilterProject planning failed");
-        let has_columnar = input.columnar_collection.is_some();
-        let (ok_collection, err_collection) =
-            input.as_specific_collection(input_key.as_deref(), &self.config_set);
-        let stream = ok_collection.inner;
-        let scope = input.scope();
 
         // Budget to limit the number of rows processed in a single invocation.
         //
         // The current implementation can only yield between input batches, but not from within
         // a batch. A `generate_series` can still cause unavailability if it generates many rows.
         let budget = COMPUTE_FLAT_MAP_FUEL.get(&self.config_set);
+
+        // When we have columnar input and no arrangement key, iterate the columnar
+        // container directly — each item yields (&RowRef, T::Ref, Diff::Ref) without
+        // allocating owned Rows.
+        if input_key.is_none() {
+            if let Some((col_oks, col_errs)) = &input.columnar_collection {
+                let scope = input.scope();
+                let (oks, errs) = col_oks.inner.clone().unary_fallible(
+                    Pipeline,
+                    "FlatMapStageColumnar",
+                    move |_, info| {
+                        let activator = scope.activator_for(info.address);
+                        let mut queue = VecDeque::new();
+                        let mut t_buf = G::Timestamp::minimum();
+                        let mut r_buf = Diff::default();
+                        Box::new(move |input, ok_output, err_output| {
+                            use columnar::{Columnar, Index};
+                            let mut datums = DatumVec::new();
+                            let mut datums_mfp = DatumVec::new();
+                            let mut table_func_output = Vec::new();
+                            let mut budget = budget;
+
+                            input.for_each(|cap, data| {
+                                queue.push_back((
+                                    cap.retain(0),
+                                    cap.retain(1),
+                                    std::mem::take(data),
+                                ))
+                            });
+
+                            while let Some((ok_cap, err_cap, data)) = queue.pop_front() {
+                                let mut ok_session = ok_output.session_with_builder(&ok_cap);
+                                let mut err_session = err_output.session_with_builder(&err_cap);
+
+                                for (row_ref, t_ref, r_ref) in data.borrow().into_index_iter() {
+                                    t_buf.copy_from(t_ref);
+                                    r_buf.copy_from(r_ref);
+                                    let temp_storage = RowArena::new();
+
+                                    let datums_local = datums.borrow_with(row_ref);
+                                    let args = exprs
+                                        .iter()
+                                        .map(|e| e.eval(&datums_local, &temp_storage))
+                                        .collect::<Result<Vec<_>, _>>();
+                                    let args = match args {
+                                        Ok(args) => args,
+                                        Err(e) => {
+                                            err_session
+                                                .give((e.into(), t_buf.clone(), r_buf));
+                                            continue;
+                                        }
+                                    };
+                                    let mut extensions = match func.eval(&args, &temp_storage) {
+                                        Ok(exts) => exts.fuse(),
+                                        Err(e) => {
+                                            err_session
+                                                .give((e.into(), t_buf.clone(), r_buf));
+                                            continue;
+                                        }
+                                    };
+
+                                    while let Some((extension, output_diff)) = extensions.next() {
+                                        table_func_output.push((extension, output_diff));
+                                        table_func_output.extend((&mut extensions).take(1023));
+                                        drain_through_mfp(
+                                            row_ref,
+                                            &t_buf,
+                                            &r_buf,
+                                            &mut datums_mfp,
+                                            &table_func_output,
+                                            &mfp_plan,
+                                            &until,
+                                            &mut ok_session,
+                                            &mut err_session,
+                                            &mut budget,
+                                        );
+                                        table_func_output.clear();
+                                    }
+                                }
+                                if budget == 0 {
+                                    activator.activate();
+                                    break;
+                                }
+                            }
+                        })
+                    },
+                );
+
+                use differential_dataflow::AsCollection;
+                let ok_collection = oks.as_collection();
+                let new_err_collection = errs.as_collection();
+                let err_collection = col_errs.clone().concat(new_err_collection);
+                let col_oks = crate::render::columnar::vec_to_columnar(ok_collection);
+                return CollectionBundle::from_columnar_collections(col_oks, err_collection);
+            }
+        }
+
+        // Vec fallback: arrangement key or no columnar collection.
+        let (ok_collection, err_collection) =
+            input.as_specific_collection(input_key.as_deref(), &self.config_set);
+        let stream = ok_collection.inner;
+        let scope = input.scope();
 
         let (oks, errs) = stream.unary_fallible(Pipeline, "FlatMapStage", move |_, info| {
             let activator = scope.activator_for(info.address);
@@ -101,7 +199,6 @@ where
                         while let Some((extension, output_diff)) = extensions.next() {
                             table_func_output.push((extension, output_diff));
                             table_func_output.extend((&mut extensions).take(1023));
-                            // We could consolidate `table_func_output`, but it seems unlikely to be productive.
                             drain_through_mfp(
                                 &input_row,
                                 &time,
@@ -129,12 +226,7 @@ where
         let ok_collection = oks.as_collection();
         let new_err_collection = errs.as_collection();
         let err_collection = err_collection.concat(new_err_collection);
-        if has_columnar {
-            let col_oks = crate::render::columnar::vec_to_columnar(ok_collection);
-            CollectionBundle::from_columnar_collections(col_oks, err_collection)
-        } else {
-            CollectionBundle::from_collections(ok_collection, err_collection)
-        }
+        CollectionBundle::from_collections(ok_collection, err_collection)
     }
 }
 
@@ -142,13 +234,13 @@ where
 ///
 /// The method decodes `input_row`, and should be amortized across non-trivial `extensions`.
 fn drain_through_mfp<T>(
-    input_row: &Row,
+    input_row: &RowRef,
     input_time: &T,
     input_diff: &Diff,
     datum_vec: &mut DatumVec,
     extensions: &[(Row, Diff)],
     mfp_plan: &MfpPlan,
-    until: &Antichain<Timestamp>,
+    until: &Antichain<MzTimestamp>,
     ok_output: &mut Session<
         '_,
         '_,

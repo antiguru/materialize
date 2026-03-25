@@ -20,3 +20,9 @@
 | 16 | 9.1: Audit Vec paths; remove redundant Vec from sources; add logging | Done | 2026-03-25 |
 | 17 | 9.2: Remove collection field and ensure_vec_collection from CollectionBundle | Done | 2026-03-25 |
 | 18 | 10.1: Investigate columnar arrangement spines — research complete | Done | 2026-03-25 |
+| 19 | 11.1: Columnar flat_map — iterate &RowRef directly without Vec conversion | Done | 2026-03-25 |
+| 20 | 11.2: Columnar as_specific_collection — identity path returns columnar directly | Done | 2026-03-25 |
+| 21 | 11.3: Columnar as_collection_core — verified, identity avoids round-trip | Done | 2026-03-25 |
+| 22 | 11.4: Columnar Reduce input — verified, flat_map uses &RowRef directly | Done | 2026-03-25 |
+| 23 | 11.5: Columnar FlatMap — direct &RowRef processing via unary_fallible on Column | Done | 2026-03-25 |
+| 24 | 11.6: Columnar ArrangeBy — arrange_columnar_collection iterates &RowRef directly | Done | 2026-03-25 |

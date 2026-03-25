@@ -320,6 +320,106 @@ direct vectorized evaluation from arrangements without materializing collections
 
 ---
 
+## Phase 11: Direct columnar processing (eliminate Vec escape hatches)
+
+The columnar `Ref<'_, Row>` is `&RowRef`, and `DatumVec::borrow_with` / `borrow_with_limit`
+already accept `&RowRef`. Operators that unpack rows via `DatumVec` can iterate columnar
+containers directly without materializing owned `Row` values.
+
+### Prompt 11.1: Columnar `flat_map` in `CollectionBundle`
+
+[*] The `flat_map` method in `CollectionBundle` (context.rs) is the core building block used by
+MFP, Reduce, and other operators. When `key_val` is `None`, it currently calls
+`as_vec_collection()` to get a `VecCollection`, then iterates `(Row, T, Diff)` tuples.
+
+[*] Add a columnar path: when `columnar_collection` is present and `key_val` is `None`, iterate
+the columnar container directly using `into_index_iter()`. Each item yields `(&RowRef, &T, &Diff)`.
+Pass `&RowRef` directly to `datums.borrow_with_limit(row_ref, max_demand)` — this already works
+since `borrow_with_limit` accepts `&RowRef`.
+
+[*] The `logic` closure signature uses `DatumVecBorrow<'_>` which is populated from `&RowRef`,
+so no changes to callers (MFP evaluate, Reduce key/value extraction) are needed.
+
+**Files**: `src/compute/src/render/context.rs`
+
+---
+
+### Prompt 11.2: Columnar `as_specific_collection` (identity path)
+
+[*] `as_specific_collection(None)` currently calls `as_vec_collection()` which converts the
+entire columnar stream to Vec. For the identity case (no arrangement key), this is pure overhead.
+
+[*] When the bundle has a columnar collection, return it directly as a `ColumnarCollection`
+(or convert to Vec only at the caller boundary). This requires either changing the return type
+to be generic over container, or providing a separate `as_specific_columnar_collection` method.
+
+[*] The callers that use this for identity passthrough (e.g., `as_collection_core` when MFP is
+identity) should prefer the columnar variant.
+
+**Files**: `src/compute/src/render/context.rs`
+
+---
+
+### Prompt 11.3: Columnar `as_collection_core` (MFP path)
+
+[*] `as_collection_core` calls `flat_map` (converted in 11.1) and then applies
+`map_fallible` to split Ok/Err. With 11.1 done, this method already processes columnar
+data without the Vec escape hatch when `key_val` is `None`.
+
+[*] For the identity MFP case, it currently calls `as_specific_collection` (converted in 11.2).
+Wire this to return columnar directly.
+
+[*] Verify that `as_columnar_collection_core` no longer needs the Vec round-trip.
+
+**Files**: `src/compute/src/render/context.rs`
+
+---
+
+### Prompt 11.4: Columnar Reduce input (direct)
+
+[*] `render_reduce` calls `flat_map` on the entered bundle for key/value extraction. With 11.1
+done, this already processes columnar data directly — the `flat_map` logic closure receives
+`DatumVecBorrow` populated from `&RowRef`.
+
+[*] Verify that Reduce works end-to-end with columnar input without any Vec conversion.
+
+**Files**: `src/compute/src/render/reduce.rs`
+
+---
+
+### Prompt 11.5: Columnar FlatMap input (direct)
+
+[*] `render_flat_map` calls `as_specific_collection` to get a Vec collection. With 11.2 done,
+investigate whether the FlatMap inner loop can operate on columnar refs directly.
+
+[*] The FlatMap inner loop unpacks `input_row` via `datums.borrow_with(&input_row)` and evaluates
+expressions. Since `borrow_with` accepts `&RowRef`, the loop body can work on columnar refs.
+However, the `drain_through_mfp` helper also takes `&Row` — update it to accept `&RowRef`.
+
+[*] The FlatMap operator uses `unary_fallible` which expects a specific input container type.
+Investigate whether it can accept `Column<(Row, T, Diff)>` directly or whether a columnar-aware
+operator variant is needed.
+
+**Files**: `src/compute/src/render/flat_map.rs`
+
+---
+
+### Prompt 11.6: Columnar ArrangeBy input (direct)
+
+[*] `arrange_collection` takes a `VecCollection<S, Row, Diff>` and iterates `(row, time, diff)`
+to evaluate key/value expressions. The inner loop uses `datums.borrow_with(row)`.
+
+[*] Add a columnar variant `arrange_columnar_collection` that iterates `Column<(Row, T, Diff)>`
+directly. Each `&RowRef` from the columnar container can be passed to `borrow_with` for
+expression evaluation. The key/value `Row`s are built by `SharedRow::pack()` (owned output),
+and the arrangement batcher accepts `((Row, Row), T, Diff)` — these owned outputs are unaffected.
+
+[*] Wire `ensure_collections` to prefer the columnar path when `columnar_collection` is present.
+
+**Files**: `src/compute/src/render/context.rs`
+
+---
+
 ## Notes
 
 ### Conversion cost awareness

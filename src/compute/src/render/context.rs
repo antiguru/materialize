@@ -308,7 +308,7 @@ where
     where
         I: IntoIterator<Item = (D, S::Timestamp, Diff)>,
         D: Data,
-        L: for<'a, 'b> FnMut(&'a mut DatumVecBorrow<'b>, S::Timestamp, Diff) -> I + 'static,
+        L: for<'a, 'b> FnMut(&'a mut DatumVecBorrow<'b>, &S::Timestamp, &Diff) -> I + 'static,
     {
         // Set a number of tuples after which the operator should yield.
         // This allows us to remain responsive even when enumerating a substantial
@@ -316,7 +316,7 @@ where
         let refuel = 1000000;
 
         let mut datums = DatumVec::new();
-        let logic = move |k: DatumSeq, v: DatumSeq, t, d| {
+        let logic = move |k: DatumSeq, v: DatumSeq, t: &S::Timestamp, d: &Diff| {
             let mut datums_borrow = datums.borrow();
             datums_borrow.extend(k.to_datum_iter().take(max_demand));
             let max_demand = max_demand.saturating_sub(datums_borrow.len());
@@ -451,7 +451,10 @@ where
     /// Returns the collection as a Vec-based collection, converting from columnar if needed.
     pub fn as_vec_collection(
         &self,
-    ) -> (VecCollection<S, Row, Diff>, VecCollection<S, DataflowError, Diff>) {
+    ) -> (
+        VecCollection<S, Row, Diff>,
+        VecCollection<S, DataflowError, Diff>,
+    ) {
         if let Some((col_oks, col_errs)) = &self.columnar_collection {
             let vec_oks = crate::render::columnar::columnar_to_vec(col_oks.clone());
             (vec_oks, col_errs.clone())
@@ -579,13 +582,41 @@ where
                 if ENABLE_COMPUTE_RENDER_FUELED_AS_SPECIFIC_COLLECTION.get(config_set) {
                     // Decode all columns, pass max_demand as usize::MAX.
                     let (ok, err) = arranged.flat_map(None, usize::MAX, |borrow, t, r| {
-                        Some((SharedRow::pack(borrow.iter()), t, r))
+                        Some((SharedRow::pack(borrow.iter()), t.clone(), *r))
                     });
                     (ok.as_collection(), err)
                 } else {
                     #[allow(deprecated)]
                     arranged.as_collection()
                 }
+            }
+        }
+    }
+
+    /// Columnar variant of `as_specific_collection`.
+    ///
+    /// When `key` is `None`, returns the columnar collection directly (no conversion).
+    /// When `key` is `Some`, converts the arrangement to a columnar collection.
+    pub fn as_specific_columnar_collection(
+        &self,
+        key: Option<&[MirScalarExpr]>,
+        config_set: &ConfigSet,
+    ) -> (
+        ColumnarCollection<S, Row, Diff>,
+        VecCollection<S, DataflowError, Diff>,
+    ) {
+        match key {
+            None => {
+                let (col_oks, errs) = self
+                    .columnar_collection
+                    .as_ref()
+                    .expect("Columnar collection doesn't exist.");
+                (col_oks.clone(), errs.clone())
+            }
+            Some(_) => {
+                // Arrangement path: convert to Vec then columnar.
+                let (oks, errs) = self.as_specific_collection(key, config_set);
+                (crate::render::columnar::vec_to_columnar(oks), errs)
             }
         }
     }
@@ -614,7 +645,7 @@ where
     where
         I: IntoIterator<Item = (D, S::Timestamp, Diff)>,
         D: Data,
-        L: for<'a> FnMut(&'a mut DatumVecBorrow<'_>, S::Timestamp, Diff) -> I + 'static,
+        L: for<'a> FnMut(&'a mut DatumVecBorrow<'_>, &S::Timestamp, &Diff) -> I + 'static,
     {
         // If `key_val` is set, we should have to use the corresponding arrangement.
         // If there isn't one, that implies an error in the contract between
@@ -623,12 +654,47 @@ where
             self.arrangement(&key)
                 .expect("Should have ensured during planning that this arrangement exists.")
                 .flat_map(val.as_ref(), max_demand, logic)
+        } else if let Some((col_oks, errs)) = &self.columnar_collection {
+            // Iterate columnar container directly, avoiding the columnar→Vec conversion.
+            // Each item yields (&RowRef, T::Ref, Diff::Ref) which we can pass to
+            // borrow_with_limit without materializing an owned Row.
+            use columnar::{Columnar, Index};
+            use timely::dataflow::operators::Operator;
+            let oks = col_oks
+                .inner
+                .clone()
+                .unary::<CapacityContainerBuilder<Vec<I::Item>>, _, _, _>(
+                    Pipeline,
+                    "ColumnarFlatMap",
+                    |_cap, _info| {
+                        let mut datums = DatumVec::new();
+                        let mut t_buf = S::Timestamp::minimum();
+                        let mut r_buf = Diff::default();
+                        move |input, output| {
+                            input.for_each(|time, data| {
+                                let mut session = output.session(&time);
+                                for (d, t, r) in data.borrow().into_index_iter() {
+                                    t_buf.copy_from(t);
+                                    r_buf.copy_from(r);
+                                    for item in logic(
+                                        &mut datums.borrow_with_limit(d, max_demand),
+                                        &t_buf,
+                                        &r_buf,
+                                    ) {
+                                        session.give(item);
+                                    }
+                                }
+                            });
+                        }
+                    },
+                );
+            (oks, errs.clone())
         } else {
             use timely::dataflow::operators::vec::Map;
             let (oks, errs) = self.as_vec_collection();
             let mut datums = DatumVec::new();
             let oks = oks.inner.flat_map(move |(v, t, d)| {
-                logic(&mut datums.borrow_with_limit(&v, max_demand), t, d)
+                logic(&mut datums.borrow_with_limit(&v, max_demand), &t, &d)
             });
             (oks, errs)
         }
@@ -658,7 +724,7 @@ where
             + 'static,
         I: IntoIterator<Item = (D, Tr::Time, Tr::Diff)>,
         D: Data,
-        L: FnMut(Tr::Key<'_>, Tr::Val<'_>, S::Timestamp, mz_repr::Diff) -> I + 'static,
+        L: FnMut(Tr::Key<'_>, Tr::Val<'_>, &S::Timestamp, &mz_repr::Diff) -> I + 'static,
     {
         use differential_dataflow::consolidation::ConsolidatingContainerBuilder as CB;
         let scope = trace.stream.scope();
@@ -788,7 +854,7 @@ where
                     &mut datums_local,
                     &temp_storage,
                     event_time,
-                    diff.clone(),
+                    *diff,
                     move |time| !until.less_equal(time),
                     &mut row_builder,
                 )
@@ -822,12 +888,14 @@ where
     /// Columnar variant of `as_collection_core`.
     ///
     /// Applies `MapFilterProject` to the bundle and returns a columnar collection.
-    /// For now, this converts to Vec internally and applies the existing row-at-a-time
-    /// MFP evaluation, then converts the result back to columnar. Vectorized evaluation
-    /// will be added in a future step.
+    ///
+    /// For identity MFPs, returns the columnar collection directly (no conversion).
+    /// For non-identity MFPs, the `flat_map` path iterates columnar data directly via
+    /// `&RowRef` (no owned Row allocation), but the output is Vec-based (due to
+    /// `map_fallible` Ok/Err split) and converted back to columnar at the end.
     pub fn as_columnar_collection_core(
         &self,
-        mfp: MapFilterProject,
+        mut mfp: MapFilterProject,
         key_val: Option<(Vec<MirScalarExpr>, Option<Row>)>,
         until: Antichain<mz_repr::Timestamp>,
         config_set: &ConfigSet,
@@ -835,8 +903,19 @@ where
         ColumnarCollection<S, Row, Diff>,
         VecCollection<S, DataflowError, Diff>,
     ) {
-        // Delegate to Vec-based as_collection_core (which converts from columnar
-        // internally via as_vec_collection) and convert the result back to columnar.
+        mfp.optimize();
+        let mfp_plan = mfp.clone().into_plan().unwrap();
+
+        // For identity MFPs without key_val seek, return the columnar collection
+        // directly — no Vec round-trip needed.
+        let has_key_val = matches!(&key_val, Some((_key, Some(_val))));
+        if mfp_plan.is_identity() && !has_key_val {
+            let key = key_val.map(|(k, _v)| k);
+            return self.as_specific_columnar_collection(key.as_deref(), config_set);
+        }
+
+        // Non-identity MFP: delegate to as_collection_core (uses columnar flat_map
+        // from 11.1 internally) and convert the Vec result back to columnar.
         let (oks, errs) = self.as_collection_core(mfp, key_val, until, config_set);
         (crate::render::columnar::vec_to_columnar(oks), errs)
     }
@@ -852,13 +931,6 @@ where
         if collections == Default::default() {
             return self;
         }
-        // Cache collection to avoid reforming it each time.
-        //
-        // TODO(mcsherry): In theory this could be faster run out of another arrangement,
-        // as the `map_fallible` that follows could be run against an arrangement itself.
-        //
-        // Note(btv): If we ever do that, we would then only need to make the raw collection here
-        // if `collections.raw` is true.
 
         for (key, _, _) in collections.arranged.iter() {
             soft_assert_or_log!(
@@ -874,9 +946,59 @@ where
                 .iter()
                 .any(|(key, _, _)| !self.arranged.contains_key(key));
 
-        // Materialize a Vec collection for arrangement creation.
-        // This is a local cache; we convert back to columnar at the end if needed.
-        let mut cached_vec: Option<(VecCollection<S, Row, Diff>, VecCollection<S, DataflowError, Diff>)> = None;
+        // Determine if we can feed columnar input directly (identity MFP, no key).
+        let mfp_is_identity = {
+            let mut mfp = input_mfp.clone();
+            mfp.optimize();
+            mfp.into_plan().map_or(false, |p| p.is_identity())
+        };
+        let use_columnar_direct =
+            form_raw_collection && mfp_is_identity && input_key.is_none() && self.columnar_collection.is_some();
+
+        if use_columnar_direct {
+            let (col_oks, col_errs) = self
+                .columnar_collection
+                .as_ref()
+                .expect("checked above")
+                .clone();
+
+            // Track the columnar collection and errors through the arrangement loop.
+            let mut cached_col = Some((col_oks, col_errs));
+
+            for (key, _, thinning) in collections.arranged {
+                if !self.arranged.contains_key(&key) {
+                    let name = format!("ArrangeBy[{:?}]", key);
+                    let (col_oks, errs) = cached_col.take().expect("Collection constructed above");
+                    let (oks, errs_keyed, passthrough) = Self::arrange_columnar_collection(
+                        &name,
+                        col_oks,
+                        key.clone(),
+                        thinning.clone(),
+                    );
+                    let errs_concat: KeyCollection<_, _, _> =
+                        errs.clone().concat(errs_keyed).into();
+                    cached_col = Some((passthrough, errs));
+                    let errs = errs_concat
+                        .mz_arrange::<ErrBatcher<_, _>, ErrBuilder<_, _>, ErrSpine<_, _>>(
+                            &format!("{}-errors", name),
+                        );
+                    self.arranged
+                        .insert(key, ArrangementFlavor::Local(oks, errs));
+                }
+            }
+            if collections.raw {
+                if let Some((oks, errs)) = cached_col {
+                    self.columnar_collection = Some((oks, errs));
+                }
+            }
+            return self;
+        }
+
+        // Fallback: materialize a Vec collection for arrangement creation.
+        let mut cached_vec: Option<(
+            VecCollection<S, Row, Diff>,
+            VecCollection<S, DataflowError, Diff>,
+        )> = None;
         if form_raw_collection {
             cached_vec = Some(self.as_collection_core(
                 input_mfp,
@@ -887,12 +1009,9 @@ where
         }
         for (key, _, thinning) in collections.arranged {
             if !self.arranged.contains_key(&key) {
-                // TODO: Consider allowing more expressive names.
                 let name = format!("ArrangeBy[{:?}]", key);
 
-                let (oks, errs) = cached_vec
-                    .take()
-                    .expect("Collection constructed above");
+                let (oks, errs) = cached_vec.take().expect("Collection constructed above");
                 let (oks, errs_keyed, passthrough) =
                     Self::arrange_collection(&name, oks, key.clone(), thinning.clone());
                 let errs_concat: KeyCollection<_, _, _> = errs.clone().concat(errs_keyed).into();
@@ -905,7 +1024,6 @@ where
                     .insert(key, ArrangementFlavor::Local(oks, errs));
             }
         }
-        // If the raw collection was demanded, store the passthrough as columnar.
         if collections.raw {
             if let Some((oks, errs)) = cached_vec {
                 self.columnar_collection =
@@ -999,6 +1117,89 @@ where
             passthrough_stream.as_collection(),
         )
     }
+
+    /// Like `arrange_collection`, but takes columnar input and produces a columnar passthrough.
+    ///
+    /// Iterates `&RowRef` directly from the columnar container without allocating owned Rows
+    /// for key/value expression evaluation.
+    fn arrange_columnar_collection(
+        name: &String,
+        oks: ColumnarCollection<S, Row, Diff>,
+        key: Vec<MirScalarExpr>,
+        thinning: Vec<usize>,
+    ) -> (
+        Arranged<S, RowRowAgent<S::Timestamp, Diff>>,
+        VecCollection<S, DataflowError, Diff>,
+        ColumnarCollection<S, Row, Diff>,
+    ) {
+        let mut builder =
+            OperatorBuilder::new("FormArrangementKeyColumnar".to_string(), oks.inner.scope());
+        let (ok_output, ok_stream) = builder.new_output();
+        let mut ok_output =
+            OutputBuilder::<_, ColumnBuilder<((Row, Row), S::Timestamp, Diff)>>::from(ok_output);
+        let (err_output, err_stream) = builder.new_output();
+        let mut err_output = OutputBuilder::from(err_output);
+        let (passthrough_output, passthrough_stream) = builder.new_output();
+        let mut passthrough_output =
+            OutputBuilder::<_, ColumnBuilder<(Row, S::Timestamp, Diff)>>::from(passthrough_output);
+        let mut input = builder.new_input(oks.inner, Pipeline);
+        builder.set_notify(false);
+        builder.build(move |_capabilities| {
+            let mut key_buf = Row::default();
+            let mut val_buf = Row::default();
+            let mut datums = DatumVec::new();
+            let mut temp_storage = RowArena::new();
+            let mut t_buf = S::Timestamp::minimum();
+            let mut r_buf = Diff::default();
+            move |_frontiers| {
+                use columnar::{Columnar, Index};
+                let mut ok_output = ok_output.activate();
+                let mut err_output = err_output.activate();
+                let mut passthrough_output = passthrough_output.activate();
+                input.for_each(|time, data| {
+                    let mut ok_session = ok_output.session_with_builder(&time);
+                    let mut err_session = err_output.session(&time);
+                    let mut pass_session = passthrough_output.session_with_builder(&time);
+                    for (row_ref, t_ref, r_ref) in data.borrow().into_index_iter() {
+                        t_buf.copy_from(t_ref);
+                        r_buf.copy_from(r_ref);
+                        temp_storage.clear();
+                        let datums = datums.borrow_with(row_ref);
+                        let key_iter = key.iter().map(|k| k.eval(&datums, &temp_storage));
+                        match key_buf.packer().try_extend(key_iter) {
+                            Ok(()) => {
+                                let val_datum_iter = thinning.iter().map(|c| datums[*c]);
+                                val_buf.packer().extend(val_datum_iter);
+                                ok_session.give(((&*key_buf, &*val_buf), &t_buf, &r_buf));
+                            }
+                            Err(e) => {
+                                err_session.give((e.into(), t_buf.clone(), r_buf));
+                            }
+                        }
+                        pass_session.give((row_ref, &t_buf, &r_buf));
+                    }
+                });
+            }
+        });
+
+        let oks = ok_stream
+            .mz_arrange_core::<
+                _,
+                Col2ValBatcher<_, _, _, _>,
+                RowRowBuilder<_, _>,
+                RowRowSpine<_, _>,
+            >(
+                ExchangeCore::<ColumnBuilder<_>, _>::new_core(
+                    columnar_exchange::<Row, Row, S::Timestamp, Diff>,
+                ),
+                name,
+            );
+        (
+            oks,
+            err_stream.as_collection(),
+            passthrough_stream.as_collection(),
+        )
+    }
 }
 
 struct PendingWork<C>
@@ -1032,7 +1233,7 @@ where
     ) where
         I: IntoIterator<Item = (D, C::Time, C::Diff)>,
         D: Data,
-        L: FnMut(C::Key<'_>, C::Val<'_>, C::Time, C::Diff) -> I + 'static,
+        L: FnMut(C::Key<'_>, C::Val<'_>, &C::Time, &C::Diff) -> I + 'static,
     {
         use differential_dataflow::consolidation::consolidate;
 
@@ -1053,7 +1254,7 @@ where
                     });
                     consolidate(&mut buffer);
                     for (time, diff) in buffer.drain(..) {
-                        for datum in logic(key, val, time, diff) {
+                        for datum in logic(key, val, &time, &diff) {
                             session.give(datum);
                             work += 1;
                         }
@@ -1073,7 +1274,7 @@ where
                     });
                     consolidate(&mut buffer);
                     for (time, diff) in buffer.drain(..) {
-                        for datum in logic(key, val, time, diff) {
+                        for datum in logic(key, val, &time, &diff) {
                             session.give(datum);
                             work += 1;
                         }
