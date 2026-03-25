@@ -17,6 +17,7 @@ use timely::container::CapacityContainerBuilder;
 use timely::dataflow::Scope;
 use timely::dataflow::channels::pact::Pipeline;
 use timely::dataflow::operators::Operator;
+use timely::progress::Timestamp;
 
 use crate::typedefs::{ColumnarCollection, MzTimestamp};
 
@@ -68,15 +69,17 @@ where
             Pipeline,
             "ColumnarToVec",
             |_cap, _info| {
+                let mut row_buf = Row::default();
+                let mut t_buf = S::Timestamp::minimum();
+                let mut r_buf = Diff::default();
                 move |input, output| {
                     input.for_each(|time, data| {
                         let mut session = output.session(&time);
                         for (d, t, r) in data.borrow().into_index_iter() {
-                            session.give((
-                                Columnar::into_owned(d),
-                                Columnar::into_owned(t),
-                                Columnar::into_owned(r),
-                            ));
+                            row_buf.copy_from(d);
+                            t_buf.copy_from(t);
+                            r_buf.copy_from(r);
+                            session.give((row_buf.clone(), t_buf.clone(), r_buf.clone()));
                         }
                     });
                 }
@@ -102,12 +105,13 @@ where
             Pipeline,
             "NegateColumnar",
             |_cap, _info| {
+                let mut r_buf = Diff::default();
                 move |input, output| {
                     input.for_each(|time, data| {
                         let mut session = output.session_with_builder(&time);
                         for (d, t, r) in data.borrow().into_index_iter() {
-                            let owned_r: Diff = Columnar::into_owned(r);
-                            let neg_r = -owned_r;
+                            r_buf.copy_from(r);
+                            let neg_r = -r_buf;
                             session.give((d, t, &neg_r));
                         }
                     });

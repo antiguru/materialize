@@ -668,16 +668,18 @@ where
                     "ColumnarFlatMap",
                     |_cap, _info| {
                         let mut datums = DatumVec::new();
+                        let mut t_buf = S::Timestamp::minimum();
+                        let mut r_buf = Diff::default();
                         move |input, output| {
                             input.for_each(|time, data| {
                                 let mut session = output.session(&time);
                                 for (d, t, r) in data.borrow().into_index_iter() {
-                                    let t_owned: S::Timestamp = Columnar::into_owned(t);
-                                    let r_owned: Diff = Columnar::into_owned(r);
+                                    t_buf.copy_from(t);
+                                    r_buf.copy_from(r);
                                     for item in logic(
                                         &mut datums.borrow_with_limit(d, max_demand),
-                                        t_owned,
-                                        r_owned,
+                                        t_buf.clone(),
+                                        r_buf,
                                     ) {
                                         session.give(item);
                                     }
@@ -1147,6 +1149,8 @@ where
             let mut val_buf = Row::default();
             let mut datums = DatumVec::new();
             let mut temp_storage = RowArena::new();
+            let mut t_buf = S::Timestamp::minimum();
+            let mut r_buf = Diff::default();
             move |_frontiers| {
                 use columnar::{Columnar, Index};
                 let mut ok_output = ok_output.activate();
@@ -1157,8 +1161,8 @@ where
                     let mut err_session = err_output.session(&time);
                     let mut pass_session = passthrough_output.session_with_builder(&time);
                     for (row_ref, t_ref, r_ref) in data.borrow().into_index_iter() {
-                        let t: S::Timestamp = Columnar::into_owned(t_ref);
-                        let r: Diff = Columnar::into_owned(r_ref);
+                        t_buf.copy_from(t_ref);
+                        r_buf.copy_from(r_ref);
                         temp_storage.clear();
                         let datums = datums.borrow_with(row_ref);
                         let key_iter = key.iter().map(|k| k.eval(&datums, &temp_storage));
@@ -1166,13 +1170,13 @@ where
                             Ok(()) => {
                                 let val_datum_iter = thinning.iter().map(|c| datums[*c]);
                                 val_buf.packer().extend(val_datum_iter);
-                                ok_session.give(((&*key_buf, &*val_buf), &t, &r));
+                                ok_session.give(((&*key_buf, &*val_buf), &t_buf, &r_buf));
                             }
                             Err(e) => {
-                                err_session.give((e.into(), t.clone(), r));
+                                err_session.give((e.into(), t_buf.clone(), r_buf));
                             }
                         }
-                        pass_session.give((row_ref, &t, &r));
+                        pass_session.give((row_ref, &t_buf, &r_buf));
                     }
                 });
             }

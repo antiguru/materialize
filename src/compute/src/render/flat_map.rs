@@ -14,13 +14,14 @@ use mz_compute_types::dyncfgs::COMPUTE_FLAT_MAP_FUEL;
 use mz_expr::MfpPlan;
 use mz_expr::{MapFilterProject, MirScalarExpr, TableFunc};
 use mz_repr::{DatumVec, RowArena, SharedRow};
-use mz_repr::{Diff, Row, RowRef, Timestamp};
+use mz_repr::{Diff, Row, RowRef, Timestamp as MzTimestamp};
 use mz_timely_util::operator::StreamExt;
 use timely::dataflow::Scope;
 use timely::dataflow::channels::pact::Pipeline;
 use timely::dataflow::operators::Capability;
 use timely::dataflow::operators::generic::Session;
 use timely::progress::Antichain;
+use timely::progress::Timestamp;
 
 use crate::render::DataflowError;
 use crate::render::context::{CollectionBundle, Context};
@@ -60,6 +61,8 @@ where
                     move |_, info| {
                         let activator = scope.activator_for(info.address);
                         let mut queue = VecDeque::new();
+                        let mut t_buf = G::Timestamp::minimum();
+                        let mut r_buf = Diff::default();
                         Box::new(move |input, ok_output, err_output| {
                             use columnar::{Columnar, Index};
                             let mut datums = DatumVec::new();
@@ -80,8 +83,8 @@ where
                                 let mut err_session = err_output.session_with_builder(&err_cap);
 
                                 for (row_ref, t_ref, r_ref) in data.borrow().into_index_iter() {
-                                    let time: G::Timestamp = Columnar::into_owned(t_ref);
-                                    let diff: Diff = Columnar::into_owned(r_ref);
+                                    t_buf.copy_from(t_ref);
+                                    r_buf.copy_from(r_ref);
                                     let temp_storage = RowArena::new();
 
                                     let datums_local = datums.borrow_with(row_ref);
@@ -92,14 +95,16 @@ where
                                     let args = match args {
                                         Ok(args) => args,
                                         Err(e) => {
-                                            err_session.give((e.into(), time, diff));
+                                            err_session
+                                                .give((e.into(), t_buf.clone(), r_buf));
                                             continue;
                                         }
                                     };
                                     let mut extensions = match func.eval(&args, &temp_storage) {
                                         Ok(exts) => exts.fuse(),
                                         Err(e) => {
-                                            err_session.give((e.into(), time, diff));
+                                            err_session
+                                                .give((e.into(), t_buf.clone(), r_buf));
                                             continue;
                                         }
                                     };
@@ -109,8 +114,8 @@ where
                                         table_func_output.extend((&mut extensions).take(1023));
                                         drain_through_mfp(
                                             row_ref,
-                                            &time,
-                                            &diff,
+                                            &t_buf,
+                                            &r_buf,
                                             &mut datums_mfp,
                                             &table_func_output,
                                             &mfp_plan,
@@ -235,7 +240,7 @@ fn drain_through_mfp<T>(
     datum_vec: &mut DatumVec,
     extensions: &[(Row, Diff)],
     mfp_plan: &MfpPlan,
-    until: &Antichain<Timestamp>,
+    until: &Antichain<MzTimestamp>,
     ok_output: &mut Session<
         '_,
         '_,
