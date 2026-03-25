@@ -388,3 +388,23 @@ The current `DatumContainer` is already reasonably efficient (contiguous bytes, 
 
 ### Issues
 - None. Research/design prompt only.
+
+## Prompt 11.1: Columnar `flat_map` — direct &RowRef processing
+
+### What was done
+- Added a columnar path to the `flat_map` method in `CollectionBundle` (context.rs).
+- When `key_val` is `None` and `columnar_collection` is present, the new path iterates the columnar container directly using a bespoke `unary` operator named `ColumnarFlatMap`.
+- Each columnar item yields `(&RowRef, T::Ref, Diff::Ref)` via `into_index_iter()`. The `&RowRef` is passed directly to `datums.borrow_with_limit(d, max_demand)` — no owned `Row` is ever allocated.
+- Only the timestamp and diff are converted to owned via `Columnar::into_owned` (these are cheap scalar copies).
+- The existing Vec fallback is retained for bundles that lack a columnar collection (e.g., arrangement-only bundles).
+
+### Key decisions
+- Used `StreamCore::unary` with `CapacityContainerBuilder<Vec<I::Item>>` as the output builder, matching the return type `StreamVec<S, I::Item>`. This avoids changing the method signature.
+- The `logic` closure signature (`FnMut(&mut DatumVecBorrow, T, Diff) -> I`) is unchanged. Callers (MFP evaluate, Reduce key/value extraction) work without modification because `DatumVecBorrow` is populated from `&RowRef` the same way as from `&Row`.
+- The arrangement path (`key_val` is `Some`) is unchanged — it always uses the arrangement's own flat_map.
+
+### Files changed
+- `src/compute/src/render/context.rs` — Added columnar branch in `flat_map` method.
+
+### Issues
+- `unary` takes ownership of the stream, requiring `.clone()` on `col_oks.inner`. Stream clones are cheap (reference-counted handles).

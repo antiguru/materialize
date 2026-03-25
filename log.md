@@ -20,3 +20,4 @@
 | 16 | 9.1: Audit Vec paths; remove redundant Vec from sources; add logging | Done | 2026-03-25 |
 | 17 | 9.2: Remove collection field and ensure_vec_collection from CollectionBundle | Done | 2026-03-25 |
 | 18 | 10.1: Investigate columnar arrangement spines — research complete | Done | 2026-03-25 |
+| 19 | 11.1: Columnar flat_map — iterate &RowRef directly without Vec conversion | Done | 2026-03-25 |

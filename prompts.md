@@ -328,16 +328,16 @@ containers directly without materializing owned `Row` values.
 
 ### Prompt 11.1: Columnar `flat_map` in `CollectionBundle`
 
-[ ] The `flat_map` method in `CollectionBundle` (context.rs) is the core building block used by
+[*] The `flat_map` method in `CollectionBundle` (context.rs) is the core building block used by
 MFP, Reduce, and other operators. When `key_val` is `None`, it currently calls
 `as_vec_collection()` to get a `VecCollection`, then iterates `(Row, T, Diff)` tuples.
 
-[ ] Add a columnar path: when `columnar_collection` is present and `key_val` is `None`, iterate
+[*] Add a columnar path: when `columnar_collection` is present and `key_val` is `None`, iterate
 the columnar container directly using `into_index_iter()`. Each item yields `(&RowRef, &T, &Diff)`.
 Pass `&RowRef` directly to `datums.borrow_with_limit(row_ref, max_demand)` — this already works
 since `borrow_with_limit` accepts `&RowRef`.
 
-[ ] The `logic` closure signature uses `DatumVecBorrow<'_>` which is populated from `&RowRef`,
+[*] The `logic` closure signature uses `DatumVecBorrow<'_>` which is populated from `&RowRef`,
 so no changes to callers (MFP evaluate, Reduce key/value extraction) are needed.
 
 **Files**: `src/compute/src/render/context.rs`

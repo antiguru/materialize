@@ -626,6 +626,39 @@ where
             self.arrangement(&key)
                 .expect("Should have ensured during planning that this arrangement exists.")
                 .flat_map(val.as_ref(), max_demand, logic)
+        } else if let Some((col_oks, errs)) = &self.columnar_collection {
+            // Iterate columnar container directly, avoiding the columnar→Vec conversion.
+            // Each item yields (&RowRef, T::Ref, Diff::Ref) which we can pass to
+            // borrow_with_limit without materializing an owned Row.
+            use columnar::{Columnar, Index};
+            use timely::dataflow::operators::Operator;
+            let oks = col_oks
+                .inner
+                .clone()
+                .unary::<CapacityContainerBuilder<Vec<I::Item>>, _, _, _>(
+                    Pipeline,
+                    "ColumnarFlatMap",
+                    |_cap, _info| {
+                        let mut datums = DatumVec::new();
+                        move |input, output| {
+                            input.for_each(|time, data| {
+                                let mut session = output.session(&time);
+                                for (d, t, r) in data.borrow().into_index_iter() {
+                                    let t_owned: S::Timestamp = Columnar::into_owned(t);
+                                    let r_owned: Diff = Columnar::into_owned(r);
+                                    for item in logic(
+                                        &mut datums.borrow_with_limit(d, max_demand),
+                                        t_owned,
+                                        r_owned,
+                                    ) {
+                                        session.give(item);
+                                    }
+                                }
+                            });
+                        }
+                    },
+                );
+            (oks, errs.clone())
         } else {
             use timely::dataflow::operators::vec::Map;
             let (oks, errs) = self.as_vec_collection();
