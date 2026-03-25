@@ -408,3 +408,22 @@ The current `DatumContainer` is already reasonably efficient (contiguous bytes, 
 
 ### Issues
 - `unary` takes ownership of the stream, requiring `.clone()` on `col_oks.inner`. Stream clones are cheap (reference-counted handles).
+
+## Prompt 11.2: Columnar `as_specific_collection` (identity path)
+
+### What was done
+- Added `as_specific_columnar_collection` method on `CollectionBundle` that returns `(ColumnarCollection, VecCollection<Err>)`.
+- When `key` is `None`, returns the columnar collection directly by cloning the handles — no conversion at all.
+- When `key` is `Some`, delegates to `as_specific_collection` (arrangement path) and converts the result to columnar.
+- Optimized `as_columnar_collection_core` to detect identity MFPs and use `as_specific_columnar_collection` directly, eliminating the columnar→Vec→columnar round-trip.
+
+### Key decisions
+- Added a new method rather than changing `as_specific_collection`'s return type, since many callers need `VecCollection` and changing the signature would be a larger refactor.
+- The identity MFP detection in `as_columnar_collection_core` mirrors the same logic in `as_collection_core` (check `mfp_plan.is_identity() && !has_key_val`).
+- The arrangement path (`key` is `Some`) still converts Vec→columnar since arrangement output is inherently Vec-based.
+
+### Files changed
+- `src/compute/src/render/context.rs` — Added `as_specific_columnar_collection` method; optimized `as_columnar_collection_core` identity path.
+
+### Issues
+- None.

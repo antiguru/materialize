@@ -346,14 +346,14 @@ so no changes to callers (MFP evaluate, Reduce key/value extraction) are needed.
 
 ### Prompt 11.2: Columnar `as_specific_collection` (identity path)
 
-[ ] `as_specific_collection(None)` currently calls `as_vec_collection()` which converts the
+[*] `as_specific_collection(None)` currently calls `as_vec_collection()` which converts the
 entire columnar stream to Vec. For the identity case (no arrangement key), this is pure overhead.
 
-[ ] When the bundle has a columnar collection, return it directly as a `ColumnarCollection`
+[*] When the bundle has a columnar collection, return it directly as a `ColumnarCollection`
 (or convert to Vec only at the caller boundary). This requires either changing the return type
 to be generic over container, or providing a separate `as_specific_columnar_collection` method.
 
-[ ] The callers that use this for identity passthrough (e.g., `as_collection_core` when MFP is
+[*] The callers that use this for identity passthrough (e.g., `as_collection_core` when MFP is
 identity) should prefer the columnar variant.
 
 **Files**: `src/compute/src/render/context.rs`

@@ -593,6 +593,34 @@ where
         }
     }
 
+    /// Columnar variant of `as_specific_collection`.
+    ///
+    /// When `key` is `None`, returns the columnar collection directly (no conversion).
+    /// When `key` is `Some`, converts the arrangement to a columnar collection.
+    pub fn as_specific_columnar_collection(
+        &self,
+        key: Option<&[MirScalarExpr]>,
+        config_set: &ConfigSet,
+    ) -> (
+        ColumnarCollection<S, Row, Diff>,
+        VecCollection<S, DataflowError, Diff>,
+    ) {
+        match key {
+            None => {
+                let (col_oks, errs) = self
+                    .columnar_collection
+                    .as_ref()
+                    .expect("Columnar collection doesn't exist.");
+                (col_oks.clone(), errs.clone())
+            }
+            Some(_) => {
+                // Arrangement path: convert to Vec then columnar.
+                let (oks, errs) = self.as_specific_collection(key, config_set);
+                (crate::render::columnar::vec_to_columnar(oks), errs)
+            }
+        }
+    }
+
     /// Constructs and applies logic to elements of a collection and returns the results.
     ///
     /// The function applies `logic` on elements. The logic conceptually receives
@@ -863,7 +891,7 @@ where
     /// will be added in a future step.
     pub fn as_columnar_collection_core(
         &self,
-        mfp: MapFilterProject,
+        mut mfp: MapFilterProject,
         key_val: Option<(Vec<MirScalarExpr>, Option<Row>)>,
         until: Antichain<mz_repr::Timestamp>,
         config_set: &ConfigSet,
@@ -871,8 +899,19 @@ where
         ColumnarCollection<S, Row, Diff>,
         VecCollection<S, DataflowError, Diff>,
     ) {
-        // Delegate to Vec-based as_collection_core (which converts from columnar
-        // internally via as_vec_collection) and convert the result back to columnar.
+        mfp.optimize();
+        let mfp_plan = mfp.clone().into_plan().unwrap();
+
+        // For identity MFPs without key_val seek, return the columnar collection
+        // directly — no Vec round-trip needed.
+        let has_key_val = matches!(&key_val, Some((_key, Some(_val))));
+        if mfp_plan.is_identity() && !has_key_val {
+            let key = key_val.map(|(k, _v)| k);
+            return self.as_specific_columnar_collection(key.as_deref(), config_set);
+        }
+
+        // Non-identity MFP: delegate to as_collection_core (uses columnar flat_map
+        // from 11.1 internally) and convert the Vec result back to columnar.
         let (oks, errs) = self.as_collection_core(mfp, key_val, until, config_set);
         (crate::render::columnar::vec_to_columnar(oks), errs)
     }
