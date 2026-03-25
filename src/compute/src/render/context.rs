@@ -308,7 +308,7 @@ where
     where
         I: IntoIterator<Item = (D, S::Timestamp, Diff)>,
         D: Data,
-        L: for<'a, 'b> FnMut(&'a mut DatumVecBorrow<'b>, S::Timestamp, Diff) -> I + 'static,
+        L: for<'a, 'b> FnMut(&'a mut DatumVecBorrow<'b>, &S::Timestamp, &Diff) -> I + 'static,
     {
         // Set a number of tuples after which the operator should yield.
         // This allows us to remain responsive even when enumerating a substantial
@@ -316,7 +316,7 @@ where
         let refuel = 1000000;
 
         let mut datums = DatumVec::new();
-        let logic = move |k: DatumSeq, v: DatumSeq, t, d| {
+        let logic = move |k: DatumSeq, v: DatumSeq, t: &S::Timestamp, d: &Diff| {
             let mut datums_borrow = datums.borrow();
             datums_borrow.extend(k.to_datum_iter().take(max_demand));
             let max_demand = max_demand.saturating_sub(datums_borrow.len());
@@ -582,7 +582,7 @@ where
                 if ENABLE_COMPUTE_RENDER_FUELED_AS_SPECIFIC_COLLECTION.get(config_set) {
                     // Decode all columns, pass max_demand as usize::MAX.
                     let (ok, err) = arranged.flat_map(None, usize::MAX, |borrow, t, r| {
-                        Some((SharedRow::pack(borrow.iter()), t, r))
+                        Some((SharedRow::pack(borrow.iter()), t.clone(), *r))
                     });
                     (ok.as_collection(), err)
                 } else {
@@ -645,7 +645,7 @@ where
     where
         I: IntoIterator<Item = (D, S::Timestamp, Diff)>,
         D: Data,
-        L: for<'a> FnMut(&'a mut DatumVecBorrow<'_>, S::Timestamp, Diff) -> I + 'static,
+        L: for<'a> FnMut(&'a mut DatumVecBorrow<'_>, &S::Timestamp, &Diff) -> I + 'static,
     {
         // If `key_val` is set, we should have to use the corresponding arrangement.
         // If there isn't one, that implies an error in the contract between
@@ -678,8 +678,8 @@ where
                                     r_buf.copy_from(r);
                                     for item in logic(
                                         &mut datums.borrow_with_limit(d, max_demand),
-                                        t_buf.clone(),
-                                        r_buf,
+                                        &t_buf,
+                                        &r_buf,
                                     ) {
                                         session.give(item);
                                     }
@@ -694,7 +694,7 @@ where
             let (oks, errs) = self.as_vec_collection();
             let mut datums = DatumVec::new();
             let oks = oks.inner.flat_map(move |(v, t, d)| {
-                logic(&mut datums.borrow_with_limit(&v, max_demand), t, d)
+                logic(&mut datums.borrow_with_limit(&v, max_demand), &t, &d)
             });
             (oks, errs)
         }
@@ -724,7 +724,7 @@ where
             + 'static,
         I: IntoIterator<Item = (D, Tr::Time, Tr::Diff)>,
         D: Data,
-        L: FnMut(Tr::Key<'_>, Tr::Val<'_>, S::Timestamp, mz_repr::Diff) -> I + 'static,
+        L: FnMut(Tr::Key<'_>, Tr::Val<'_>, &S::Timestamp, &mz_repr::Diff) -> I + 'static,
     {
         use differential_dataflow::consolidation::ConsolidatingContainerBuilder as CB;
         let scope = trace.stream.scope();
@@ -854,7 +854,7 @@ where
                     &mut datums_local,
                     &temp_storage,
                     event_time,
-                    diff.clone(),
+                    *diff,
                     move |time| !until.less_equal(time),
                     &mut row_builder,
                 )
@@ -1233,7 +1233,7 @@ where
     ) where
         I: IntoIterator<Item = (D, C::Time, C::Diff)>,
         D: Data,
-        L: FnMut(C::Key<'_>, C::Val<'_>, C::Time, C::Diff) -> I + 'static,
+        L: FnMut(C::Key<'_>, C::Val<'_>, &C::Time, &C::Diff) -> I + 'static,
     {
         use differential_dataflow::consolidation::consolidate;
 
@@ -1254,7 +1254,7 @@ where
                     });
                     consolidate(&mut buffer);
                     for (time, diff) in buffer.drain(..) {
-                        for datum in logic(key, val, time, diff) {
+                        for datum in logic(key, val, &time, &diff) {
                             session.give(datum);
                             work += 1;
                         }
@@ -1274,7 +1274,7 @@ where
                     });
                     consolidate(&mut buffer);
                     for (time, diff) in buffer.drain(..) {
-                        for datum in logic(key, val, time, diff) {
+                        for datum in logic(key, val, &time, &diff) {
                             session.give(datum);
                             work += 1;
                         }
