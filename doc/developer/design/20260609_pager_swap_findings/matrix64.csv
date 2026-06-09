@@ -1,0 +1,5 @@
+mode,num_ts,cap,budget_mib,wall_s,fill_ms,phys_io_gib,peak_scratch_mib,status
+pager-swap,64000000,180M,64,5594,5588950,576.5,1641,OK
+pager-file,64000000,180M,64,1521,,211.0,21681,FAIL_137
+lz4-swap,64000000,180M,64,6184,6180442,84.7,21695,OK
+lz4-file,64000000,180M,64,7970,7969669,121.5,31357,OK

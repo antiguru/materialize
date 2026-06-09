@@ -1,0 +1,7 @@
+mode,num_ts,cap,budget_mib,wall_s,fill_ms,phys_io_gib,peak_scratch_mib,status
+baseline-swap,4000000,180M,64,298,297633,20.5,1641,OK
+baseline-swap,8000000,180M,64,633,632558,42.6,1641,OK
+baseline-swap,32000000,180M,64,4271,4268393,270.8,1641,OK
+lz4-swap,4000000,180M,64,181,181013,2.9,1641,OK
+lz4-swap,8000000,180M,64,372,371013,5.9,1641,OK
+lz4-swap,32000000,180M,64,2221,2218680,35.2,1641,OK

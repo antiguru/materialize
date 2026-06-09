@@ -1,0 +1,48 @@
+==================== cfg=spill backend=swap ====================
+rc=0
+Running as unit: run-p43554-i83027.scope; invocation ID: 8179870e30894646a76fe7d21966271f
+
+ Performance counter stats for '/home/ubuntu/materialize/target/release/examples/correction_v2_pager --config spill --backend swap --scratch /home/ubuntu/mzpager --num-ts 800000 --budget-mib 64 --no-drain':
+
+            406953      page-faults                                                           
+            381947      minor-faults                                                          
+             25006      major-faults                                                          
+
+      16.962022492 seconds time elapsed
+
+      13.098952000 seconds user
+       1.650615000 seconds sys
+
+
+==================== cfg=spill-lz4 backend=swap ====================
+rc=0
+Running as unit: run-p43574-i111662.scope; invocation ID: 6dc4f08da8de4cd6ac240a8faeb17be6
+
+ Performance counter stats for '/home/ubuntu/materialize/target/release/examples/correction_v2_pager --config spill-lz4 --backend swap --scratch /home/ubuntu/mzpager --num-ts 800000 --budget-mib 64 --no-drain':
+
+           3637955      page-faults                                                           
+           3637955      minor-faults                                                          
+                 0      major-faults                                                          
+
+      22.571813454 seconds time elapsed
+
+      19.306928000 seconds user
+       3.263818000 seconds sys
+
+
+==================== cfg=spill backend=file ====================
+rc=0
+Running as unit: run-p43588-i42919.scope; invocation ID: 12db912c2c1246458094b598fe38fe0d
+
+ Performance counter stats for '/home/ubuntu/materialize/target/release/examples/correction_v2_pager --config spill --backend file --scratch /home/ubuntu/mzpager --num-ts 800000 --budget-mib 64 --no-drain':
+
+            122350      page-faults                                                           
+            122015      minor-faults                                                          
+               335      major-faults                                                          
+
+      31.919662496 seconds time elapsed
+
+      12.491054000 seconds user
+       2.293917000 seconds sys
+
+

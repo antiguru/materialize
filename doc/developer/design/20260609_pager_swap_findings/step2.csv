@@ -1,0 +1,4 @@
+config,backend,num_ts,pattern,prop,budget_mib,fill_ms,drain_ms,rss_fill_kib,rss_fill_peak_kib,rss_end_kib,pageouts,out_mib,out_raw_mib,pageins,pagein_mib,write_mibps
+spill,swap,800000,append,3.0,64,16916,0,262356,263304,226140,17687,6958.7,6958.7,17355,6363.3,411.4
+spill-lz4,swap,800000,append,3.0,64,22549,0,242220,250508,164564,17687,1263.9,6958.7,17355,6363.3,56.0
+spill,file,800000,append,3.0,64,31893,0,79732,89684,68612,17687,6958.7,6958.7,17355,6363.3,218.2
