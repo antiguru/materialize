@@ -15,7 +15,7 @@
 
 //! Explicit pager for cold data. See `doc/developer/design/20260504_pager.md`.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 mod file;
 mod swap;
@@ -128,6 +128,22 @@ pub fn set_backend(b: Backend) {
         Backend::File => BACKEND_FILE,
     };
     BACKEND.store(raw, Ordering::Relaxed);
+}
+
+/// Whether the swap backend issues `MADV_COLD` on pageout. Default `true`.
+static MADVISE_COLD: AtomicBool = AtomicBool::new(true);
+
+/// Returns whether the swap backend should `MADV_COLD` paged-out chunks.
+pub fn madvise_cold_enabled() -> bool {
+    MADVISE_COLD.load(Ordering::Relaxed)
+}
+
+/// Enables or disables `MADV_COLD` on swap pageout. Disabling lets the kernel's
+/// own LRU manage residency under a memory cap (it keeps the hot merge front and
+/// reclaims cold tails) instead of the pager preemptively hinting reclaim — which
+/// measurements show evicts chunks the merge re-reads within milliseconds.
+pub fn set_madvise_cold_enabled(enabled: bool) {
+    MADVISE_COLD.store(enabled, Ordering::Relaxed);
 }
 
 /// Scatter pageout. Logical layout = chunks concatenated in order.

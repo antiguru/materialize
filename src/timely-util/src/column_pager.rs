@@ -37,6 +37,7 @@ pub mod policy;
 
 use std::io::{self, Read};
 use std::sync::{Arc, LazyLock, RwLock};
+use std::time::Instant;
 
 use columnar::Columnar;
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
@@ -133,6 +134,9 @@ pub trait PagingPolicy: Send + Sync {
 pub struct Meta {
     /// Uncompressed body size in bytes.
     pub len_bytes: usize,
+    /// When the chunk was paged out. Used to measure pageout→pagein dwell time
+    /// (how long a spilled chunk sits before it is read back) in `take`.
+    pub paged_at: Instant,
 }
 
 /// A column whose body may be resident, paged out, or paged out and compressed.
@@ -354,7 +358,10 @@ impl ColumnPager {
             }
             PageDecision::Page { backend, codec } => (backend, codec),
         };
-        let meta = Meta { len_bytes };
+        let meta = Meta {
+            len_bytes,
+            paged_at: Instant::now(),
+        };
 
         match codec {
             None => {
@@ -437,10 +444,15 @@ impl ColumnPager {
             // `_ticket` drops here and fires `PageEvent::ResidentReleased`.
             PagedColumn::Resident(c, _ticket) => c,
             PagedColumn::Paged { handle, meta } => {
-                let mut body: Vec<u64> = Vec::with_capacity(handle.len());
+                // Empty, not pre-sized: we have no buffer to recycle, so handing
+                // `take` an allocation only defeats its zero-copy path. The swap
+                // backend then moves the chunk's `Vec` straight in; the file
+                // backend sizes the read target itself.
+                let mut body: Vec<u64> = Vec::new();
                 pager::take(handle, &mut body);
                 debug_assert_eq!(body.len() * 8, meta.len_bytes);
                 metrics::observe_pagein(meta.len_bytes);
+                metrics::observe_pagein_latency(meta.paged_at.elapsed());
                 self.policy.record(PageEvent::PagedIn {
                     bytes: meta.len_bytes,
                 });
@@ -455,7 +467,8 @@ impl ColumnPager {
                             .expect("lz4 decode from memory");
                     }
                     CompressedInner::Paged(h) => {
-                        let mut padded = Vec::with_capacity(h.len());
+                        // Empty for the same reason as above: no buffer to recycle.
+                        let mut padded = Vec::new();
                         pager::take(h, &mut padded);
                         let src: &[u8] = bytemuck::cast_slice(&padded);
                         FrameDecoder::new(src)
@@ -465,6 +478,7 @@ impl ColumnPager {
                 }
                 debug_assert_eq!(decoded.len(), meta.len_bytes);
                 metrics::observe_pagein(decoded.len());
+                metrics::observe_pagein_latency(meta.paged_at.elapsed());
                 self.policy.record(PageEvent::PagedIn {
                     bytes: decoded.len(),
                 });

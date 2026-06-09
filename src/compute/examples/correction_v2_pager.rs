@@ -57,6 +57,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use itertools::Itertools;
 use std::time::Instant;
 
 use mz_compute::sink::correction_v2::CorrectionV2;
@@ -162,6 +164,9 @@ struct Args {
     /// `threads` varies, isolating parallel contention (mmap_lock on swap-in faults, pager
     /// lock, reclaim/device queues). Defaults to 1.
     threads: usize,
+    /// Whether the swap backend issues `MADV_COLD` on pageout. Defaults to on; pass
+    /// `--no-madvise-cold` to let the kernel's own LRU manage residency under the cap.
+    madvise_cold: bool,
 }
 
 impl Args {
@@ -175,6 +180,7 @@ impl Args {
         let mut proportionality = CHAIN_PROPORTIONALITY;
         let mut drain = true;
         let mut threads = 1_usize;
+        let mut madvise_cold = true;
 
         let mut args = std::env::args().skip(1);
         while let Some(flag) = args.next() {
@@ -203,6 +209,7 @@ impl Args {
                         .map_err(|e| format!("--proportionality: {e}"))?
                 }
                 "--no-drain" => drain = false,
+                "--no-madvise-cold" => madvise_cold = false,
                 "--threads" => {
                     threads = value()?.parse().map_err(|e| format!("--threads: {e}"))?;
                     if threads == 0 {
@@ -231,6 +238,7 @@ impl Args {
             proportionality,
             drain,
             threads,
+            madvise_cold,
         })
     }
 }
@@ -245,7 +253,8 @@ usage: correction_v2_pager [options]
   --scratch  DIR                                (required for --backend file with spill)
   --proportionality P                           (default 3.0; chain size ratio)
   --no-drain                                    (fill only; skip the slow stepwise drain)
-  --threads  T                                  (default 1; workers sharing the global pager, total work constant)";
+  --threads  T                                  (default 1; workers sharing the global pager, total work constant)
+  --no-madvise-cold                             (swap backend: skip MADV_COLD, let kernel LRU manage residency)";
 
 /// Wraps a [`TieredPolicy`] to count the bytes the pager moves.
 ///
@@ -428,6 +437,7 @@ fn main() {
     };
 
     let policy = configure_pager(&args);
+    pager::set_madvise_cold_enabled(args.madvise_cold);
 
     let metrics = sink_metrics();
 
@@ -549,4 +559,21 @@ fn main() {
         pagein_mib,
         write_mibps,
     );
+
+    // Pageout→pagein dwell histogram (stderr, so it never pollutes the CSV).
+    // Short dwells = chunks `MADV_COLD`'d then read back almost immediately by an
+    // imminent merge — the hot data the kernel's LRU would otherwise have kept.
+    let dwell = column_pager::metrics::pagein_dwell_histogram();
+    let total: u64 = dwell.iter().sum();
+    if total > 0 {
+        let parts: Vec<String> = column_pager::metrics::PAGEIN_DWELL_LABELS
+            .iter()
+            .zip_eq(dwell.iter())
+            .map(|(label, count)| {
+                let pct = 100.0 * f64::cast_lossy(*count) / f64::cast_lossy(total);
+                format!("{label}={count} ({pct:.1}%)")
+            })
+            .collect();
+        eprintln!("pagein_dwell[{total}]: {}", parts.join("  "));
+    }
 }

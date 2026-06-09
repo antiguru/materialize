@@ -53,8 +53,10 @@ pub(crate) fn pageout_swap(chunks: &mut [Vec<u64>]) -> Handle {
     for c in chunks.iter_mut() {
         taken.push(std::mem::take(c));
     }
-    for c in &taken {
-        madvise_cold(c);
+    if crate::pager::madvise_cold_enabled() {
+        for c in &taken {
+            madvise_cold(c);
+        }
     }
     Handle::from_swap(SwapInner::new(taken))
 }

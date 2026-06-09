@@ -21,6 +21,8 @@
 //! [`MetricsRegistry`] free of bookkeeping.
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use mz_ore::metric;
 use mz_ore::metrics::{ComputedUIntGauge, IntCounter, MetricsRegistry};
@@ -157,4 +159,40 @@ pub(crate) fn observe_resident_released(bytes: usize) {
 
 fn bytes_to_u64(b: usize) -> u64 {
     u64::try_from(b).unwrap_or(u64::MAX)
+}
+
+/// Number of buckets in the pageout→pagein dwell-time histogram.
+pub const PAGEIN_DWELL_BUCKETS: usize = 8;
+
+/// Upper bounds (inclusive, in microseconds) for each dwell bucket; the last
+/// bucket is unbounded. Index `i` of [`pagein_dwell_histogram`] counts page-ins
+/// whose chunk sat spilled for a time `<= PAGEIN_DWELL_BOUNDS_US[i]`.
+pub const PAGEIN_DWELL_LABELS: [&str; PAGEIN_DWELL_BUCKETS] = [
+    "<1us", "<10us", "<100us", "<1ms", "<10ms", "<100ms", "<1s", ">=1s",
+];
+
+/// Always-on (registry-independent) histogram of pageout→pagein dwell time —
+/// how long a spilled chunk sits before being read back. Short dwells indicate
+/// `MADV_COLD` is evicting chunks the merge front re-reads almost immediately.
+static PAGEIN_DWELL: [AtomicU64; PAGEIN_DWELL_BUCKETS] =
+    [const { AtomicU64::new(0) }; PAGEIN_DWELL_BUCKETS];
+
+pub(crate) fn observe_pagein_latency(d: Duration) {
+    let bucket = match d.as_micros() {
+        0 => 0,
+        1..=9 => 1,
+        10..=99 => 2,
+        100..=999 => 3,
+        1_000..=9_999 => 4,
+        10_000..=99_999 => 5,
+        100_000..=999_999 => 6,
+        _ => 7,
+    };
+    PAGEIN_DWELL[bucket].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot the dwell-time histogram (cumulative counts per bucket since process
+/// start). See [`PAGEIN_DWELL_LABELS`] for the bucket boundaries.
+pub fn pagein_dwell_histogram() -> [u64; PAGEIN_DWELL_BUCKETS] {
+    std::array::from_fn(|i| PAGEIN_DWELL[i].load(Ordering::Relaxed))
 }
