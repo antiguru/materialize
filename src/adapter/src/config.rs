@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use mz_build_info::BuildInfo;
+use mz_cluster_client::ReplicaId;
+use mz_controller_types::ClusterId;
 use mz_ore::metric;
 use mz_ore::metrics::{MetricsRegistry, UIntGauge};
 use mz_ore::now::NowFn;
@@ -23,9 +25,67 @@ mod params;
 mod sync;
 
 pub use backend::SystemParameterBackend;
-pub use frontend::SystemParameterFrontend;
+pub use frontend::{
+    ClusterEvalContext, ClusterScopeContext, ReplicaEvalContext, ReplicaScopeContext,
+    SystemParameterFrontend, scoped_ld_ctx,
+};
 pub use params::{ModifiedParameter, SynchronizedParameters};
+pub(crate) use sync::evaluate_scoped_parameters;
 pub use sync::system_parameter_sync;
+
+/// The full desired state of the scoped system parameters, reconciled by the
+/// system-parameter sync loop from continuous LaunchDarkly evaluation.
+///
+/// Values are the raw (unparsed) strings LaunchDarkly served, keyed by object
+/// id; the coordinator parses and resolves them at the appropriate boundary
+/// (the controller's per-replica dyncfg push for `replica`, plan-time
+/// `OptimizerFeatureOverrides` for `cluster`). Only values that differ from the
+/// environment-wide value are present, so the maps stay sparse. The sync loop
+/// is the sole writer, and each push is the *complete* desired state, so the
+/// coordinator can apply removals by diffing against its working copy.
+///
+/// This is the in-memory working copy, mirrored by the durable
+/// `cluster_system_configurations` / `replica_system_configurations` catalog
+/// collections so values survive an `environmentd` restart and an LD outage;
+/// see the scoped feature flags design.
+///
+/// The machinery is gated behind the `enable_scoped_system_parameters` dyncfg
+/// (off by default). While disabled the sync loop evaluates no scoped contexts
+/// and these maps stay empty, so resolution falls back to the environment-wide
+/// value everywhere — the pre-scoped behavior.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScopedParameters {
+    /// Cluster-coherent overrides, keyed by cluster id. (Populated by the
+    /// cluster-coherent path; empty for the replica-local path.)
+    pub cluster: BTreeMap<ClusterId, BTreeMap<String, String>>,
+    /// Replica-local overrides, keyed by replica id.
+    pub replica: BTreeMap<ReplicaId, BTreeMap<String, String>>,
+}
+
+impl ScopedParameters {
+    /// Returns `true` if there are no cluster or replica overrides.
+    pub fn is_empty(&self) -> bool {
+        self.cluster.is_empty() && self.replica.is_empty()
+    }
+
+    /// Returns a copy of `self` with the cluster and replica overrides from
+    /// `other` merged in, replacing any existing entry for the same object.
+    ///
+    /// Create-time resolution uses this to add freshly-evaluated new objects to
+    /// the current working copy before reconciling, so the reconcile keeps the
+    /// overrides of objects it did not re-evaluate. Removals are not expressed
+    /// here — they are the periodic full-state reconcile's job.
+    pub fn merge(&self, other: &ScopedParameters) -> ScopedParameters {
+        let mut merged = self.clone();
+        merged
+            .cluster
+            .extend(other.cluster.iter().map(|(id, v)| (*id, v.clone())));
+        merged
+            .replica
+            .extend(other.replica.iter().map(|(id, v)| (*id, v.clone())));
+        merged
+    }
+}
 
 /// A factory for [SystemParameterFrontend] instances.
 #[derive(Clone, Debug)]

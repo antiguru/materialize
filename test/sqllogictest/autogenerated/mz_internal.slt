@@ -453,6 +453,20 @@ client_ip  text  The␠IP␠address␠of␠the␠client␠that␠initiated␠the
 connected_at  timestamp␠with␠time␠zone  The␠time␠at␠which␠the␠session␠connected␠to␠the␠system.
 
 query TTT
+SELECT name, type, comment FROM objects WHERE schema = 'mz_internal' AND object = 'mz_cluster_system_parameters' ORDER BY position
+----
+cluster_id  text  The␠ID␠of␠the␠cluster.␠Corresponds␠to␠`mz_clusters.id`.
+name  text  The␠name␠of␠the␠cluster-coherent␠system␠parameter.
+value  text  The␠cluster-scoped␠value␠of␠the␠system␠parameter,␠as␠resolved␠from␠LaunchDarkly.
+
+query TTT
+SELECT name, type, comment FROM objects WHERE schema = 'mz_internal' AND object = 'mz_replica_system_parameters' ORDER BY position
+----
+replica_id  text  The␠ID␠of␠the␠cluster␠replica.␠Corresponds␠to␠`mz_cluster_replicas.id`.
+name  text  The␠name␠of␠the␠replica-local␠system␠parameter.
+value  text  The␠replica-scoped␠value␠of␠the␠system␠parameter,␠as␠resolved␠from␠LaunchDarkly.
+
+query TTT
 SELECT name, type, comment FROM objects WHERE schema = 'mz_internal' AND object = 'mz_network_policies' ORDER BY position
 ----
 id  text  The␠ID␠of␠the␠network␠policy.
@@ -755,6 +769,7 @@ mz_cluster_replica_statuses
 mz_cluster_replica_utilization
 mz_cluster_replica_utilization_history
 mz_cluster_schedules
+mz_cluster_system_parameters
 mz_cluster_workload_classes
 mz_comments
 mz_compute_dependencies
@@ -807,6 +822,7 @@ mz_recent_activity_log_thinned
 mz_recent_sql_text
 mz_recent_sql_text_redacted
 mz_replacements
+mz_replica_system_parameters
 mz_session_history
 mz_sessions
 mz_show_all_my_privileges

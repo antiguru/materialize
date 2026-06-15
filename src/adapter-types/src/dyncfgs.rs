@@ -267,6 +267,17 @@ pub const CATALOG_INFO_METRICS_RECONCILE_INTERVAL: Config<Duration> = Config::ne
     "How frequently to reconcile the catalog `*_info` metrics with the catalog. A zero duration disables reconciliation.",
 );
 
+/// Whether per-cluster and per-replica scoped system parameters are evaluated.
+/// Off by default: the parameter sync loop evaluates no cluster/replica
+/// contexts and resolution falls back to the environment-wide value everywhere
+/// (the pre-scoped behavior). Enabling it (e.g. from LaunchDarkly) turns on
+/// scoped evaluation without a deploy.
+pub const ENABLE_SCOPED_SYSTEM_PARAMETERS: Config<bool> = Config::new(
+    "enable_scoped_system_parameters",
+    false,
+    "Whether per-cluster and per-replica scoped system parameters are evaluated and applied.",
+);
+
 /// Adds the full set of all adapter `Config`s.
 pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
     configs
@@ -304,4 +315,5 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&ARRANGEMENT_SIZE_HISTORY_COLLECTION_INTERVAL)
         .add(&ARRANGEMENT_SIZE_HISTORY_RETENTION_PERIOD)
         .add(&CATALOG_INFO_METRICS_RECONCILE_INTERVAL)
+        .add(&ENABLE_SCOPED_SYSTEM_PARAMETERS)
 }

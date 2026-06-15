@@ -717,6 +717,14 @@ impl Coordinator {
 
         self.catalog_transact(Some(session), ops).await?;
 
+        // Resolve the new cluster's cluster-coherent scoped overrides now, so its
+        // first plan uses them rather than the env-wide values (optimizer
+        // features are baked into immutable dataflows). The replicas' own
+        // replica-local overrides are set as each is installed (see
+        // `push_new_replica_scoped_override`).
+        self.resolve_scoped_for_new_objects(&BTreeSet::from([cluster_id]), &BTreeSet::new())
+            .await;
+
         Ok(ExecuteResponse::CreatedCluster)
     }
 
@@ -897,6 +905,11 @@ impl Coordinator {
         }
 
         self.catalog_transact(Some(session), ops).await?;
+
+        // Resolve the new cluster's cluster-coherent scoped overrides now (see
+        // the managed path for rationale).
+        self.resolve_scoped_for_new_objects(&BTreeSet::from([id]), &BTreeSet::new())
+            .await;
 
         Ok(ExecuteResponse::CreatedCluster)
     }

@@ -317,6 +317,12 @@ impl CatalogState {
             StateUpdateKind::SystemConfiguration(system_configuration) => {
                 self.apply_system_configuration_update(system_configuration, diff, retractions);
             }
+            StateUpdateKind::ClusterSystemConfiguration(cluster_system_configuration) => {
+                self.apply_cluster_system_configuration_update(cluster_system_configuration, diff);
+            }
+            StateUpdateKind::ReplicaSystemConfiguration(replica_system_configuration) => {
+                self.apply_replica_system_configuration_update(replica_system_configuration, diff);
+            }
             StateUpdateKind::Cluster(cluster) => {
                 self.apply_cluster_update(cluster, diff, retractions);
             }
@@ -523,6 +529,77 @@ impl CatalogState {
                 warn!(%name, "unknown system parameter from catalog storage");
             }
             Err(e) => panic!("unable to update system variable: {e:?}"),
+        }
+    }
+
+    /// Applies a durable update to the in-memory cluster-coherent scoped
+    /// parameter working copy (`scoped_system_parameters.cluster`), keyed by
+    /// cluster id. Mirrors the durable `cluster_system_configurations`
+    /// collection; consumed at plan time via
+    /// [`CatalogState::cluster_scoped_optimizer_overrides`]. See the scoped
+    /// feature flags design.
+    ///
+    /// [`CatalogState::cluster_scoped_optimizer_overrides`]: crate::catalog::CatalogState::cluster_scoped_optimizer_overrides
+    #[instrument(level = "debug")]
+    fn apply_cluster_system_configuration_update(
+        &mut self,
+        cfg: mz_catalog::durable::ClusterSystemConfiguration,
+        diff: StateDiff,
+    ) {
+        // Retraction is conditional on the value matching, so a value change
+        // (retraction of the old value + addition of the new) is correct
+        // regardless of the order the two updates are applied in.
+        let cluster = &mut self.scoped_system_parameters.cluster;
+        match diff {
+            StateDiff::Addition => {
+                cluster
+                    .entry(cfg.cluster_id)
+                    .or_default()
+                    .insert(cfg.name, cfg.value);
+            }
+            StateDiff::Retraction => {
+                if let Some(values) = cluster.get_mut(&cfg.cluster_id) {
+                    if values.get(&cfg.name) == Some(&cfg.value) {
+                        values.remove(&cfg.name);
+                        if values.is_empty() {
+                            cluster.remove(&cfg.cluster_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Applies a durable update to the in-memory replica-local scoped parameter
+    /// working copy (`scoped_system_parameters.replica`), keyed by replica id.
+    /// Mirrors the durable `replica_system_configurations` collection; resolved
+    /// at the compute controller's per-replica dyncfg push. The value-matched
+    /// retraction makes this order-independent, as for the cluster variant
+    /// above. See the scoped feature flags design.
+    #[instrument(level = "debug")]
+    fn apply_replica_system_configuration_update(
+        &mut self,
+        cfg: mz_catalog::durable::ReplicaSystemConfiguration,
+        diff: StateDiff,
+    ) {
+        let replica = &mut self.scoped_system_parameters.replica;
+        match diff {
+            StateDiff::Addition => {
+                replica
+                    .entry(cfg.replica_id)
+                    .or_default()
+                    .insert(cfg.name, cfg.value);
+            }
+            StateDiff::Retraction => {
+                if let Some(values) = replica.get_mut(&cfg.replica_id) {
+                    if values.get(&cfg.name) == Some(&cfg.value) {
+                        values.remove(&cfg.name);
+                        if values.is_empty() {
+                            replica.remove(&cfg.replica_id);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1450,6 +1527,22 @@ impl CatalogState {
                 vec![self.pack_system_privileges_update(system_privilege, diff)]
             }
             StateUpdateKind::SystemConfiguration(_) => Vec::new(),
+            StateUpdateKind::ClusterSystemConfiguration(cfg) => {
+                vec![self.pack_cluster_system_parameter_update(
+                    &cfg.cluster_id.to_string(),
+                    &cfg.name,
+                    &cfg.value,
+                    diff,
+                )]
+            }
+            StateUpdateKind::ReplicaSystemConfiguration(cfg) => {
+                vec![self.pack_replica_system_parameter_update(
+                    &cfg.replica_id.to_string(),
+                    &cfg.name,
+                    &cfg.value,
+                    diff,
+                )]
+            }
             // mz_clusters and mz_cluster_schedules are MaterializedViews backed
             // by mz_internal.mz_catalog_raw, so cluster rows do not produce
             // builtin table updates here.
@@ -2248,8 +2341,10 @@ fn sort_updates(updates: Vec<StateUpdate>) -> Vec<StateUpdate> {
                 &mut pre_cluster_additions,
             ),
             StateUpdateKind::Cluster(_)
+            | StateUpdateKind::ClusterSystemConfiguration(_)
             | StateUpdateKind::IntrospectionSourceIndex(_)
-            | StateUpdateKind::ClusterReplica(_) => push_update(
+            | StateUpdateKind::ClusterReplica(_)
+            | StateUpdateKind::ReplicaSystemConfiguration(_) => push_update(
                 update,
                 diff,
                 &mut cluster_retractions,
@@ -2595,6 +2690,8 @@ impl ApplyState {
             | DefaultPrivilege(_)
             | SystemPrivilege(_)
             | SystemConfiguration(_)
+            | ClusterSystemConfiguration(_)
+            | ReplicaSystemConfiguration(_)
             | Cluster(_)
             | NetworkPolicy(_)
             | ClusterReplica(_)
