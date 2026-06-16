@@ -228,6 +228,40 @@ fn test_replica_allocation_deserialization() {
     assert_ok!(serde_json::from_str::<ReplicaAllocation>(data));
 }
 
+#[mz_ore::test]
+#[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `decContextDefault` on OS `linux`
+fn test_replica_allocation_family() {
+    let parse = |json: &str| -> ReplicaAllocation {
+        serde_json::from_str(json).expect("deserialization from JSON succeeds")
+    };
+
+    // An explicit `family` is used verbatim.
+    assert_eq!(
+        parse(r#"{"scale": 1, "workers": 1, "credits_per_hour": "0", "family": "D"}"#).family(),
+        "D"
+    );
+    // Without an explicit `family`, modern (`is_cc`) sizes fall back to "cc".
+    // `is_cc` defaults to true.
+    assert_eq!(
+        parse(r#"{"scale": 1, "workers": 1, "credits_per_hour": "0"}"#).family(),
+        "cc"
+    );
+    // Without an explicit `family`, legacy (non-`is_cc`) sizes fall back to
+    // "legacy".
+    assert_eq!(
+        parse(r#"{"scale": 1, "workers": 1, "credits_per_hour": "0", "is_cc": false}"#).family(),
+        "legacy"
+    );
+    // An explicit family wins even for a legacy size.
+    assert_eq!(
+        parse(
+            r#"{"scale": 1, "workers": 1, "credits_per_hour": "0", "is_cc": false, "family": "legacy-special"}"#
+        )
+        .family(),
+        "legacy-special"
+    );
+}
+
 /// Configures the location of a cluster replica.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub enum ReplicaLocation {

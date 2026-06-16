@@ -171,3 +171,57 @@ impl Metrics {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use mz_cluster_client::ReplicaId;
+    use mz_controller_types::ClusterId;
+
+    use super::ScopedParameters;
+
+    fn cfg(name: &str, value: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(name.to_string(), value.to_string())])
+    }
+
+    #[mz_ore::test]
+    fn test_scoped_parameters_is_empty() {
+        assert!(ScopedParameters::default().is_empty());
+
+        let mut params = ScopedParameters::default();
+        params.cluster.insert(ClusterId::User(1), cfg("f", "true"));
+        assert!(!params.is_empty());
+
+        let mut params = ScopedParameters::default();
+        params.replica.insert(ReplicaId::User(1), cfg("f", "true"));
+        assert!(!params.is_empty());
+    }
+
+    #[mz_ore::test]
+    fn test_scoped_parameters_merge() {
+        let mut base = ScopedParameters::default();
+        base.cluster.insert(ClusterId::User(1), cfg("f", "old"));
+        base.cluster.insert(ClusterId::User(2), cfg("f", "keep"));
+        base.replica.insert(ReplicaId::User(1), cfg("g", "old"));
+
+        let mut incoming = ScopedParameters::default();
+        // Overrides the existing entry for the same object...
+        incoming.cluster.insert(ClusterId::User(1), cfg("f", "new"));
+        // ...and adds a new object, leaving others untouched.
+        incoming.replica.insert(ReplicaId::User(2), cfg("g", "new"));
+
+        let merged = base.merge(&incoming);
+
+        // Replaced.
+        assert_eq!(merged.cluster[&ClusterId::User(1)], cfg("f", "new"));
+        // Untouched object retained (merge does not express removals).
+        assert_eq!(merged.cluster[&ClusterId::User(2)], cfg("f", "keep"));
+        // Pre-existing replica retained, new replica added.
+        assert_eq!(merged.replica[&ReplicaId::User(1)], cfg("g", "old"));
+        assert_eq!(merged.replica[&ReplicaId::User(2)], cfg("g", "new"));
+
+        // The original is unchanged (merge returns a copy).
+        assert_eq!(base.cluster[&ClusterId::User(1)], cfg("f", "old"));
+    }
+}
