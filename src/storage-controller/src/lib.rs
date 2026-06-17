@@ -551,19 +551,22 @@ impl StorageController for Controller {
         &mut self,
         instance_id: StorageInstanceId,
         replica_id: ReplicaId,
-        location: ClusterReplicaLocation,
+        command_tx: mpsc::UnboundedSender<StorageCommand>,
+        connected: Arc<AtomicBool>,
+    ) -> (
+        mpsc::UnboundedSender<(Option<ReplicaId>, StorageResponse)>,
+        ReplicaMetrics,
     ) {
+        let response_tx = self.instance_response_tx.clone();
+
         let instance = self
             .instances
             .get_mut(&instance_id)
             .unwrap_or_else(|| panic!("instance {instance_id} does not exist"));
 
-        let config = ReplicaConfig {
-            build_info: self.build_info,
-            location,
-            grpc_client: self.config.parameters.grpc_client.clone(),
-        };
-        instance.add_replica(replica_id, config);
+        let metrics = instance.add_replica(replica_id, command_tx, connected);
+
+        (response_tx, metrics)
     }
 
     fn drop_replica(&mut self, instance_id: StorageInstanceId, replica_id: ReplicaId) {
@@ -2155,10 +2158,6 @@ impl StorageController for Controller {
         if self.maintenance_scheduled {
             self.maintain();
             self.maintenance_scheduled = false;
-        }
-
-        for instance in self.instances.values_mut() {
-            instance.rehydrate_failed_replicas();
         }
 
         let mut status_updates = vec![];

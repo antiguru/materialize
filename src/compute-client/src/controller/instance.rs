@@ -1002,6 +1002,16 @@ impl Instance {
         }
     }
 
+    /// Returns a clone of the channel on which this instance receives replica responses.
+    ///
+    /// The per-replica supervisor that owns the unified connection forwards compute responses into
+    /// this channel.
+    pub(super) fn replica_response_sender(
+        &self,
+    ) -> mz_ore::channel::InstrumentedUnboundedSender<ReplicaResponse, IntCounter> {
+        self.replica_tx.clone()
+    }
+
     /// Update instance configuration.
     #[mz_ore::instrument(level = "debug")]
     pub fn update_configuration(&mut self, config_params: ComputeParameters) {

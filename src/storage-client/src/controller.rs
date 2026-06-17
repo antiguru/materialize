@@ -401,8 +401,14 @@ pub trait StorageController: Debug {
 
     /// Connects the storage instance to the specified replica.
     ///
-    /// If the storage instance is already attached to a replica, communication
-    /// with that replica is severed in favor of the new replica.
+    /// On the unified cluster protocol the connection is owned by a per-replica supervisor in the
+    /// controller, not by the storage controller. The supervisor delivers commands on `command_tx`
+    /// and reports connection status through `connected`; this method registers the replica, replays
+    /// the command history into `command_tx`, and returns the response sender the supervisor should
+    /// forward storage responses to, along with the replica's metrics.
+    ///
+    /// Calling this again for an existing replica id reconnects it (replacing the handle and
+    /// replaying history), which is how the controller recovers a replica after a failure.
     ///
     /// In the future, this API will be adjusted to support active replication
     /// of storage instances (i.e., multiple replicas attached to a given
@@ -411,7 +417,11 @@ pub trait StorageController: Debug {
         &mut self,
         instance_id: StorageInstanceId,
         replica_id: ReplicaId,
-        location: ClusterReplicaLocation,
+        command_tx: tokio::sync::mpsc::UnboundedSender<crate::client::StorageCommand>,
+        connected: Arc<std::sync::atomic::AtomicBool>,
+    ) -> (
+        tokio::sync::mpsc::UnboundedSender<(Option<ReplicaId>, crate::client::StorageResponse)>,
+        crate::metrics::ReplicaMetrics,
     );
 
     /// Disconnects the storage instance from the specified replica.

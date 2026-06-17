@@ -137,19 +137,30 @@ impl Instance {
     }
 
     /// Adds a new replica to this storage instance.
-    pub fn add_replica(&mut self, id: ReplicaId, config: ReplicaConfig) {
+    ///
+    /// The `command_tx` and `connected` flag are provided by the replica's supervisor, which owns
+    /// the connection. Calling this for an existing replica id replaces its handle and replays the
+    /// command history, which is how the controller reconnects a replica after a failure.
+    pub fn add_replica(
+        &mut self,
+        id: ReplicaId,
+        command_tx: mpsc::UnboundedSender<StorageCommand>,
+        connected: Arc<AtomicBool>,
+    ) -> ReplicaMetrics {
         // Reduce the history to limit the amount of commands sent to the new replica, and to
         // enable the `objects_installed` assert below.
         self.history.reduce();
 
         let metrics = self.metrics.for_replica(id);
-        let replica = Replica::new(id, config, metrics, self.response_tx.clone());
+        let replica = Replica::new(command_tx, connected);
 
         self.replicas.insert(id, replica);
 
         self.update_scheduling(false);
 
         self.replay_commands(id);
+
+        metrics
     }
 
     /// Replays commands to the specified replica.
@@ -233,18 +244,6 @@ impl Instance {
         }
     }
 
-    /// Rehydrates any failed replicas of this storage instance.
-    pub fn rehydrate_failed_replicas(&mut self) {
-        let replicas = self.replicas.iter();
-        let failed_replicas: Vec<_> = replicas
-            .filter_map(|(id, replica)| replica.failed().then_some(*id))
-            .collect();
-
-        for id in failed_replicas {
-            let replica = self.replicas.remove(&id).expect("must exist");
-            self.add_replica(id, replica.config);
-        }
-    }
 
     /// Returns ingestions running on this instance. This _only_ includes the
     /// "toplevel" ingestions, not any of their source tables (aka. subsources).
@@ -754,210 +753,40 @@ impl Instance {
     }
 }
 
-/// Replica-specific configuration.
-#[derive(Clone, Debug)]
-pub(super) struct ReplicaConfig {
-    pub build_info: &'static BuildInfo,
-    pub location: ClusterReplicaLocation,
-    pub grpc_client: GrpcClientParameters,
-}
-
 /// State maintained about individual replicas.
+///
+/// On the unified cluster protocol, the connection and the task driving it are owned by a
+/// `mz_controller::replica::ClusterReplica` supervisor. This struct only retains the controller-side
+/// handle: a sender for commands (delivered to the supervisor's task) and a flag reporting whether
+/// the connection has been established.
 #[derive(Debug)]
 pub struct Replica {
-    /// Replica configuration.
-    config: ReplicaConfig,
     /// A sender for commands for the replica.
-    ///
-    /// If sending to this channel fails, the replica has failed and requires
-    /// rehydration.
     command_tx: mpsc::UnboundedSender<StorageCommand>,
-    /// A handle to the task that aborts it when the replica is dropped.
-    task: AbortOnDropHandle<()>,
     /// Flag reporting whether the replica connection has been established.
+    ///
+    /// Owned and updated by the supervisor task.
     connected: Arc<AtomicBool>,
 }
 
 impl Replica {
-    /// Creates a new [`Replica`].
-    fn new(
-        id: ReplicaId,
-        config: ReplicaConfig,
-        metrics: ReplicaMetrics,
-        response_tx: mpsc::UnboundedSender<(Option<ReplicaId>, StorageResponse)>,
-    ) -> Self {
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let connected = Arc::new(AtomicBool::new(false));
-
-        let task = mz_ore::task::spawn(
-            || "storage-replica-{id}",
-            ReplicaTask {
-                replica_id: id,
-                config: config.clone(),
-                metrics: metrics.clone(),
-                connected: Arc::clone(&connected),
-                command_rx,
-                response_tx,
-            }
-            .run(),
-        );
-
+    /// Creates a new [`Replica`] from a command sender and shared connection flag provided by the
+    /// supervisor.
+    fn new(command_tx: mpsc::UnboundedSender<StorageCommand>, connected: Arc<AtomicBool>) -> Self {
         Self {
-            config,
             command_tx,
-            task: task.abort_on_drop(),
             connected,
         }
     }
 
     /// Sends a command to the replica.
     fn send(&self, command: StorageCommand) {
-        // Send failures ignored, we'll check for failed replicas separately.
+        // Send failures ignored; the supervisor detects and reports failed replicas.
         let _ = self.command_tx.send(command);
-    }
-
-    /// Determine if this replica has failed. This is true if the replica
-    /// task has terminated.
-    fn failed(&self) -> bool {
-        self.task.is_finished()
     }
 
     /// Determine if the replica connection has been established.
     pub(super) fn is_connected(&self) -> bool {
         self.connected.load(atomic::Ordering::Relaxed)
-    }
-}
-
-type StorageCtpClient = transport::Client<StorageCommand, StorageResponse>;
-type ReplicaClient = Partitioned<StorageCtpClient, StorageCommand, StorageResponse>;
-
-/// A task handling communication with a replica.
-struct ReplicaTask {
-    /// The ID of the replica.
-    replica_id: ReplicaId,
-    /// Replica configuration.
-    config: ReplicaConfig,
-    /// Replica metrics.
-    metrics: ReplicaMetrics,
-    /// Flag to report successful replica connection.
-    connected: Arc<AtomicBool>,
-    /// A channel upon which commands intended for the replica are delivered.
-    command_rx: mpsc::UnboundedReceiver<StorageCommand>,
-    /// A channel upon which responses from the replica are delivered.
-    response_tx: mpsc::UnboundedSender<(Option<ReplicaId>, StorageResponse)>,
-}
-
-impl ReplicaTask {
-    /// Runs the replica task.
-    async fn run(self) {
-        let replica_id = self.replica_id;
-        info!(%replica_id, "starting replica task");
-
-        let client = self.connect().await;
-        match self.run_message_loop(client).await {
-            Ok(()) => info!(%replica_id, "stopped replica task"),
-            Err(error) => warn!(%replica_id, %error, "replica task failed"),
-        }
-    }
-
-    /// Connects to the replica.
-    ///
-    /// The connection is retried forever (with backoff) and this method returns only after
-    /// a connection was successfully established.
-    async fn connect(&self) -> ReplicaClient {
-        let try_connect = async move |retry: RetryState| {
-            let version = self.config.build_info.semver_version();
-            let client_params = &self.config.grpc_client;
-
-            let connect_start = Instant::now();
-            let connect_timeout = client_params.connect_timeout.unwrap_or(Duration::MAX);
-            let keepalive_timeout = client_params
-                .http2_keep_alive_timeout
-                .unwrap_or(Duration::MAX);
-
-            let connect_result = StorageCtpClient::connect_partitioned(
-                self.config.location.ctl_addrs.clone(),
-                version,
-                connect_timeout,
-                keepalive_timeout,
-                self.metrics.clone(),
-            )
-            .await;
-
-            self.metrics.observe_connect_time(connect_start.elapsed());
-
-            connect_result.inspect_err(|error| {
-                let next_backoff = retry.next_backoff.unwrap();
-                if retry.i >= mz_service::retry::INFO_MIN_RETRIES {
-                    info!(
-                        replica_id = %self.replica_id, ?next_backoff,
-                        "error connecting to replica: {error:#}",
-                    );
-                } else {
-                    debug!(
-                        replica_id = %self.replica_id, ?next_backoff,
-                        "error connecting to replica: {error:#}",
-                    );
-                }
-            })
-        };
-
-        let client = Retry::default()
-            .clamp_backoff(Duration::from_secs(1))
-            .retry_async(try_connect)
-            .await
-            .expect("retries forever");
-
-        self.metrics.observe_connect();
-        self.connected.store(true, atomic::Ordering::Relaxed);
-
-        client
-    }
-
-    /// Runs the message loop.
-    ///
-    /// Returns (with an `Err`) if it encounters an error condition (e.g. the replica disconnects).
-    /// If no error condition is encountered, the task runs until the controller disconnects from
-    /// the command channel, or the task is dropped.
-    async fn run_message_loop(mut self, mut client: ReplicaClient) -> Result<(), anyhow::Error> {
-        loop {
-            select! {
-                // Command from controller to forward to replica.
-                // `tokio::sync::mpsc::UnboundedReceiver::recv` is documented as cancel safe.
-                command = self.command_rx.recv() => {
-                    let Some(mut command) = command else {
-                        tracing::debug!(%self.replica_id, "controller is no longer interested in this replica, shutting down message loop");
-                        break;
-                    };
-
-                    self.specialize_command(&mut command);
-                    client.send(command).await?;
-                },
-                // Response from replica to forward to controller.
-                // `GenericClient::recv` implementations are required to be cancel safe.
-                response = client.recv() => {
-                    let Some(response) = response? else {
-                        bail!("replica unexpectedly gracefully terminated connection");
-                    };
-
-                    if self.response_tx.send((Some(self.replica_id), response)).is_err() {
-                        tracing::debug!(%self.replica_id, "controller (receiver) is no longer interested in this replica, shutting down message loop");
-                        break;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Specialize a command for the given replica configuration.
-    ///
-    /// Most [`StorageCommand`]s are independent of the target replica, but some contain
-    /// replica-specific fields that must be adjusted before sending.
-    fn specialize_command(&self, command: &mut StorageCommand) {
-        if let StorageCommand::Hello { nonce } = command {
-            *nonce = Uuid::new_v4();
-        }
     }
 }

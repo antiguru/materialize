@@ -102,11 +102,30 @@ pub struct InstanceClient {
     /// A sender for read hold changes for collections installed on the instance.
     #[derivative(Debug = "ignore")]
     read_hold_tx: read_holds::ChangeTx,
+    /// A clone of the channel on which the instance task receives replica responses.
+    ///
+    /// Exposed at the controller level so the per-replica supervisor (which owns the unified
+    /// connection) can forward compute responses into the instance task.
+    #[derivative(Debug = "ignore")]
+    replica_tx: InstrumentedUnboundedSender<ReplicaResponse, IntCounter>,
+    /// The metrics for this instance, used to mint per-replica metrics.
+    #[derivative(Debug = "ignore")]
+    metrics: InstanceMetrics,
 }
 
 impl InstanceClient {
     pub(super) fn read_hold_tx(&self) -> read_holds::ChangeTx {
         Arc::clone(&self.read_hold_tx)
+    }
+
+    /// Returns a clone of the channel on which the instance task receives replica responses.
+    pub(super) fn replica_tx(&self) -> InstrumentedUnboundedSender<ReplicaResponse, IntCounter> {
+        self.replica_tx.clone()
+    }
+
+    /// Mints metrics for the identified replica.
+    pub(super) fn replica_metrics(&self, replica_id: ReplicaId) -> ReplicaMetrics {
+        self.metrics.for_replica(replica_id)
     }
 
     /// Call a method to be run on the instance task, by sending a message to the instance.
@@ -174,29 +193,32 @@ impl InstanceClient {
             })
         };
 
-        mz_ore::task::spawn(
-            || format!("compute-instance-{id}"),
-            Instance::new(
-                build_info,
-                storage,
-                peek_stash_persist_location,
-                arranged_logs,
-                metrics,
-                now,
-                wallclock_lag,
-                dyncfg,
-                command_rx,
-                response_tx,
-                Arc::clone(&read_hold_tx),
-                introspection_tx,
-                read_only,
-            )
-            .run(),
+        let instance = Instance::new(
+            build_info,
+            storage,
+            peek_stash_persist_location,
+            arranged_logs,
+            metrics.clone(),
+            now,
+            wallclock_lag,
+            dyncfg,
+            command_rx,
+            response_tx,
+            Arc::clone(&read_hold_tx),
+            introspection_tx,
+            read_only,
         );
+        // Clone the replica response sender out before the instance is moved into its task, so the
+        // controller can hand it to per-replica supervisors.
+        let replica_tx = instance.replica_response_sender();
+
+        mz_ore::task::spawn(|| format!("compute-instance-{id}"), instance.run());
 
         Self {
             command_tx,
             read_hold_tx,
+            replica_tx,
+            metrics,
         }
     }
 
