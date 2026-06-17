@@ -17,6 +17,7 @@ futures.workspace = true
 itertools.workspace = true
 mz-build-info = { path = "../build-info" }
 mz-cluster-client = { path = "../cluster-client" }
+mz-cluster-protocol = { path = "../cluster-protocol" }
 mz-compute-client = { path = "../compute-client" }
 mz-compute-types = { path = "../compute-types" }
 mz-controller-types = { path = "../controller-types" }

@@ -71,7 +71,7 @@ type Token = Arc<()>;
 /// send to the replica, with `Schedule` commands held back or released according to the configured
 /// hydration concurrency.
 #[derive(Debug)]
-pub(super) struct SequentialHydration {
+pub struct SequentialHydration {
     /// Dynamic system configuration.
     dyncfg: Arc<ConfigSet>,
     /// Tracked metrics.

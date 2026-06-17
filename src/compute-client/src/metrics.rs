@@ -32,7 +32,7 @@ use crate::protocol::command::ComputeCommand;
 use crate::protocol::response::{ComputeResponse, PeekResponse};
 
 pub(crate) type Counter = DeleteOnDropCounter<AtomicF64, Vec<String>>;
-pub(crate) type IntCounter = DeleteOnDropCounter<AtomicU64, Vec<String>>;
+pub type IntCounter = DeleteOnDropCounter<AtomicU64, Vec<String>>;
 pub(crate) type UIntGauge = DeleteOnDropGauge<AtomicU64, Vec<String>>;
 type Histogram = DeleteOnDropHistogram<Vec<String>>;
 
@@ -437,12 +437,12 @@ impl ReplicaMetrics {
     }
 
     /// Observe a successful replica connection.
-    pub(crate) fn observe_connect(&self) {
+    pub fn observe_connect(&self) {
         self.inner.replica_connects_total.inc();
     }
 
     /// Observe time spent waiting for a replica connection.
-    pub(crate) fn observe_connect_time(&self, wait_time: Duration) {
+    pub fn observe_connect_time(&self, wait_time: Duration) {
         self.inner
             .replica_connect_wait_time_seconds_total
             .inc_by(wait_time.as_secs_f64());

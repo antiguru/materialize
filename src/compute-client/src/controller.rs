@@ -84,7 +84,7 @@ use crate::protocol::response::{PeekResponse, SubscribeBatch};
 mod instance;
 mod introspection;
 mod replica;
-mod sequential_hydration;
+pub mod sequential_hydration;
 
 pub mod error;
 pub mod instance_client;

@@ -6476,6 +6476,7 @@ dependencies = [
  "itertools 0.14.0",
  "mz-build-info",
  "mz-cluster-client",
+ "mz-cluster-protocol",
  "mz-compute-client",
  "mz-compute-types",
  "mz-controller-types",
