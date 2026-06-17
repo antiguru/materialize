@@ -6307,6 +6307,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mz-cluster-protocol"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "mz-compute-client",
+ "mz-service",
+ "mz-storage-client",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "mz-clusterd"
 version = "26.30.0-dev.0"
 dependencies = [
@@ -6324,6 +6337,7 @@ dependencies = [
  "mz-cloud-resources",
  "mz-cluster",
  "mz-cluster-client",
+ "mz-cluster-protocol",
  "mz-compute",
  "mz-compute-client",
  "mz-dyncfgs",

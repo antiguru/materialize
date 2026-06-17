@@ -21,6 +21,7 @@ use hyper_util::rt::TokioIo;
 use mz_build_info::{BuildInfo, build_info};
 use mz_cloud_resources::AwsExternalIdPrefix;
 use mz_cluster_client::client::TimelyConfig;
+use mz_cluster_protocol::ClusterDemux;
 use mz_compute::server::ComputeInstanceContext;
 use mz_http_util::DynamicFilterTarget;
 use mz_orchestrator_tracing::{StaticTracingConfig, TracingCliArgs};
@@ -55,24 +56,18 @@ pub static VERSION: LazyLock<String> = LazyLock::new(|| BUILD_INFO.human_version
 #[clap(name = "clusterd", version = VERSION.as_str())]
 struct Args {
     // === Connection options. ===
-    /// The address on which to listen for a connection from the storage
+    /// The address on which to listen for a connection from the cluster
     /// controller.
+    ///
+    /// A single connection carries both storage and compute commands on the unified cluster
+    /// protocol; the process demultiplexes them to its storage and compute runtimes.
     #[clap(
         long,
-        env = "STORAGE_CONTROLLER_LISTEN_ADDR",
+        env = "CLUSTER_CONTROLLER_LISTEN_ADDR",
         value_name = "HOST:PORT",
         default_value = "127.0.0.1:2100"
     )]
-    storage_controller_listen_addr: SocketAddr,
-    /// The address on which to listen for a connection from the compute
-    /// controller.
-    #[clap(
-        long,
-        env = "COMPUTE_CONTROLLER_LISTEN_ADDR",
-        value_name = "HOST:PORT",
-        default_value = "127.0.0.1:2101"
-    )]
-    compute_controller_listen_addr: SocketAddr,
+    cluster_controller_listen_addr: SocketAddr,
     /// The address of the internal HTTP server.
     #[clap(
         long,
@@ -411,23 +406,6 @@ async fn run(args: Args) -> Result<(), anyhow::Error> {
         storage_log_writers,
     )
     .await?;
-    info!(
-        "listening for storage controller connections on {}",
-        args.storage_controller_listen_addr
-    );
-    mz_ore::task::spawn(
-        || "storage_server",
-        transport::serve(
-            args.storage_controller_listen_addr,
-            BUILD_INFO.semver_version(),
-            grpc_host.clone(),
-            Duration::MAX,
-            storage_client_builder,
-            cluster_server_metrics.for_server("storage"),
-        )
-        .instrument(info_span!("ctp", name = "storage")),
-    );
-
     // Start compute server.
     let compute_client_builder = mz_compute::server::serve(
         compute_timely_config,
@@ -443,21 +421,27 @@ async fn run(args: Args) -> Result<(), anyhow::Error> {
         storage_log_readers,
     )
     .await?;
+
+    // Start the unified cluster server. A single connection carries both storage and compute
+    // commands as a totally-ordered stream; `ClusterDemux` splits them back into the storage and
+    // compute server handlers, which still drive separate timely runtimes.
     info!(
-        "listening for compute controller connections on {}",
-        args.compute_controller_listen_addr
+        "listening for cluster controller connections on {}",
+        args.cluster_controller_listen_addr
     );
+    let cluster_client_builder =
+        move || ClusterDemux::new(storage_client_builder(), compute_client_builder());
     mz_ore::task::spawn(
-        || "compute_server",
+        || "cluster_server",
         transport::serve(
-            args.compute_controller_listen_addr,
+            args.cluster_controller_listen_addr,
             BUILD_INFO.semver_version(),
             grpc_host.clone(),
             Duration::MAX,
-            compute_client_builder,
-            cluster_server_metrics.for_server("compute"),
+            cluster_client_builder,
+            cluster_server_metrics.for_server("cluster"),
         )
-        .instrument(info_span!("ctp", name = "compute")),
+        .instrument(info_span!("ctp", name = "cluster")),
     );
 
     // TODO: unify storage and compute servers to use one timely cluster.
