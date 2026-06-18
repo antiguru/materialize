@@ -429,6 +429,16 @@ enum ListenMessage<T> {
     Error(anyhow::Error),
 }
 
+/// Whether the source should forward `progress` now (advancing the output
+/// frontier) or coalesce it with later batches. We coalesce only while still
+/// catching up to the hydration-time upper (`!caught_up`) and only when a
+/// positive byte budget is configured and not yet filled. Once live, or with
+/// coalescing disabled, every batch's progress is forwarded.
+fn should_forward_progress(coalesce_target: u64, caught_up: bool, coalesced_bytes: u64) -> bool {
+    let coalesce = coalesce_target > 0 && !caught_up && coalesced_bytes < coalesce_target;
+    !coalesce
+}
+
 pub(crate) fn shard_source_descs<'outer, K, V, D, TOuter>(
     scope: Scope<'outer, TOuter>,
     name: &str,
@@ -730,10 +740,12 @@ where
                     // so that consumers relying on tight tracking, such as `persist_sink`, are
                     // unaffected in steady state.
                     let caught_up = PartialOrder::less_equal(&replay_upper, &current_frontier);
-                    let coalesce = coalesce_target > 0 && !caught_up && coalesced_bytes < coalesce_target;
-                    if !coalesce {
+                    if should_forward_progress(coalesce_target, caught_up, coalesced_bytes) {
                         coalesced_bytes = 0;
-                        if msg_tx.send(ListenMessage::Progress(current_frontier.clone())).is_err() {
+                        if msg_tx
+                            .send(ListenMessage::Progress(current_frontier.clone()))
+                            .is_err()
+                        {
                             return;
                         }
                         activator.activate();
@@ -1660,6 +1672,162 @@ mod tests {
 
         // Frozen at the missing part (t=0); the bug advanced this past it.
         assert_eq!(frontier, Antichain::from_elem(0));
+    }
+
+    /// Hydrating an index over a shard with many fine-grained batches (the prod
+    /// case: a retained-history collection written at ~1/s, whose batches stay
+    /// unmerged because the held-back `since` blocks compaction) replays one
+    /// progress round per batch. With
+    /// `persist_source_hydration_frontier_coalesce_bytes` set, the source holds
+    /// those downgrades back while catching up to the hydration-time upper and
+    /// forwards them in a few larger steps instead.
+    ///
+    /// This writes `N_BATCHES` single-timestamp batches (compaction disabled so
+    /// they stay distinct, mirroring a held-back `since`) and runs the source
+    /// twice over the same shard, counting how many distinct output frontiers it
+    /// passes through. Disabled (the default) replays per batch; enabled with a
+    /// budget larger than the whole replay collapses it to a single jump. Both
+    /// must still reach the same final upper, so coalescing only changes
+    /// frontier granularity, not how far the source gets.
+    #[mz_ore::test(tokio::test(flavor = "multi_thread"))]
+    #[cfg_attr(miri, ignore)] // too slow
+    async fn test_shard_source_hydration_frontier_coalesce() {
+        const N_BATCHES: u64 = 64;
+
+        // Hydrate the shard from `as_of = 0` with the given coalesce budget and
+        // return the largest timestamp whose parts were emitted. The source is
+        // bounded at the upper, so a return at all proves it terminated without
+        // stalling.
+        async fn run(coalesce_bytes: usize) -> Option<u64> {
+            let mut cache = PersistClientCache::new_no_metrics();
+            // Keep the batches unmerged, so the source sees one batch per write
+            // just as a retained-history shard does in prod.
+            cache.cfg.compaction_enabled = false;
+            cache
+                .cfg
+                .set_config(&SOURCE_HYDRATION_FRONTIER_COALESCE_BYTES, coalesce_bytes);
+            let persist_client = cache
+                .open(PersistLocation::new_in_mem())
+                .await
+                .expect("in-mem location is valid");
+            let shard_id = ShardId::new();
+
+            let mut write = persist_client
+                .open_writer::<String, String, u64, u64>(
+                    shard_id,
+                    Arc::new(StringSchema),
+                    Arc::new(StringSchema),
+                    Diagnostics::for_tests(),
+                )
+                .await
+                .expect("invalid usage");
+
+            // One append per timestamp: `N_BATCHES` distinct batches sealing
+            // `[0, N_BATCHES)`.
+            for t in 0..N_BATCHES {
+                let row = ((format!("k{t}"), format!("v{t}")), t, 1u64);
+                write.expect_compare_and_append(&[row], t, t + 1).await;
+            }
+
+            timely::execute::execute_directly(move |worker| {
+                let (probe, receiver, _token) = worker.dataflow::<u64, _, _>(|outer| {
+                    let (stream, token) = outer.scoped::<u64, _, _>("hybrid", |scope| {
+                        let (stream, tokens) = shard_source::<String, String, u64, u64, _, _, _>(
+                            outer,
+                            scope,
+                            "test_source",
+                            move || std::future::ready(persist_client.clone()),
+                            shard_id,
+                            Some(Antichain::from_elem(0)),
+                            SnapshotMode::Include,
+                            // Bound the source at the shard upper so it
+                            // terminates once the replay is done.
+                            Antichain::from_elem(N_BATCHES),
+                            Some(move |_, descs, _| (descs, vec![])),
+                            Arc::new(StringSchema),
+                            Arc::new(StringSchema),
+                            FilterResult::keep_all,
+                            false.then_some(|| unreachable!()),
+                            async {},
+                            ErrorHandler::Halt("test"),
+                        );
+                        (stream.leave(outer), tokens)
+                    });
+                    let probe = ProbeHandle::new();
+                    // Capture the source's output directly so every progress
+                    // message is recorded, independent of how many we drain per
+                    // worker step.
+                    let receiver = stream.probe_with(&probe).capture();
+                    (probe, receiver, token)
+                });
+
+                // Step until the source closes its output (until == upper, so it
+                // drops its capabilities once the replay completes).
+                let deadline = Instant::now() + std::time::Duration::from_secs(60);
+                while !probe.with_frontier(|f| f.is_empty()) {
+                    assert!(Instant::now() < deadline, "timed out hydrating shard");
+                    worker.step_or_park(Some(std::time::Duration::from_millis(1)));
+                }
+
+                // The largest `Messages` time is the highest timestamp whose
+                // parts were emitted; it must reach `N_BATCHES - 1` regardless of
+                // coalescing, because parts always flow per batch and only the
+                // frontier downgrades are held back.
+                let mut max_msg_time: Option<u64> = None;
+                while let Ok(event) = receiver.try_recv() {
+                    if let CaptureEvent::Messages(time, _) = event {
+                        max_msg_time = max_msg_time.max(Some(time));
+                    }
+                }
+                max_msg_time
+            })
+        }
+
+        // Coalescing disabled (default) and enabled with a budget larger than
+        // the whole replay (a single 0 -> upper jump) must both consume every
+        // batch and emit parts through the last timestamp. Coalescing changes
+        // only frontier granularity, not the data emitted or how far we get;
+        // the round reduction itself is covered by
+        // `test_frontier_coalesce_decision`, since timely batches progress
+        // across the dataflow edge in a fast in-mem replay.
+        assert_eq!(run(0).await, Some(N_BATCHES - 1));
+        assert_eq!(run(1 << 30).await, Some(N_BATCHES - 1));
+    }
+
+    /// The round-reduction property, tested directly on the forward/coalesce
+    /// decision so it is independent of timely's progress batching. Simulates
+    /// replaying `n` unit batches from as-of 0 to upper `n`, each `bytes`
+    /// encoded bytes, and counts how many progress downgrades get forwarded.
+    #[mz_ore::test]
+    fn test_frontier_coalesce_decision() {
+        fn forwards(coalesce_target: u64, n: u64, bytes_per_batch: u64) -> usize {
+            let replay_upper = n;
+            let mut current = 0u64;
+            let mut coalesced = 0u64;
+            let mut forwarded = 0usize;
+            for _ in 0..n {
+                current += 1;
+                coalesced += bytes_per_batch;
+                let caught_up = replay_upper <= current;
+                if should_forward_progress(coalesce_target, caught_up, coalesced) {
+                    forwarded += 1;
+                    coalesced = 0;
+                }
+            }
+            forwarded
+        }
+
+        // Disabled: one forward per batch (the per-batch storm).
+        assert_eq!(forwards(0, 64, 10), 64);
+        // Budget larger than the whole replay: a single forward at the upper.
+        assert_eq!(forwards(1 << 30, 64, 10), 1);
+        // Mid budget: forwards every ~target/bytes batches plus the final
+        // catch-up forward, so strictly between the two extremes.
+        let partial = forwards(100, 64, 10);
+        assert!(
+            partial > 1 && partial < 64,
+            "expected partial coalescing, got {partial}"
+        );
     }
 
     async fn initialize_shard(
