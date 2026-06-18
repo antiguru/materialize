@@ -137,6 +137,7 @@ use arrow::array::ArrayRef;
 use differential_dataflow::Hashable;
 use differential_dataflow::difference::Monoid;
 use differential_dataflow::lattice::Lattice;
+use futures::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use mz_ore::cast::CastFrom;
 use mz_persist_types::stats::PartStats;
@@ -156,7 +157,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tracing::{debug, trace};
 
 use crate::batch::BLOB_TARGET_SIZE;
-use crate::cfg::{RetryParameters, USE_CRITICAL_SINCE_SOURCE};
+use crate::cfg::{RetryParameters, SOURCE_FETCH_CONCURRENCY, USE_CRITICAL_SINCE_SOURCE};
 use crate::fetch::{ExchangeableBatchPart, FetchedBlob, Lease};
 use crate::internal::paths::BlobKey;
 use crate::internal::state::BatchPart;
@@ -891,8 +892,13 @@ where
             handle_purpose: format!("shard_source_fetch batch fetcher {}", name_owned),
         };
         async move {
-            let mut fetcher = client
-                .await
+            let client = client.await;
+            // Up to this many part fetches run concurrently to amortize the
+            // blob-store round-trip. The downstream operator keys results by
+            // time, so completions in any order are fine; total in-flight bytes
+            // stay bounded by the fetch semaphore inside `fetch_leased_part`.
+            let max_concurrency = SOURCE_FETCH_CONCURRENCY.get(client.dyncfgs()).max(1);
+            let fetcher = client
                 .create_batch_fetcher::<K, V, T, D>(
                     shard_id,
                     key_schema,
@@ -902,35 +908,65 @@ where
                 )
                 .await
                 .expect("shard codecs should not change");
-            while let Some((time, part)) = desc_rx.recv().await {
-                let reader_id = part.reader_id().clone();
-                let fetched = fetcher
-                    .fetch_leased_part(part)
-                    .await
-                    .expect("shard_id should match across all workers");
-                let fetched = match fetched {
-                    Ok(fetched) => Ok(fetched),
-                    Err(blob_key) => {
-                        // Ideally, readers should never encounter a missing blob. They place a
-                        // seqno hold as they consume their snapshot/listen, preventing any blobs
-                        // they need from being deleted by garbage collection, and all blob
-                        // implementations are linearizable so there should be no possibility of
-                        // stale reads.
-                        //
-                        // However, it is possible for a lease to expire given a sustained period
-                        // of downtime, which could allow parts we expect to exist to be
-                        // deleted... at which point our best option is to request a restart.
-                        // Check the state of the minting reader's lease to tell the two cases
-                        // apart.
-                        let diagnostics = fetcher.missing_blob_diagnostics(&reader_id).await;
-                        Err((blob_key, diagnostics))
-                    }
-                };
-                if blob_tx.send((time, fetched)).is_err() {
-                    // The operator is gone; stop fetching.
-                    return;
+
+            // Fetch one part on a per-call clone of the fetcher (cheap: shares
+            // the schema cache), returning the part's mint time with the result.
+            let fetch_one = |time: TInner, part: ExchangeableBatchPart<T>| {
+                let mut fetcher = fetcher.clone();
+                async move {
+                    let reader_id = part.reader_id().clone();
+                    let fetched = fetcher
+                        .fetch_leased_part(part)
+                        .await
+                        .expect("shard_id should match across all workers");
+                    let fetched = match fetched {
+                        Ok(fetched) => Ok(fetched),
+                        Err(blob_key) => {
+                            // Ideally, readers should never encounter a missing blob. They place a
+                            // seqno hold as they consume their snapshot/listen, preventing any blobs
+                            // they need from being deleted by garbage collection, and all blob
+                            // implementations are linearizable so there should be no possibility of
+                            // stale reads.
+                            //
+                            // However, it is possible for a lease to expire given a sustained period
+                            // of downtime, which could allow parts we expect to exist to be
+                            // deleted... at which point our best option is to request a restart.
+                            // Check the state of the minting reader's lease to tell the two cases
+                            // apart.
+                            let diagnostics = fetcher.missing_blob_diagnostics(&reader_id).await;
+                            Err((blob_key, diagnostics))
+                        }
+                    };
+                    (time, fetched)
                 }
-                activator.activate();
+            };
+
+            let mut in_flight = FuturesUnordered::new();
+            let mut descs_open = true;
+            loop {
+                tokio::select! {
+                    // Emit completed fetches first, so `in_flight` drains and we
+                    // do not hold more than `max_concurrency` parts in memory.
+                    biased;
+                    Some((time, fetched)) = in_flight.next(), if !in_flight.is_empty() => {
+                        if blob_tx.send((time, fetched)).is_err() {
+                            // The operator is gone; stop fetching.
+                            return;
+                        }
+                        activator.activate();
+                    }
+                    // Accept new descs while below the concurrency cap.
+                    maybe = desc_rx.recv(), if descs_open && in_flight.len() < max_concurrency => {
+                        match maybe {
+                            Some((time, part)) => in_flight.push(fetch_one(time, part)),
+                            None => descs_open = false,
+                        }
+                    }
+                    else => break,
+                }
+                if !descs_open && in_flight.is_empty() {
+                    break;
+                }
             }
         }
     })
@@ -1622,6 +1658,219 @@ mod tests {
 
         // Frozen at the missing part (t=0); the bug advanced this past it.
         assert_eq!(frontier, Antichain::from_elem(0));
+    }
+
+    /// With `persist_source_fetch_concurrency > 1` the source still fetches
+    /// every part and reaches the shard upper. The frontier can only reach the
+    /// upper once every part's fetch has completed, so this proves the
+    /// concurrent path loses nothing even though results complete out of order.
+    #[mz_ore::test(tokio::test(flavor = "multi_thread"))]
+    #[cfg_attr(miri, ignore)] // too slow
+    async fn test_shard_source_fetch_concurrent() {
+        const N_BATCHES: u64 = 16;
+
+        let mut cache = PersistClientCache::new_no_metrics();
+        cache.cfg.compaction_enabled = false;
+        cache.cfg.set_config(&SOURCE_FETCH_CONCURRENCY, 8);
+        let persist_client = cache
+            .open(PersistLocation::new_in_mem())
+            .await
+            .expect("in-mem location is valid");
+        let shard_id = ShardId::new();
+
+        let mut write = persist_client
+            .open_writer::<String, String, u64, u64>(
+                shard_id,
+                Arc::new(StringSchema),
+                Arc::new(StringSchema),
+                Diagnostics::for_tests(),
+            )
+            .await
+            .expect("invalid usage");
+        for t in 0..N_BATCHES {
+            let row = ((format!("k{t}"), format!("v{t}")), t, 1u64);
+            write.expect_compare_and_append(&[row], t, t + 1).await;
+        }
+
+        let (blob_count, max_time) = timely::execute::execute_directly(move |worker| {
+            let (capture, probe, token) = worker.dataflow::<u64, _, _>(|outer| {
+                let (stream, token) = outer.scoped::<u64, _, _>("hybrid", |scope| {
+                    let (stream, tokens) = shard_source::<String, String, u64, u64, _, _, _>(
+                        outer,
+                        scope,
+                        "test_source",
+                        move || std::future::ready(persist_client.clone()),
+                        shard_id,
+                        Some(Antichain::from_elem(0)),
+                        SnapshotMode::Include,
+                        Antichain::from_elem(N_BATCHES),
+                        Some(move |_, descs, _| (descs, vec![])),
+                        Arc::new(StringSchema),
+                        Arc::new(StringSchema),
+                        FilterResult::keep_all,
+                        false.then_some(|| unreachable!()),
+                        async {},
+                        ErrorHandler::Halt("test"),
+                    );
+                    (stream.leave(outer), tokens)
+                });
+                let probe = ProbeHandle::new();
+                let stream = stream.probe_with(&probe);
+                (stream.capture(), probe, token)
+            });
+
+            // The source is bounded at the upper, so its frontier empties only
+            // once every part's fetch has completed; reaching the empty frontier
+            // proves the concurrent path lost nothing.
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !probe.with_frontier(|f| f.is_empty()) {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for completion"
+                );
+                worker.step_or_park(Some(std::time::Duration::from_millis(1)));
+            }
+            drop(token);
+
+            let mut blob_count = 0;
+            let mut max_time: Option<u64> = None;
+            while let Ok(event) = capture.try_recv() {
+                if let CaptureEvent::Messages(time, msgs) = event {
+                    blob_count += msgs.len();
+                    max_time = max_time.max(Some(time));
+                }
+            }
+            (blob_count, max_time)
+        });
+
+        assert!(blob_count >= 1, "expected at least one fetched blob");
+        // Parts were emitted through the last timestamp.
+        assert_eq!(max_time, Some(N_BATCHES - 1));
+    }
+
+    /// Fetch-path freeze under concurrency: with several fetches in flight, a
+    /// missing *middle* batch must still freeze the frontier at that batch, even
+    /// though later batches fetch fine and may complete before the error is
+    /// observed. This is the out-of-order analogue of
+    /// `test_shard_source_fetch_error_freeze`; it exercises the time-keyed
+    /// capability bookkeeping the concurrent task relies on.
+    #[mz_ore::test(tokio::test(flavor = "multi_thread"))]
+    #[cfg_attr(miri, ignore)] // too slow
+    async fn test_shard_source_fetch_concurrent_error_freeze() {
+        const N_BATCHES: u64 = 12;
+        const MISSING_TS: u64 = 5;
+
+        let mut cache = PersistClientCache::new_no_metrics();
+        cache.cfg.compaction_enabled = false;
+        cache.cfg.set_config(&INLINE_WRITES_SINGLE_MAX_BYTES, 0);
+        cache.cfg.set_config(&INLINE_WRITES_TOTAL_MAX_BYTES, 0);
+        cache.cfg.set_config(&SOURCE_FETCH_CONCURRENCY, 8);
+        let persist_client = cache
+            .open(PersistLocation::new_in_mem())
+            .await
+            .expect("in-mem location is valid");
+        let shard_id = ShardId::new();
+        let blob = Arc::clone(&persist_client.blob);
+
+        let mut write = persist_client
+            .open_writer::<String, String, u64, u64>(
+                shard_id,
+                Arc::new(StringSchema),
+                Arc::new(StringSchema),
+                Diagnostics::for_tests(),
+            )
+            .await
+            .expect("invalid usage");
+
+        async fn batch_keys(blob: &dyn Blob) -> std::collections::BTreeSet<String> {
+            let mut keys = std::collections::BTreeSet::new();
+            blob.list_keys_and_metadata("", &mut |meta| {
+                if let Ok((_, PartialBlobKey::Batch(..))) = BlobKey::parse_ids(meta.key) {
+                    keys.insert(meta.key.to_owned());
+                }
+            })
+            .await
+            .expect("list keys");
+            keys
+        }
+
+        // Write each batch, snapshotting the blob keys around the missing one so
+        // we can delete exactly its part(s).
+        let mut missing = Vec::new();
+        for t in 0..N_BATCHES {
+            let before = batch_keys(blob.as_ref()).await;
+            let row = ((format!("k{t}"), format!("v{t}")), t, 1u64);
+            write.expect_compare_and_append(&[row], t, t + 1).await;
+            if t == MISSING_TS {
+                let after = batch_keys(blob.as_ref()).await;
+                missing = after.difference(&before).cloned().collect();
+            }
+        }
+        assert!(!missing.is_empty(), "missing batch wrote no blob part");
+        for key in &missing {
+            blob.delete(key).await.expect("delete");
+        }
+
+        let frontier = timely::execute::execute_directly(move |worker| {
+            let errored = Rc::new(std::cell::Cell::new(false));
+            let error_handler = ErrorHandler::signal({
+                let errored = Rc::clone(&errored);
+                move |_err| errored.set(true)
+            });
+
+            let (probe, _token) = worker.dataflow::<u64, _, _>(|outer| {
+                let (stream, token) = outer.scoped::<u64, _, _>("hybrid", |scope| {
+                    let (stream, tokens) = shard_source::<String, String, u64, u64, _, _, _>(
+                        outer,
+                        scope,
+                        "test_source",
+                        move || std::future::ready(persist_client.clone()),
+                        shard_id,
+                        Some(Antichain::from_elem(0)),
+                        SnapshotMode::Include,
+                        Antichain::from_elem(N_BATCHES),
+                        Some(move |_, descs, _| (descs, vec![])),
+                        Arc::new(StringSchema),
+                        Arc::new(StringSchema),
+                        FilterResult::keep_all,
+                        false.then_some(|| unreachable!()),
+                        async {},
+                        error_handler,
+                    );
+                    (stream.leave(outer), tokens)
+                });
+                let probe = ProbeHandle::new();
+                stream.probe_with(&probe);
+                (probe, token)
+            });
+
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !errored.get() {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for fetch error"
+                );
+                worker.step_or_park(Some(std::time::Duration::from_millis(1)));
+            }
+            let mut last = probe.with_frontier(|f| f.to_owned());
+            let mut stable = 0;
+            while stable < 100 {
+                assert!(Instant::now() < deadline, "timed out waiting for quiesce");
+                worker.step_or_park(Some(std::time::Duration::from_millis(1)));
+                let now = probe.with_frontier(|f| f.to_owned());
+                if now == last {
+                    stable += 1;
+                } else {
+                    stable = 0;
+                    last = now;
+                }
+            }
+            last
+        });
+
+        // Frozen at the missing batch despite later batches fetching fine
+        // concurrently.
+        assert_eq!(frontier, Antichain::from_elem(MISSING_TS));
     }
 
     async fn initialize_shard(
