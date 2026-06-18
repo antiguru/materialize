@@ -156,7 +156,9 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tracing::{debug, trace};
 
 use crate::batch::BLOB_TARGET_SIZE;
-use crate::cfg::{RetryParameters, USE_CRITICAL_SINCE_SOURCE};
+use crate::cfg::{
+    RetryParameters, SOURCE_HYDRATION_FRONTIER_COALESCE_BYTES, USE_CRITICAL_SINCE_SOURCE,
+};
 use crate::fetch::{ExchangeableBatchPart, FetchedBlob, Lease};
 use crate::internal::paths::BlobKey;
 use crate::internal::state::BatchPart;
@@ -561,6 +563,13 @@ where
                     SnapshotMode::Exclude => vec![],
                 };
 
+                // Recent shard upper observed at hydration time. While the source is still
+                // catching up to it we coalesce frontier downgrades (see the loop below); once
+                // `current_frontier` reaches it the source is live and we forward every batch's
+                // progress so steady-state frontier tracking stays tight. Read before `listen`
+                // consumes `read`.
+                let replay_upper = read.machine.applier.clone_upper();
+
                 let mut listen = match read.listen(as_of.clone()).await {
                     Ok(handle) => handle,
                     Err(e) => {
@@ -603,6 +612,17 @@ where
                 // All future updates will be timestamped after this frontier.
                 let mut current_frontier = as_of.clone();
 
+                // While catching up to `replay_upper`, coalesce frontier downgrades until at
+                // least this many encoded bytes have been emitted at the held capability. This
+                // turns a long historical replay (one persist batch ~ one write ~ 1/s) from one
+                // progress round per batch into a handful of larger steps, which is what bounds
+                // the number of downstream arrangement-maintenance passes. `0` disables it. The
+                // budget caps how much the downstream batcher stages before it can seal, so we
+                // never trade the per-batch storm for an unbounded single batch.
+                let coalesce_target = u64::cast_from(SOURCE_HYDRATION_FRONTIER_COALESCE_BYTES.get(&cfg));
+                // Encoded bytes emitted since the last forwarded progress.
+                let mut coalesced_bytes: u64 = 0;
+
                 // If `until.less_equal(current_frontier)`, it means that all subsequent batches
                 // will contain only times greater or equal to `until`, which means they can be
                 // dropped in their entirety.
@@ -613,6 +633,7 @@ where
                         .as_option()
                         .expect("until should always be <= the empty frontier");
 
+                    let mut batch_bytes: u64 = 0;
                     let mut out = Vec::with_capacity(parts.len());
                     for mut part_desc in parts {
                         // TODO: Push more of this logic into LeasedBatchPart like we've
@@ -681,6 +702,9 @@ where
                         // There's certainly some other things we could be doing instead here, but
                         // this has seemed to work okay so far. Continue to revisit as necessary.
                         let worker_idx = usize::cast_from(Instant::now().hashed()) % num_workers;
+                        batch_bytes = batch_bytes.saturating_add(u64::cast_from(
+                            part_desc.encoded_size_bytes(),
+                        ));
                         let (part, lease) = part_desc.into_exchangeable_part();
                         out.push((worker_idx, part, lease));
                     }
@@ -696,10 +720,24 @@ where
                     }
 
                     current_frontier.join_assign(&progress);
-                    if msg_tx.send(ListenMessage::Progress(progress)).is_err() {
-                        return;
+                    coalesced_bytes = coalesced_bytes.saturating_add(batch_bytes);
+
+                    // Forward the progress (advancing the output frontier) unless we are still
+                    // catching up to `replay_upper` and have not yet filled a coalesce batch. The
+                    // emitted parts already carry their real timestamps, so holding the frontier
+                    // back never drops or reorders data; it only batches the downstream progress
+                    // rounds. We always forward once we reach `replay_upper` (the source is live)
+                    // so that consumers relying on tight tracking, such as `persist_sink`, are
+                    // unaffected in steady state.
+                    let caught_up = PartialOrder::less_equal(&replay_upper, &current_frontier);
+                    let coalesce = coalesce_target > 0 && !caught_up && coalesced_bytes < coalesce_target;
+                    if !coalesce {
+                        coalesced_bytes = 0;
+                        if msg_tx.send(ListenMessage::Progress(current_frontier.clone())).is_err() {
+                            return;
+                        }
+                        activator.activate();
                     }
-                    activator.activate();
                 }
 
                 // Signal completion: all subsequent parts would be filtered by `until`.
