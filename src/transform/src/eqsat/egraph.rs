@@ -644,6 +644,7 @@ fn unify_tuple(
 fn generic_join(
     query: &Query,
     index: &HashMap<Sym, Vec<(Id, ENode)>>,
+    all_ids: &HashSet<Id>,
     limit: usize,
 ) -> Vec<HashMap<VarId, Id>> {
     // Variable order: most-constrained-first (appears in the most atoms).
@@ -662,6 +663,7 @@ fn generic_join(
     solve(
         query,
         index,
+        all_ids,
         &order,
         0,
         &mut assignment,
@@ -675,6 +677,7 @@ fn generic_join(
 fn solve(
     query: &Query,
     index: &HashMap<Sym, Vec<(Id, ENode)>>,
+    all_ids: &HashSet<Id>,
     order: &[VarId],
     depth: usize,
     assignment: &mut HashMap<VarId, Id>,
@@ -697,6 +700,10 @@ fn solve(
     let var = order[depth];
 
     // Intersect candidate values for `var` across every atom that mentions it.
+    // A variable with no constraining atoms is unconstrained and ranges over
+    // all e-class IDs — this is what allows pure-RelVar LHS patterns (rules
+    // whose entire left-hand side is a single relation metavariable, with the
+    // condition doing all the work) to enumerate candidates.
     let mut candidates: Option<HashSet<Id>> = None;
     for atom in &query.atoms {
         if !atom.slots.contains(&var) {
@@ -722,7 +729,10 @@ fn solve(
         }
     }
 
-    let candidates = candidates.unwrap_or_default();
+    // When no atom mentions this variable, fall back to all e-class IDs so that
+    // pure-RelVar patterns (e.g. `r => Empty(r) where unsatisfiable(r)`) can
+    // fire on any class.
+    let candidates = candidates.unwrap_or_else(|| all_ids.clone());
     for val in candidates {
         if out.len() >= limit {
             break;
@@ -731,6 +741,7 @@ fn solve(
         solve(
             query,
             index,
+            all_ids,
             order,
             depth + 1,
             assignment,
@@ -918,6 +929,10 @@ impl EGraph {
                 break;
             }
             let index = self.index();
+            // The canonical set of all e-class IDs, used by the generic join
+            // to enumerate candidates for unconstrained relation metavariables
+            // (pure-RelVar LHS patterns such as `r => Empty(r) where ...`).
+            let all_ids: HashSet<Id> = self.classes.keys().copied().collect();
 
             // Phase 1: read-only — collect every rewrite to apply.
             let analyses = Analyses {
@@ -944,7 +959,7 @@ impl EGraph {
                 // Enumerate at most `MATCH_LIMIT` matches. Asking for one extra
                 // lets us detect that the rule hit the cap (explosive) and ban
                 // it for a growing number of iterations.
-                let assignments = generic_join(query, &index, MATCH_LIMIT + 1);
+                let assignments = generic_join(query, &index, &all_ids, MATCH_LIMIT + 1);
                 if assignments.len() > MATCH_LIMIT {
                     banned_until[qi] = iter + ban_len[qi];
                     ban_len[qi] = ban_len[qi].saturating_mul(2);
@@ -1113,6 +1128,14 @@ impl EGraph {
                         .any(|n| matches!(n, ENode::Constant { card: 0, .. }))
                 })
             }),
+            Cond::Unsatisfiable { rel } => {
+                let Some(&id) = b.rels.get(rel) else {
+                    return false;
+                };
+                // `None` already means the relation is empty; this rule fires
+                // on the new fact: Some(ec) where ec itself is contradictory.
+                matches!(an.eq.get(&self.find(id)), Some(Some(ec)) if ec.unsatisfiable())
+            }
         })
     }
 

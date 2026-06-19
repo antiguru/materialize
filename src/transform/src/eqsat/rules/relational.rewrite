@@ -246,6 +246,15 @@ rule empty_false_filter {
     where any_false(p)
 }
 
+# A relation whose equivalences are contradictory (two distinct literals forced
+# equal by the equivalences analysis, e.g. `#0 = 1 AND #0 = 2`) is empty.
+# `Empty(r)` is a Constant with r's arity.
+rule collapse_unsatisfiable {
+    doc "r = 0  when r's equivalences are unsatisfiable"
+    r => Empty(r)
+    where unsatisfiable(r)
+}
+
 # A Map that only appends bare column references just copies columns, so it is a
 # projection: keep all of r's columns (iota(|r|)) then the copied ones
 # (cols_of(s)). Mirrors canonicalization/projection_extraction.

@@ -86,6 +86,18 @@ Map (1 + 1)
 Map (2)
   Get t0
 
+# Case (g): contradictory equivalences collapse to empty.
+#
+# The filter has two predicates #0 = 1 and #0 = 2. The equivalences analysis
+# places them in one class [#0 = 1, #0 = 2, true], which after minimize
+# yields class [#0, 1, 2]: two distinct literals forced equal, unsatisfiable.
+# The `collapse_unsatisfiable` rule rewrites any such relation to Empty.
+apply pipeline=eqsat
+Filter ((#0 = 1) AND (#0 = 2))
+  Get t0
+----
+Constant <empty>
+
 # Case (f): equivalence-canonical scalar rewriting.
 #
 # The Filter establishes #0 = #1. The Map computes #1 + 1 over that input.

@@ -300,6 +300,12 @@ impl Parser {
                 self.expect(&Tok::RParen)?;
                 Ok(Cond::NotRelEmpty { rel })
             }
+            "unsatisfiable" => {
+                self.expect(&Tok::LParen)?;
+                let rel = self.ident()?;
+                self.expect(&Tok::RParen)?;
+                Ok(Cond::Unsatisfiable { rel })
+            }
             "all_true" | "any_false" | "all_columns" | "no_false" => {
                 self.expect(&Tok::LParen)?;
                 let payload = self.ident()?;

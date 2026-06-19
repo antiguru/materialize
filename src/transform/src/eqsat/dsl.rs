@@ -228,6 +228,12 @@ pub enum Cond {
     /// class merges that cause `merge_filters` to grow predicate lists without
     /// bound.
     NotRelEmpty { rel: String },
+    /// `unsatisfiable(rel)`: the equivalence analysis for the bound relation
+    /// contains a contradiction: some equivalence class has two distinct
+    /// non-error literals forced equal (e.g. `#0 = 1` and `#0 = 2` in one
+    /// filter). Any relation with contradictory equivalences is empty, so it
+    /// can be replaced by `Empty(rel)`.
+    Unsatisfiable { rel: String },
 }
 
 /// One rewrite rule.
