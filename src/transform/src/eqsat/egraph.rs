@@ -987,8 +987,12 @@ impl EGraph {
                     continue;
                 }
                 // analyses.eq is keyed by canonical IDs from the last rebuild.
-                // Before any mutation in this iteration, self.find(*canon_id) ==
-                // *canon_id, so self.classes[canon_id] is the right entry.
+                // A union earlier in this same loop can merge one of those
+                // classes into another, after which its id is no longer a key in
+                // self.classes. So each canon_id either still resolves to its own
+                // class (untouched so far this iteration) or has been subsumed, in
+                // which case the lookup misses and we skip it. A skipped class is
+                // recovered on the next saturation iteration.
                 let Some(nodes) = self.classes.get(canon_id) else {
                     continue;
                 };
