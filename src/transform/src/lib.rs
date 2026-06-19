@@ -804,9 +804,11 @@ impl Optimizer {
             }),
         ];
         // 6. Equality-saturation pass (experimental, default off). Run it after
-        //    the logical fixpoints so they do not clobber the plan it produces
-        //    (in particular a join it commits to a delta implementation), and
-        //    before the final Typecheck so its output is validated.
+        //    the logical fixpoints so they do not clobber the structural rewrites
+        //    it produces, and before the final Typecheck so its output is
+        //    validated. This is the logical phase, so the pass must leave all
+        //    joins `Unimplemented`: physical join planning (and the
+        //    ProjectionPushdown that runs right after this optimizer) require it.
         if ctx.features.enable_eqsat_optimizer {
             transforms.push(Box::new(eqsat::EqSatTransform));
         }

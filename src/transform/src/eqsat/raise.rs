@@ -27,7 +27,14 @@ use crate::eqsat::ir::{EScalar, Rel};
 /// Scalars are read directly off their `MirScalarExpr` payloads. `Rel::Opaque`
 /// leaves re-emit their stored subtree verbatim. Local `Get`s return the
 /// original node carried at lower time, preserving their exact type.
-pub fn raise(rel: &Rel) -> MirRelationExpr {
+/// Raise an extracted [`Rel`] back to a [`MirRelationExpr`].
+///
+/// When `commit_wcoj` is set, a [`Rel::WcoJoin`] is committed to a `DeltaQuery`
+/// implementation via the real delta planner (physical-phase output). When it
+/// is clear, the same node is raised as a plain `Unimplemented` join, which is
+/// the only form valid in the logical optimizer.
+pub fn raise(rel: &Rel, commit_wcoj: bool) -> MirRelationExpr {
+    let raise = |r: &Rel| raise(r, commit_wcoj);
     match rel {
         Rel::Opaque(m) => (**m).clone(),
         Rel::LocalGet { get, id, .. } => {
@@ -118,6 +125,13 @@ pub fn raise(rel: &Rel) -> MirRelationExpr {
                 inputs.iter().map(raise).collect(),
                 equivalences.iter().map(|class| resolve(class)).collect(),
             );
+            if !commit_wcoj {
+                // Logical-phase output: leave the join `Unimplemented`. The delta
+                // commitment below produces physical-phase structure (arranged
+                // inputs, filled implementation) that is invalid before
+                // JoinImplementation.
+                return join;
+            }
             // Reuse the real delta planner. If planning fails (the join folded
             // to a non-join, or the graph is not connected), fall back to the
             // plain join and let JoinImplementation choose.
@@ -171,7 +185,9 @@ mod tests {
     /// Lower then raise and assert structural identity.
     fn roundtrip(r: MirRelationExpr) {
         let rel = lower(&r);
-        let back = raise(&rel);
+        // These round-trips never involve a WcoJoin (lowering never emits one),
+        // so `commit_wcoj` is irrelevant here.
+        let back = raise(&rel, true);
         assert_eq!(back, r, "round-trip changed the plan");
     }
 

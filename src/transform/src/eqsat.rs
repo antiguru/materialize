@@ -47,12 +47,30 @@ pub fn default_ruleset() -> dsl::RuleSet {
 
 /// Optimize `expr` by equality saturation over the supported relational subset,
 /// bailing per-subtree on unsupported variants. Functionally equivalent output.
+///
+/// Commits a worst-case-optimal join to a `DeltaQuery` implementation via the
+/// real delta planner. The output therefore carries filled-in join
+/// implementations and physical-phase structure (arranged inputs, lifted MFPs),
+/// so it is only valid after `JoinImplementation`. The live logical-phase
+/// transform uses [`optimize_logical`] instead.
 pub fn optimize(expr: MirRelationExpr) -> MirRelationExpr {
+    optimize_inner(expr, true)
+}
+
+/// Like [`optimize`], but emits worst-case-optimal joins as plain
+/// `Unimplemented` joins rather than committing them to `DeltaQuery`. The output
+/// carries only logical-phase structure (no arranged inputs, no filled
+/// implementations), so it is valid where the logical optimizer runs.
+pub fn optimize_logical(expr: MirRelationExpr) -> MirRelationExpr {
+    optimize_inner(expr, false)
+}
+
+fn optimize_inner(expr: MirRelationExpr, commit_wcoj: bool) -> MirRelationExpr {
     let rel = lower::lower(&expr);
     let optimizer = engine::Optimizer::new(default_ruleset(), cost::CostModel::new());
     let best = optimizer.optimize(rel).plan;
     // The equivalence-preserving arity guard lives at the live transform
     // boundary (`EqSatTransform`), which adopts this output only if its arity
     // matches the input. Direct test callers assert arity themselves.
-    raise::raise(&best)
+    raise::raise(&best, commit_wcoj)
 }

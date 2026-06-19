@@ -51,6 +51,13 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Numerical slack for comparing degrees.
 const EPS: f64 = 1e-9;
 
+/// Maximum join arity for the exact `2^n` subset-DP join-order search in
+/// [`CostModel::binary_join_terms`]. Above this, the DP (and its per-subset
+/// combinatorial LP) is unaffordable, so a left-deep chain estimate is used
+/// instead. Real joins are far below this; wide joins are rare and tolerate the
+/// coarser estimate.
+const MAX_EXACT_JOIN_INPUTS: usize = 8;
+
 /// The two-axis abstract cost of a plan.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cost {
@@ -298,8 +305,11 @@ impl CostModel {
         if n <= 1 {
             return vec![];
         }
-        if n > 12 {
-            // Fallback: a left-deep chain in input order.
+        if n > MAX_EXACT_JOIN_INPUTS {
+            // Fallback: a left-deep chain in input order. The exact subset DP is
+            // `2^n` and each subset runs a combinatorial LP, so for wide joins it
+            // is unaffordable. The left-deep chain costs `n-1` LP solves and is a
+            // valid (if coarser) estimate.
             let mut set = 1u32;
             let mut terms = Vec::new();
             for i in 1..n {
@@ -476,6 +486,14 @@ fn solve_cover_lp(n_vars: usize, rows: &[BTreeSet<usize>], weights: &[f64]) -> f
     let m = cons.len();
     let mut best = f64::INFINITY;
     let mut idx: Vec<usize> = (0..n_vars).collect();
+    // The vertex enumeration is `C(m, n_vars)`, which is combinatorial: a wide
+    // join with many equivalence rows can make this astronomically large and
+    // hang the optimizer. Cap the number of vertices examined; on overflow,
+    // fall back to the trivial cover (every edge weight 1, i.e. the cross
+    // product). That bound is an over-estimate, so it never makes a bad join
+    // look cheap, and it only triggers on joins far larger than any we plan
+    // exactly.
+    let mut budget = MAX_LP_VERTICES;
     loop {
         let mut a = vec![vec![0.0; n_vars]; n_vars];
         let mut b = vec![0.0; n_vars];
@@ -496,6 +514,11 @@ fn solve_cover_lp(n_vars: usize, rows: &[BTreeSet<usize>], weights: &[f64]) -> f
                 }
             }
         }
+        budget -= 1;
+        if budget == 0 {
+            // Enumeration too large: use the conservative trivial bound.
+            return weights.iter().sum();
+        }
         if !next_combination(&mut idx, m) {
             break;
         }
@@ -506,6 +529,11 @@ fn solve_cover_lp(n_vars: usize, rows: &[BTreeSet<usize>], weights: &[f64]) -> f
         weights.iter().sum()
     }
 }
+
+/// Maximum number of LP feasible-basis vertices [`solve_cover_lp`] enumerates
+/// before falling back to the trivial cover bound. Keeps the combinatorial
+/// vertex enumeration from hanging on wide joins.
+const MAX_LP_VERTICES: usize = 200_000;
 
 /// Gaussian elimination with partial pivoting; `None` if singular.
 #[allow(clippy::needless_range_loop)]

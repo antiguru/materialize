@@ -142,27 +142,42 @@ fn logical_optimize_triangle(enable_eqsat: bool) -> MirRelationExpr {
         .into_inner()
 }
 
+/// Collect the implementations of every `Join` in `expr`.
+fn all_join_impls(expr: &MirRelationExpr) -> Vec<JoinImplementation> {
+    let mut out = Vec::new();
+    expr.visit_pre(|e| {
+        if let MirRelationExpr::Join { implementation, .. } = e {
+            out.push(implementation.clone());
+        }
+    });
+    out
+}
+
 #[mz_ore::test]
-fn eqsat_flag_gates_delta_query_in_logical_optimizer() {
-    // Flag on: the logical optimizer runs EqSatTransform, which commits the
-    // triangle to a delta join. Flag off: the logical optimizer leaves the join
-    // unimplemented (implementation is chosen in the physical optimizer), so it
-    // is not a DeltaQuery. This proves the flag actually gates the pass.
+fn eqsat_logical_optimizer_leaves_joins_unimplemented() {
+    // The eqsat pass runs in the logical optimizer. Join implementations are a
+    // physical-phase concern: the ProjectionPushdown that runs right after the
+    // logical optimizer (with `include_joins`) panics on a filled-in
+    // implementation, and JoinImplementation expects to choose it itself. So
+    // even though the e-graph internally favours a worst-case-optimal (delta)
+    // join for the triangle, the live pass must emit a plain `Unimplemented`
+    // join. This is the regression guard for that contract.
+    //
+    // The delta commitment itself (the experiment's offline payoff) is covered
+    // by `triangle_raises_to_delta_query`, which calls `optimize` directly.
     let on = logical_optimize_triangle(true);
     assert!(
-        matches!(
-            first_join_impl(&on),
-            Some(JoinImplementation::DeltaQuery(_))
-        ),
-        "flag on: expected a DeltaQuery join, got {on:?}"
+        all_join_impls(&on)
+            .iter()
+            .all(|i| matches!(i, JoinImplementation::Unimplemented)),
+        "flag on: logical optimizer must leave all joins Unimplemented, got {on:?}"
     );
     let off = logical_optimize_triangle(false);
     assert!(
-        !matches!(
-            first_join_impl(&off),
-            Some(JoinImplementation::DeltaQuery(_))
-        ),
-        "flag off: must not be a DeltaQuery join, got {off:?}"
+        all_join_impls(&off)
+            .iter()
+            .all(|i| matches!(i, JoinImplementation::Unimplemented)),
+        "flag off: logical optimizer must leave all joins Unimplemented, got {off:?}"
     );
 }
 

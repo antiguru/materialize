@@ -36,6 +36,32 @@ use crate::eqsat::matcher::{Payload, eval_ixexpr, eval_pexpr};
 /// An e-class identifier.
 pub type Id = usize;
 
+/// E-node budget for [`EGraph::saturate`]. Saturation stops growing the e-graph
+/// once the total e-node count crosses this bound, then extracts from the
+/// partially saturated graph. This caps the worst-case time and memory of an
+/// otherwise combinatorial search; extraction from an incomplete saturation is
+/// still sound (it just may miss rewrites a fuller search would have found).
+///
+/// The per-iteration generic join and, especially, the final extraction are
+/// superlinear in the e-node count (extraction is a multi-pass DP that rebuilds
+/// candidate plans per node per pass), so the bound is kept low: a plan that
+/// explodes to a large e-graph costs seconds, which is unacceptable in the live
+/// optimizer. Small plans saturate fully well under this bound and are
+/// unaffected.
+const MAX_ENODES: usize = 600;
+
+/// Per-rule, per-iteration match cap. A rule whose left-hand side matches
+/// combinatorially can enumerate an unbounded number of assignments in a single
+/// generic join, which is the dominant saturation cost. The enumeration stops at
+/// this many matches, and a rule that hits the cap is banned for a growing
+/// number of iterations (see [`EGraph::saturate`]). Modeled on egg's
+/// `BackoffScheduler`: throttle the offending rule, keep the rest running.
+const MATCH_LIMIT: usize = 1_000;
+
+/// Initial ban length (in iterations) for a rule that exceeds [`MATCH_LIMIT`].
+/// The ban doubles on each re-offense.
+const INITIAL_BAN_LEN: usize = 4;
+
 /// A node in the e-graph: an operator whose children are e-class ids. Mirrors
 /// [`Rel`], with `Union` flattened to a single non-empty input list.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -612,7 +638,11 @@ fn unify_tuple(
 /// candidate set is the intersection, over all atoms mentioning it, of the
 /// values it could take given the bindings so far — the worst-case-optimal
 /// join strategy.
-fn generic_join(query: &Query, index: &HashMap<Sym, Vec<(Id, ENode)>>) -> Vec<HashMap<VarId, Id>> {
+fn generic_join(
+    query: &Query,
+    index: &HashMap<Sym, Vec<(Id, ENode)>>,
+    limit: usize,
+) -> Vec<HashMap<VarId, Id>> {
     // Variable order: most-constrained-first (appears in the most atoms).
     let mut occ = vec![0usize; query.n_vars];
     for atom in &query.atoms {
@@ -634,6 +664,7 @@ fn generic_join(query: &Query, index: &HashMap<Sym, Vec<(Id, ENode)>>) -> Vec<Ha
         &mut assignment,
         &mut results,
         &empty,
+        limit,
     );
     results
 }
@@ -646,7 +677,16 @@ fn solve(
     assignment: &mut HashMap<VarId, Id>,
     out: &mut Vec<HashMap<VarId, Id>>,
     empty: &Vec<(Id, ENode)>,
+    limit: usize,
 ) {
+    // Cap the match enumeration: a rule whose pattern matches combinatorially
+    // can produce an unbounded number of assignments in a single iteration,
+    // which dominates saturation time. Stop once the cap is reached; the partial
+    // result set keeps saturation sound (just incomplete this iteration), and
+    // the caller bans a rule that hits the cap from later iterations.
+    if out.len() >= limit {
+        return;
+    }
     if depth == order.len() {
         out.push(assignment.clone());
         return;
@@ -681,8 +721,20 @@ fn solve(
 
     let candidates = candidates.unwrap_or_default();
     for val in candidates {
+        if out.len() >= limit {
+            break;
+        }
         assignment.insert(var, val);
-        solve(query, index, order, depth + 1, assignment, out, empty);
+        solve(
+            query,
+            index,
+            order,
+            depth + 1,
+            assignment,
+            out,
+            empty,
+            limit,
+        );
     }
     assignment.remove(&var);
 }
@@ -841,10 +893,26 @@ impl EGraph {
             .map(|(i, r)| (i, compile_pattern(&r.lhs)))
             .collect();
 
+        // Per-rule backoff state: the iteration index up to which a rule is
+        // banned, and its current ban length (doubles on each re-offense). A
+        // rule is banned when its match enumeration hits `MATCH_LIMIT`, so an
+        // explosive rule is throttled while the rest keep firing.
+        let mut banned_until = vec![0usize; queries.len()];
+        let mut ban_len = vec![INITIAL_BAN_LEN; queries.len()];
+
         let mut iters = 0;
-        for _ in 0..max_iters {
+        for iter in 0..max_iters {
             iters += 1;
             self.rebuild();
+            // Bound runaway e-graph growth: equality saturation can explode
+            // combinatorially, and an unbounded e-graph costs seconds to
+            // saturate and extract. Once the e-node count crosses the budget,
+            // stop growing and extract from what we have (a sound, if
+            // incomplete, saturation).
+            let n_nodes: usize = self.classes.values().map(|ns| ns.len()).sum();
+            if n_nodes > MAX_ENODES {
+                break;
+            }
             let index = self.index();
 
             // Phase 1: read-only — collect every rewrite to apply.
@@ -860,10 +928,22 @@ impl EGraph {
                 }),
             };
             let mut pending: Vec<(usize, EBindings)> = Vec::new();
-            for (ri, query) in &queries {
+            for (qi, (ri, query)) in queries.iter().enumerate() {
+                // Skip rules currently serving a ban.
+                if iter < banned_until[qi] {
+                    continue;
+                }
                 let rule = &rules.rules[*ri];
-                for assignment in generic_join(query, &index) {
-                    for b in expand_bindings(query, &index, &assignment) {
+                // Enumerate at most `MATCH_LIMIT` matches. Asking for one extra
+                // lets us detect that the rule hit the cap (explosive) and ban
+                // it for a growing number of iterations.
+                let assignments = generic_join(query, &index, MATCH_LIMIT + 1);
+                if assignments.len() > MATCH_LIMIT {
+                    banned_until[qi] = iter + ban_len[qi];
+                    ban_len[qi] = ban_len[qi].saturating_mul(2);
+                }
+                for assignment in assignments.iter().take(MATCH_LIMIT) {
+                    for b in expand_bindings(query, &index, assignment) {
                         if self.check_conds(&rule.conds, &b, &analyses) {
                             pending.push((*ri, b));
                         }
@@ -1147,13 +1227,28 @@ impl EGraph {
             &|a, b| a.cmp_time_first(b)
         };
 
+        // Cost is a pure, compositional function of the built `Rel`. Extraction
+        // evaluates the same `(node, children-best)` combination many times
+        // across passes, and `model.cost` recomputes the whole subtree each call
+        // (including the exponential `binary_join_terms` for every join in it).
+        // Memoize by the built plan so each distinct `Rel` is costed once. This
+        // turns the dominant `O(classes^2)` re-evaluation into one cost per
+        // distinct plan, and preserves the result exactly.
+        let mut cost_cache: BTreeMap<Rel, Cost> = BTreeMap::new();
         let mut best: HashMap<Id, (Cost, Rel)> = HashMap::new();
         for _ in 0..(self.classes.len() + 1) {
             let mut changed = false;
             for (&id, nodes) in &self.classes {
                 for node in nodes {
                     if let Some(rel) = self.build_rel(node, &best) {
-                        let c = model.cost(&rel);
+                        let c = match cost_cache.get(&rel) {
+                            Some(c) => c.clone(),
+                            None => {
+                                let c = model.cost(&rel);
+                                cost_cache.insert(rel.clone(), c.clone());
+                                c
+                            }
+                        };
                         // Break cost ties on the plan itself, so extraction is
                         // deterministic despite randomized hash-map order.
                         let better = match best.get(&id) {

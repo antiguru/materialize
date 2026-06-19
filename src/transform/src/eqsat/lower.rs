@@ -49,12 +49,15 @@ pub fn lower(expr: &MirRelationExpr) -> Rel {
             outputs: outputs.clone(),
         },
         Map { input, scalars } => {
-            // Scalars in a Map reference input columns; fold against the input
-            // type so nullability-provable constants are reflected in `lit`.
+            // Scalars in a Map reference input columns AND the columns produced
+            // by earlier scalars in the same Map: scalar `i` may reference
+            // columns `0..input_arity + i`. Fold each against the context built
+            // from the input type extended with the types of preceding scalars,
+            // so a later scalar's column reference stays in bounds.
             let col_types = input.typ().column_types;
             Rel::Map {
                 input: Box::new(lower(input)),
-                scalars: escalars_in_context(scalars, &col_types),
+                scalars: escalars_in_map_context(scalars, col_types),
             }
         }
         Filter { input, predicates } => {
@@ -161,6 +164,34 @@ fn escalars_in_context(exprs: &[MirScalarExpr], col_types: &[ReprColumnType]) ->
             EScalar::new(e.clone(), lit)
         })
         .collect()
+}
+
+/// Like [`escalars_in_context`], but for `Map` scalars: each scalar may
+/// reference the columns produced by preceding scalars in the same `Map`, so
+/// the fold context grows by each scalar's type as we go. Folding against a
+/// context missing those columns would index out of bounds in `typ`/`reduce`.
+fn escalars_in_map_context(
+    exprs: &[MirScalarExpr],
+    mut col_types: Vec<ReprColumnType>,
+) -> Vec<EScalar> {
+    let mut out = Vec::with_capacity(exprs.len());
+    for e in exprs {
+        let mut folded = e.clone();
+        folded.reduce(&col_types);
+        let lit = if folded.is_literal_true() {
+            Some(true)
+        } else if folded.is_literal_false() {
+            Some(false)
+        } else {
+            None
+        };
+        out.push(EScalar::new(e.clone(), lit));
+        // Extend the context with this scalar's type so the next scalar can
+        // reference it. Use the original expression against the current context.
+        let typ = e.typ(&col_types);
+        col_types.push(typ);
+    }
+    out
 }
 
 #[cfg(test)]
