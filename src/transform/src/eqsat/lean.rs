@@ -36,7 +36,12 @@ pub fn emit_lean(rules: &RuleSet) -> String {
     out
 }
 
-const HEADER: &str = r#"-- AUTO-GENERATED from src/transform/src/eqsat/rules/relational.rewrite by `cargo run -p mz-transform --example gen-lean`.
+const HEADER: &str = r#"-- Copyright Materialize, Inc. and contributors. All rights reserved.
+--
+-- Use of this software is governed by the Business Source License
+-- included in the LICENSE file.
+
+-- AUTO-GENERATED from src/transform/src/eqsat/rules/relational.rewrite by `cargo run -p mz-transform --example gen-lean`.
 -- Do not edit by hand: edit the DSL and regenerate.
 --
 -- Each theorem states that a rewrite preserves the multiplicity denotation of

@@ -227,7 +227,7 @@ rule reduce_elision {
 # These read scalar *structure* through analysis-style side conditions, so the
 # relational rewrite stays declarative even though the decision needs to look
 # inside a scalar. (Folding a scalar in place is a separate scalar-layer
-# normalization; see `simplify`/`canonicalize_scalars` in the engine.)
+# normalization done once at lower time by `reduced_escalar` in lower.rs.)
 
 # A filter all of whose predicates are constantly true is the identity. Covers a
 # folded `filter(1 = 1, r)` (and the empty predicate list). Mirrors the

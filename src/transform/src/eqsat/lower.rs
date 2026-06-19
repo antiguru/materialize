@@ -188,10 +188,23 @@ pub fn lower(expr: &MirRelationExpr) -> Rel {
 /// coalescing, literal CASE rewriting) lands in the interned payload and rides
 /// through saturation unchanged.
 ///
-/// `reduce` may use column nullability to simplify, so the reduced form is only
-/// valid in a context whose referenced columns share the nullability of
-/// `col_types`. The active rules preserve those types (see the soundness
-/// invariant in the workstream plan), so reducing once here is sound.
+/// `reduce` may use column nullability to simplify, for example rewriting
+/// `IsNull(x)` to `false` when `x` is provably non-null in `col_types`. The
+/// reduced form is therefore tied to the nullability of the context it was
+/// folded against. Most active rules keep a scalar in an equal-or-stricter
+/// context (column permutation renames indices but preserves types, filter
+/// pushdown past a project or through map/negate/threshold preserves each
+/// referenced column's type), where a conservatively-reduced scalar stays
+/// correct. The one rule that moves a scalar from a stricter to a looser
+/// context is filter-pushdown into a join input: the predicate is folded
+/// against the join output type, which strengthens columns to non-null across
+/// equivalence classes, then pushed onto a single input whose plain type is
+/// nullable. That is sound because the join equivalence enforces the
+/// strengthened non-null fact on every surviving row, so the reduced predicate
+/// computes the same result after the push. This mirrors what the production
+/// `predicate_pushdown` transform already does (it reduces against the join
+/// output type before pushing into inputs). The soundness condition is thus
+/// per-rule semantic identity, not a blanket no-relaxation rule.
 fn reduced_escalar(expr: &MirScalarExpr, col_types: &[ReprColumnType]) -> EScalar {
     let mut folded = expr.clone();
     folded.reduce(col_types);
@@ -237,7 +250,7 @@ fn escalars_in_map_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mz_expr::{BinaryFunc, MirRelationExpr, MirScalarExpr};
+    use mz_expr::{AggregateExpr, AggregateFunc, BinaryFunc, MirRelationExpr, MirScalarExpr};
     use mz_repr::{Datum, ReprRelationType, ReprScalarType};
 
     use crate::eqsat::ir::Rel;
@@ -433,6 +446,72 @@ mod tests {
                 );
             }
             other => panic!("expected Join, got {other:?}"),
+        }
+    }
+
+    #[mz_ore::test]
+    fn reduce_aggregate_expr_payload_is_reduced() {
+        // An aggregate input expression `1 + 1` is constant-folded to `2`. The
+        // aggregate path reduces `agg.expr` directly (not via reduced_escalar),
+        // so it needs its own coverage.
+        let one = MirScalarExpr::literal_ok(Datum::Int64(1), ReprScalarType::Int64);
+        let sum = one
+            .clone()
+            .call_binary(one, BinaryFunc::AddInt64(mz_expr::func::AddInt64));
+        let r = MirRelationExpr::Reduce {
+            input: Box::new(base(1)),
+            group_key: vec![],
+            aggregates: vec![AggregateExpr {
+                func: AggregateFunc::MaxInt64,
+                expr: sum,
+                distinct: false,
+            }],
+            monotonic: false,
+            expected_group_size: None,
+        };
+        let rel = lower(&r);
+        match rel {
+            Rel::Reduce { aggregates, .. } => {
+                assert_eq!(aggregates.len(), 1);
+                assert_eq!(
+                    aggregates[0].expr,
+                    MirScalarExpr::literal_ok(Datum::Int64(2), ReprScalarType::Int64),
+                    "aggregate input expression was not constant-folded"
+                );
+            }
+            other => panic!("expected Reduce, got {other:?}"),
+        }
+    }
+
+    #[mz_ore::test]
+    fn topk_limit_payload_is_reduced() {
+        // A TopK limit `1 + 0` is constant-folded to `1`. The limit path reduces
+        // the scalar directly, so it needs its own coverage.
+        let one = MirScalarExpr::literal_ok(Datum::Int64(1), ReprScalarType::Int64);
+        let zero = MirScalarExpr::literal_ok(Datum::Int64(0), ReprScalarType::Int64);
+        let limit = one.call_binary(zero, BinaryFunc::AddInt64(mz_expr::func::AddInt64));
+        let r = MirRelationExpr::TopK {
+            input: Box::new(base(1)),
+            group_key: vec![],
+            order_key: vec![],
+            limit: Some(limit),
+            offset: 0,
+            monotonic: false,
+            expected_group_size: None,
+        };
+        let rel = lower(&r);
+        match rel {
+            Rel::TopK { shape, .. } => {
+                assert_eq!(
+                    shape.limit,
+                    Some(MirScalarExpr::literal_ok(
+                        Datum::Int64(1),
+                        ReprScalarType::Int64
+                    )),
+                    "TopK limit was not constant-folded"
+                );
+            }
+            other => panic!("expected TopK, got {other:?}"),
         }
     }
 }

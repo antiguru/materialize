@@ -128,7 +128,7 @@ Two hard risks to budget for: saturation cost and termination on production plan
 * Replace the ad-hoc termination guards with a payload-growth detector.
 * Exercise the cost-model `Recommendation` end to end (it is unit-tested only).
 * Discharge the 20 `sorry` Lean obligations (column-structure and n-ary list laws are provable; the empty-oracle ones need the `is_rel_empty` fact modeled).
-* Add a Lean obligation for the lower-time reduction soundness invariant: reduced scalar payloads are valid only because no active rule moves a scalar into a context with relaxed nullability for its referenced columns. Encode the invariant so a future nullability-relaxing rule is forced to discharge it.
+* Add a Lean obligation for the lower-time reduction soundness condition. The condition is per-rule semantic identity, not a blanket no-relaxation rule: most rules keep a scalar in an equal-or-stricter context, and the one rule that moves it from a stricter to a looser context (filter pushdown into a join input) stays sound because the join equivalence enforces the strengthened non-null fact on every surviving row, mirroring the production `predicate_pushdown`. Encode the per-rule identity so a future rule that moves a scalar without preserving its evaluated semantics is forced to discharge the obligation.
 
 ## How to run
 
