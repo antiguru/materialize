@@ -72,13 +72,27 @@ pub fn lower(expr: &MirRelationExpr) -> Rel {
             inputs,
             equivalences,
             ..
-        } => Rel::Join {
-            inputs: inputs.iter().map(lower).collect(),
-            equivalences: equivalences
-                .iter()
-                .map(|class| class.iter().map(|e| EScalar::plain(e.clone())).collect())
-                .collect(),
-        },
+        } => {
+            // Equivalence scalars reference the concatenated input column space
+            // (input i's columns offset by the sum of prior input arities), so
+            // fold them against the concatenation of input column types.
+            let mut col_types = Vec::new();
+            for inp in inputs {
+                col_types.extend(inp.typ().column_types);
+            }
+            Rel::Join {
+                inputs: inputs.iter().map(lower).collect(),
+                equivalences: equivalences
+                    .iter()
+                    .map(|class| {
+                        class
+                            .iter()
+                            .map(|e| reduced_escalar(e, &col_types))
+                            .collect()
+                    })
+                    .collect(),
+            }
+        }
         Negate { input } => Rel::Negate {
             input: Box::new(lower(input)),
         },
@@ -389,6 +403,36 @@ mod tests {
                 );
             }
             other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
+    #[mz_ore::test]
+    fn join_equivalence_payload_is_reduced() {
+        // A two-input join over boolean columns with an equivalence containing
+        // `#0 AND true`. Join equivalences reference the concatenated input
+        // column space, so column 0 of the first input is `#0`. The payload
+        // must reduce to `#0`.
+        let typ = ReprRelationType::new(vec![ReprScalarType::Bool.nullable(false)]);
+        let a = MirRelationExpr::constant(vec![], typ.clone());
+        let b = MirRelationExpr::constant(vec![], typ);
+        let r = MirRelationExpr::join_scalars(
+            vec![a, b],
+            vec![vec![
+                MirScalarExpr::column(0).and(MirScalarExpr::literal_true()),
+                MirScalarExpr::column(1),
+            ]],
+        );
+        let rel = lower(&r);
+        match rel {
+            Rel::Join { equivalences, .. } => {
+                assert_eq!(equivalences.len(), 1);
+                assert_eq!(
+                    equivalences[0][0].expr,
+                    MirScalarExpr::column(0),
+                    "join equivalence payload was not reduced"
+                );
+            }
+            other => panic!("expected Join, got {other:?}"),
         }
     }
 }
