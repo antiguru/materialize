@@ -1,4 +1,4 @@
--- AUTO-GENERATED from rules/relational.rewrite by `cargo run --bin gen-lean`.
+-- AUTO-GENERATED from src/transform/src/eqsat/rules/relational.rewrite by `cargo run -p mz-transform --example gen-lean`.
 -- Do not edit by hand: edit the DSL and regenerate.
 --
 -- Each theorem states that a rewrite preserves the multiplicity denotation of
@@ -24,7 +24,7 @@ theorem rule_push_filter_through_map :
     -- not modeled at the bag level (acts on row/column structure)
     sorry
 
--- filter(p, a + b) = filter(p, a) + filter(p, b)
+-- filter(p, a + b) = filter(p, a) + filter(p, b)  when no predicate is known-false
 theorem rule_distribute_filter_union :
     ∀ (p : Row → Bool) (a : Bag) (b : Bag), filterB p (unionB a b) = unionB (filterB p a) (filterB p b) := by
     intro p a b; funext x; simp only [filterB, unionB, negateB, thresholdB, predAnd, emptyBag]; cases p x <;> simp_all <;> try omega
@@ -65,13 +65,25 @@ theorem rule_distribute_negate_union :
     ∀ (a : Bag) (b : Bag), negateB (unionB a b) = unionB (negateB a) (negateB b) := by
     intro a b; funext x; simp only [filterB, unionB, negateB, thresholdB, predAnd, emptyBag]; omega
 
+-- negate(join(a, rest)) = join(negate(a), rest)
+theorem rule_distribute_negate_join :
+    ∀ (e : JoinSpec) (a : Bag) (rest : List Bag), negateB (joinB e (a :: rest)) = joinB e ([negateB a] ++ rest) := by
+    -- not modeled at the bag level (acts on row/column structure)
+    sorry
+
+-- join(negate(a), rest) = negate(join(a, rest))
+theorem rule_factor_negate_join :
+    ∀ (e : JoinSpec) (a : Bag) (rest : List Bag), joinB e ((negateB a) :: rest) = negateB (joinB e ([a] ++ rest)) := by
+    -- not modeled at the bag level (acts on row/column structure)
+    sorry
+
 -- filter(p, join(a, rest)) = join(filter(p, a), rest)  when p reads only a's columns
 theorem rule_push_filter_into_join_first :
     ∀ (p : Row → Bool) (e : JoinSpec) (a : Bag) (rest : List Bag), filterB p (joinB e (a :: rest)) = joinB e ([filterB p a] ++ rest) := by
     -- not modeled at the bag level (acts on row/column structure)
     sorry
 
--- filter(p, a1 + .. + ak) = filter(p, a1) + .. + filter(p, ak)
+-- filter(p, a1 + .. + ak) = filter(p, a1) + .. + filter(p, ak)  when no predicate is known-false
 theorem rule_distribute_filter_union_nary :
     ∀ (p : Row → Bool) (xs : List Bag), filterB p (unionAll xs) = unionAll ((xs.map (fun h => filterB p h))) := by
     -- provable by induction on the list (cf. Semantics `*_unionAll` lemmas)
@@ -143,5 +155,41 @@ theorem rule_map_columns_to_projection :
 theorem rule_join_to_wcoj :
     ∀ (e : JoinSpec) (rs : List Bag), joinB e rs = wcoJoinB e rs := by
     intro e rs; rfl
+
+-- topk(0) = 0
+theorem rule_topk_empty :
+    ∀ (e : Bag), topkB e = emptyBag := by
+    -- empty-propagation: operator is empty when input is empty (established by is_rel_empty guard)
+    sorry
+
+-- threshold(0) = 0
+theorem rule_threshold_empty :
+    ∀ (e : Bag), thresholdB e = emptyBag := by
+    -- empty-propagation: operator is empty when input is empty (established by is_rel_empty guard)
+    sorry
+
+-- negate(0) = 0
+theorem rule_negate_empty :
+    ∀ (e : Bag), negateB e = emptyBag := by
+    -- empty-propagation: operator is empty when input is empty (established by is_rel_empty guard)
+    sorry
+
+-- filter(p, 0) = 0
+theorem rule_filter_empty :
+    ∀ (p : Row → Bool) (e : Bag), filterB p e = emptyBag := by
+    -- empty-propagation: operator is empty when input is empty (established by is_rel_empty guard)
+    sorry
+
+-- 0 + b = b
+theorem rule_union_drop_empty_left :
+    ∀ (e : Bag) (b : Bag), unionB e b = b := by
+    -- union identity: requires is_rel_empty oracle (not modeled in bag algebra)
+    sorry
+
+-- a + 0 = a
+theorem rule_union_drop_empty_right :
+    ∀ (a : Bag) (e : Bag), unionB a e = a := by
+    -- union identity: requires is_rel_empty oracle (not modeled in bag algebra)
+    sorry
 
 end MirRewrite

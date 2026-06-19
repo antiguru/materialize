@@ -27,6 +27,7 @@ pub mod dsl;
 pub mod egraph;
 pub mod engine;
 pub mod ir;
+pub mod lean;
 pub mod lower;
 pub mod matcher;
 pub mod parser;

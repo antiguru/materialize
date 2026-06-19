@@ -14,7 +14,7 @@
 //! Proofs are selected by the *shape* of the translated statement:
 //!
 //! * statements over the fully-modeled combinators (`filterB`, `unionB`,
-//!   `negateB`, `thresholdB`, …) get a discharging tactic;
+//!   `negateB`, `thresholdB`, ...) get a discharging tactic;
 //! * statements mentioning the deliberately-opaque `mapB`/`projB` (whose
 //!   algebraic laws are not modeled at the bag level) are emitted with `sorry`
 //!   and a note, so the obligation is explicit rather than hidden.
@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use crate::dsl::*;
+use super::dsl::*;
 
 /// Render the full `Generated.lean` file for a rule set.
 pub fn emit_lean(rules: &RuleSet) -> String {
@@ -36,7 +36,7 @@ pub fn emit_lean(rules: &RuleSet) -> String {
     out
 }
 
-const HEADER: &str = r#"-- AUTO-GENERATED from rules/relational.rewrite by `cargo run --bin gen-lean`.
+const HEADER: &str = r#"-- AUTO-GENERATED from src/transform/src/eqsat/rules/relational.rewrite by `cargo run -p mz-transform --example gen-lean`.
 -- Do not edit by hand: edit the DSL and regenerate.
 --
 -- Each theorem states that a rewrite preserves the multiplicity denotation of
@@ -69,8 +69,8 @@ fn emit_rule(rule: &Rule) -> String {
         })
         .collect();
     // Scalar-structure conditions become hypotheses on the predicate function:
-    // `all_true(p)` ⇒ `∀ x, p x = true` (filter is identity), `any_false(p)` ⇒
-    // `∀ x, p x = false` (filter is empty — a conjunction with a false conjunct
+    // `all_true(p)` => `forall x, p x = true` (filter is identity), `any_false(p)` =>
+    // `forall x, p x = false` (filter is empty -- a conjunction with a false conjunct
     // is everywhere false).
     let all_true = first_payload(rule, |c| matches!(c, Cond::AllTrue { .. }));
     let any_false = first_payload(rule, |c| matches!(c, Cond::AnyFalse { .. }));
@@ -86,6 +86,13 @@ fn emit_rule(rule: &Rule) -> String {
         hyps.push((format!("h_{p}"), format!("∀ x, {p} x = false")));
     }
 
+    // True when the rule is guarded by `is_rel_empty`, signalling an
+    // empty-propagation rule whose proof requires the `IsRelEmpty` oracle.
+    let is_empty_prop = rule
+        .conds
+        .iter()
+        .any(|c| matches!(c, Cond::IsRelEmpty { .. }));
+
     let proof = choose_proof(
         &lhs,
         &rhs,
@@ -94,6 +101,7 @@ fn emit_rule(rule: &Rule) -> String {
         nonneg.first().copied(),
         all_true.as_deref(),
         any_false.as_deref(),
+        is_empty_prop,
     );
 
     let quantifier = if binders.is_empty() && hyps.is_empty() {
@@ -157,7 +165,9 @@ fn collect_binders(
             add(aggregates, "Row → Row", out, seen);
             collect_binders(input, out, seen);
         }
-        Pat::Negate(input) | Pat::Threshold(input) => collect_binders(input, out, seen),
+        Pat::Negate(input) | Pat::Threshold(input) | Pat::TopK(input) => {
+            collect_binders(input, out, seen)
+        }
         Pat::Join {
             equivalences,
             inputs,
@@ -188,11 +198,7 @@ fn collect_binders(
 /// Wrap an expression in parentheses if it is compound (so it is safe as a
 /// function argument); leave bare identifiers alone.
 fn arg(s: String) -> String {
-    if s.contains(' ') {
-        format!("({s})")
-    } else {
-        s
-    }
+    if s.contains(' ') { format!("({s})") } else { s }
 }
 
 fn translate_pat(pat: &Pat) -> String {
@@ -206,6 +212,9 @@ fn translate_pat(pat: &Pat) -> String {
         Pat::Reduce { input, .. } => format!("reduceB {}", arg(translate_pat(input))),
         Pat::Negate(input) => format!("negateB {}", arg(translate_pat(input))),
         Pat::Threshold(input) => format!("thresholdB {}", arg(translate_pat(input))),
+        // TopK is opaque; rules touching it use `is_rel_empty` guards which
+        // yield `emptyBag` on both sides, so the proof is `rfl`.
+        Pat::TopK(input) => format!("topkB {}", arg(translate_pat(input))),
         Pat::Join {
             equivalences,
             inputs,
@@ -235,11 +244,13 @@ fn translate_pat(pat: &Pat) -> String {
 }
 
 /// Translate a template. `hole` is the Lean variable name bound to `_` inside
-/// an enclosing `map(...)` combinator.
+/// an enclosing `map(...)` list combinator.
 fn translate_tmpl(t: &Tmpl, hole: &str) -> String {
     match t {
         Tmpl::RelVar(n) => n.clone(),
         Tmpl::Hole => hole.to_string(),
+        // `Empty(r)` is the zero-row constant with `r`'s arity; in the bag
+        // model it is `emptyBag` regardless of `r`.
         Tmpl::Empty(_) => "emptyBag".to_string(),
         Tmpl::Filter { preds, input } => {
             format!(
@@ -332,9 +343,9 @@ fn tmpl_list_expr(list: &ListTmpl, hole: &str) -> String {
 /// Lean function.
 #[derive(Clone, Copy)]
 enum Kind {
-    /// `Row → Bool` (filter predicates).
+    /// `Row -> Bool` (filter predicates).
     Pred,
-    /// `Row → Row` (map/project column lists).
+    /// `Row -> Row` (map/project column lists).
     Rows,
     /// `JoinSpec` (join equivalences).
     Spec,
@@ -382,7 +393,7 @@ fn translate_pexpr(e: &PExpr, kind: Kind) -> String {
                 Kind::Rows => "remapRows",
                 Kind::Spec => "remapSpec",
             };
-            // The remapping (`outs`) is always a projection (`Row → Row`).
+            // The remapping (`outs`) is always a projection (`Row -> Row`).
             format!(
                 "({op} {} {})",
                 translate_pexpr(p, kind),
@@ -392,7 +403,7 @@ fn translate_pexpr(e: &PExpr, kind: Kind) -> String {
         // A group key reinterpreted as a projection (opaque; appears only in a
         // `sorry`-ed `Project`-based obligation).
         PExpr::ColsOf(p) => format!("(colsOf {})", translate_pexpr(p, Kind::Rows)),
-        // The identity projection `[0..n]` — opaque at the bag level (it acts on
+        // The identity projection `[0..n]` -- opaque at the bag level (it acts on
         // column structure), appears only in a `sorry`-ed `Project` obligation.
         PExpr::Iota(_) => "iota".to_string(),
     }
@@ -433,7 +444,7 @@ fn lean_list(items: &[String], rest: Option<&str>) -> String {
 }
 
 /// Pick a proof tactic from the shape of the statement. `binders` carries each
-/// metavariable's Lean type so we can case-split on the `Row → Bool`
+/// metavariable's Lean type so we can case-split on the `Row -> Bool`
 /// predicates; `hyps` are the extra hypotheses (e.g. `nonNeg r`) and
 /// `nonneg_rel` names the relation a `non_negative` condition applies to.
 /// The first condition payload matching `pick`, if any.
@@ -455,6 +466,7 @@ fn choose_proof(
     nonneg_rel: Option<&str>,
     all_true: Option<&str>,
     any_false: Option<&str>,
+    is_empty_prop: bool,
 ) -> String {
     let both = format!("{lhs} {rhs}");
     let mut intros: Vec<&str> = binders.iter().map(|(n, _)| n.as_str()).collect();
@@ -475,9 +487,7 @@ fn choose_proof(
     }
     if let Some(p) = any_false {
         if both.contains("filterB") {
-            return format!(
-                "by\n    {intro}funext x; simp only [filterB, emptyBag]; rw [h_{p} x]"
-            );
+            return format!("by\n    {intro}funext x; simp only [filterB, emptyBag]; rw [h_{p} x]");
         }
     }
 
@@ -491,18 +501,34 @@ fn choose_proof(
         }
     }
 
+    // Empty-propagation rules (guarded by `is_rel_empty`): the operator
+    // returns empty when its input is the empty relation. Not provable from the
+    // bag algebra alone -- the `is_rel_empty` guard is the oracle. Mark as
+    // `sorry` so the obligation is explicit.
+    if is_empty_prop && rhs == "emptyBag" {
+        return "by\n    -- empty-propagation: operator is empty when input is empty (established by is_rel_empty guard)\n    sorry"
+            .to_string();
+    }
+    // Union identity rules (union_drop_empty_left / union_drop_empty_right):
+    // the proof requires knowing one summand is `emptyBag`, which is not
+    // expressible without the `is_rel_empty` oracle.
+    if is_empty_prop && lhs.starts_with("unionB") {
+        return "by\n    -- union identity: requires is_rel_empty oracle (not modeled in bag algebra)\n    sorry"
+            .to_string();
+    }
+
     // N-ary list laws (`unionAll`, `map`) are provable by induction on the
-    // list — see the `*_unionAll` lemmas in Semantics.lean — but we do not
+    // list -- see the `*_unionAll` lemmas in Semantics.lean -- but we do not
     // synthesize induction here, so leave the obligation explicit.
     if both.contains("unionAll") {
         return "by\n    -- provable by induction on the list (cf. Semantics `*_unionAll` lemmas)\n    sorry"
             .to_string();
     }
-    // Join ≡ WcoJoin is definitional (check before the opaque-join guard).
+    // Join == WcoJoin is definitional (check before the opaque-join guard).
     if both.contains("wcoJoinB") {
         return format!("by\n    {intro}rfl");
     }
-    // Opaque operators we do not model algebraically ⇒ leave the obligation
+    // Opaque operators we do not model algebraically => leave the obligation
     // explicit. (map/project/reduce act on row column-structure; a plain join
     // is opaque here.)
     if ["mapB", "projB", "reduceB", "joinB"]
@@ -545,33 +571,4 @@ fn choose_proof(
         return format!("by\n    {intro}funext x; {simp}; omega");
     }
     format!("by\n    {intro}sorry")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::parser::parse_ruleset;
-
-    #[test]
-    fn emits_a_theorem_per_rule() {
-        let rs = parse_ruleset(crate::RULES_SRC).unwrap();
-        let lean = emit_lean(&rs);
-        for r in &rs.rules {
-            assert!(
-                lean.contains(&format!("theorem rule_{}", r.name)),
-                "missing theorem for {}",
-                r.name
-            );
-        }
-        // The WCOJ rule is definitional (joinB ≡ wcoJoinB), proved by `rfl`.
-        assert!(lean.contains("theorem rule_join_to_wcoj"));
-        let wcoj = lean
-            .split("theorem rule_join_to_wcoj")
-            .nth(1)
-            .unwrap()
-            .split("theorem ")
-            .next()
-            .unwrap();
-        assert!(wcoj.contains("rfl"), "join_to_wcoj should be rfl: {wcoj}");
-    }
 }

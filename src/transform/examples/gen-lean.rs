@@ -3,19 +3,19 @@
 // Use of this software is governed by the Business Source License
 // included in the LICENSE file.
 
-//! Generate the Lean 4 specification from the rewrite DSL.
+//! Generate the Lean 4 specification from the live rewrite DSL.
 //!
 //! ```text
-//! cargo run --bin gen-lean              # write lean/MirRewrite/Generated.lean
-//! cargo run --bin gen-lean -- -         # write to stdout
-//! cargo run --bin gen-lean -- path.lean # write to a custom path
+//! cargo run -p mz-transform --example gen-lean              # write lean/MirRewrite/Generated.lean
+//! cargo run -p mz-transform --example gen-lean -- -         # write to stdout
+//! cargo run -p mz-transform --example gen-lean -- path.lean # write to a custom path
 //! ```
 
 use std::path::PathBuf;
 
 fn main() -> std::io::Result<()> {
-    let rules = mz_mir_rewrite_dsl::default_ruleset();
-    let lean = mz_mir_rewrite_dsl::lean::emit_lean(&rules);
+    let rules = mz_transform::eqsat::default_ruleset();
+    let lean = mz_transform::eqsat::lean::emit_lean(&rules);
 
     let arg = std::env::args().nth(1);
     match arg.as_deref() {
@@ -25,7 +25,7 @@ fn main() -> std::io::Result<()> {
         }
         Some(path) => std::fs::write(path, lean),
         None => {
-            // Default: write next to this crate's `lean/` directory.
+            // Default: write to the crate's `lean/` directory.
             let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             path.push("lean/MirRewrite/Generated.lean");
             std::fs::write(&path, lean)?;

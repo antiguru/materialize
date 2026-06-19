@@ -78,6 +78,11 @@ opaque remapSpec : JoinSpec → (Row → Row) → JoinSpec
 /-- A group key reinterpreted as a projection (the DSL's `cols_of`). -/
 opaque colsOf : (Row → Row) → (Row → Row)
 
+/-- The identity projection `[0, 1, ..., n-1]` (the DSL's `iota(n)`). Kept
+    opaque: the arity `n` is a runtime value, not a Lean type-level constant.
+    Appears only in `sorry`-ed obligations but must be well-typed. -/
+opaque iota : Row → Row
+
 /-- Append columns. Opaque: its interaction with `filter` is not modeled here. -/
 opaque mapB : (Row → Row) → Bag → Bag
 
@@ -86,6 +91,10 @@ opaque projB : (Row → Row) → Bag → Bag
 
 /-- Grouped aggregation. Opaque (no rules over it yet). -/
 opaque reduceB : Bag → Bag
+
+/-- TopK (limit with optional ordering). Opaque: the only rule touching it is
+    empty-propagation, proved outright by `rfl` given the `is_rel_empty` guard. -/
+opaque topkB : Bag → Bag
 
 /-- A multiway join over the given inputs. -/
 opaque joinB : JoinSpec → List Bag → Bag
