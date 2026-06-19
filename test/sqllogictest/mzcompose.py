@@ -507,6 +507,10 @@ class SltRunStepConfig:
             f"--prefix={container_name}",
             f"--replica-size={replica_size}",
             f"--replicas={replicas}",
+            # Run the experimental equality-saturation MIR pass across the SLT
+            # corpus so CI surfaces any plan/result diffs. The flag is off by
+            # default in production; this only enables it for SLT runs.
+            "--system-parameter-default=enable_eqsat_optimizer=true",
         ]
         command = [
             "sqllogictest",

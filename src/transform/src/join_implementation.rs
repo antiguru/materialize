@@ -575,6 +575,49 @@ mod index_map {
     }
 }
 
+/// Plan `join` as a delta query, assuming no pre-existing arrangements and no
+/// statistics.
+///
+/// Returns `join` with its implementation set to
+/// [`mz_expr::JoinImplementation::DeltaQuery`], or an error if delta planning
+/// fails (e.g. the join graph is not connected). The arrangement keys are
+/// derived from the join's equivalences, so the result is a correct delta plan;
+/// it is not stats-optimal (cardinalities are unknown here).
+///
+/// This lets a caller commit a join to the delta strategy. The
+/// [`JoinImplementation`] transform only (re)plans `Unimplemented` and
+/// `Differential` joins, so a join returned by this function survives a
+/// subsequent run of that transform unchanged.
+pub fn plan_as_delta_query(
+    join: &MirRelationExpr,
+    optimizer_features: &OptimizerFeatures,
+) -> Result<MirRelationExpr, TransformError> {
+    let MirRelationExpr::Join { inputs, .. } = join else {
+        return Err(TransformError::Internal(
+            "plan_as_delta_query called on a non-join expression".into(),
+        ));
+    };
+    let input_mapper = JoinInputMapper::new(inputs);
+    let n = inputs.len();
+    // No pre-existing arrangements, unique keys, cardinalities, or filters: the
+    // delta planner derives every arrangement key from the equivalences and
+    // plans the arrangements it needs.
+    let available: Vec<Vec<Vec<MirScalarExpr>>> = vec![Vec::new(); n];
+    let unique_keys: Vec<Vec<Vec<usize>>> = vec![Vec::new(); n];
+    let cardinalities: Vec<Option<usize>> = vec![None; n];
+    let filters: Vec<FilterCharacteristics> = vec![FilterCharacteristics::none(); n];
+    let (planned, _new_arrangements) = delta_queries::plan(
+        join,
+        &input_mapper,
+        &available,
+        &unique_keys,
+        &cardinalities,
+        &filters,
+        optimizer_features,
+    )?;
+    Ok(planned)
+}
+
 mod delta_queries {
 
     use std::collections::BTreeSet;

@@ -1,0 +1,32 @@
+# Copyright Materialize, Inc. and contributors. All rights reserved.
+#
+# Use of this software is governed by the Business Source License
+# included in the LICENSE file.
+
+# NOTE: this crate declares its own `[workspace]`, which makes it a standalone
+# workspace root. It is therefore intentionally *not* a member of the top-level
+# Materialize workspace: it has zero third-party dependencies and builds in
+# isolation so it never perturbs (or is perturbed by) the core `mz-*` crates.
+
+[package]
+name = "mz-mir-rewrite-dsl"
+description = "A DSL for cost-oriented, equality-preserving rewrites of MIR relational expressions, with a generated optimizer and a Lean 4 specification."
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "mir-opt"
+path = "src/bin/mir_opt.rs"
+
+[[bin]]
+name = "gen-lean"
+path = "src/bin/gen_lean.rs"
+
+[lib]
+name = "mz_mir_rewrite_dsl"
+path = "src/lib.rs"
+
+[dependencies]
+
+[workspace]

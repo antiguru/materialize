@@ -74,6 +74,7 @@ pub mod compound;
 pub mod cse;
 pub mod dataflow;
 pub mod demand;
+pub mod eqsat;
 pub mod equivalence_propagation;
 pub mod fold_constants;
 pub mod fusion;
@@ -750,7 +751,7 @@ impl Optimizer {
     /// Builds a logical optimizer that only performs logical transformations.
     #[deprecated = "Create an Optimize instance and call `optimize` instead."]
     pub fn logical_optimizer(ctx: &mut TransformCtx) -> Self {
-        let transforms: Vec<Box<dyn Transform>> = transforms![
+        let mut transforms: Vec<Box<dyn Transform>> = transforms![
             // 0. `Transform`s that don't actually change the plan.
             Box::new(Typecheck::new(ctx.typechecking_context()).strict_join_equivalences()),
             Box::new(CollectNotices),
@@ -801,12 +802,19 @@ impl Optimizer {
                     Box::new(FuseAndCollapse::default()),
                 ],
             }),
-            Box::new(
-                Typecheck::new(ctx.typechecking_context())
-                    .disallow_new_globals()
-                    .strict_join_equivalences()
-            ),
         ];
+        // 6. Equality-saturation pass (experimental, default off). Run it after
+        //    the logical fixpoints so they do not clobber the plan it produces
+        //    (in particular a join it commits to a delta implementation), and
+        //    before the final Typecheck so its output is validated.
+        if ctx.features.enable_eqsat_optimizer {
+            transforms.push(Box::new(eqsat::EqSatTransform));
+        }
+        transforms.push(Box::new(
+            Typecheck::new(ctx.typechecking_context())
+                .disallow_new_globals()
+                .strict_join_equivalences(),
+        ));
         Self {
             name: "logical",
             transforms,

@@ -99,6 +99,9 @@ optimizer_feature_flags!({
     enable_eq_classes_withholding_errors: bool,
     // Bound from `SystemVars::enable_eager_delta_joins`.
     enable_eager_delta_joins: bool,
+    // Run the equality-saturation MIR optimizer pass (mz_transform::eqsat).
+    // Bound from `SystemVars::enable_eqsat_optimizer`.
+    enable_eqsat_optimizer: bool,
     // Enable Lattice-based fixpoint iteration on LetRec nodes in the
     // Analysis framework.
     enable_letrec_fixpoint_analysis: bool,
