@@ -18,7 +18,7 @@ The engine began life as the standalone prototype `misc/mir-rewrite-dsl/`; that 
 * `Reduce` and `TopK` lower structurally; the bail set is `Constant`, global `Get`, `FlatMap`, `ArrangeBy`, `LetRec`.
 * The live logical pass does structural rewrites only and leaves every join `Unimplemented`; the `WcoJoin`-to-`DeltaQuery` decision is committed only on the offline `optimize` path (see findings).
 * Lean 4 spec ported to `src/transform/lean/`: 33 theorems, 13 proved, 20 `sorry` (column-structure, n-ary list laws, and empty-oracle obligations). Regenerate with `cargo run -p mz-transform --example gen-lean`.
-* Differential harness `compare_real.rs`: 3 wins (cost-model artifacts), 4 losses, 13 ties over 20 cases.
+* Differential harness `compare_real.rs`: 3 wins (cost-model artifacts), 4 losses, 13 ties over 20 cases (unchanged after workstream B; see Key findings for concern).
 
 ## What is done
 
@@ -45,7 +45,7 @@ graph TD
 
 ## Key findings
 
-* **The live pass is parity, not improvement, by design.** Every active rule is one Materialize already implements, and the live pass changes no join selection. The harness wins are cost-model artifacts (eqsat omits a canonicalizing `Project`); the losses traced to missing scalar folding.
+* **The live pass is parity, not improvement, by design.** Every active rule is one Materialize already implements, and the live pass changes no join selection. The harness wins are cost-model artifacts (eqsat omits a canonicalizing `Project`); the losses remain at 4 after workstream B (3 wins / 4 losses / 13 ties, measured 2026-06-19). The losses are structural: eqsat extracts `n=2` (a residual Filter over a relation) while the real optimizer reaches `n=1` (empty/constant). Lower-time `reduce` fires on the scalar, but the empty-propagation rules (`filter_false` family) do not eliminate the subtree in those cases, which means the losses are not scalar-folding failures after all — they are empty-propagation gaps or extraction-cost artifacts that need a separate investigation.
 * **The genuine divergence is the cost-model decision on cyclic joins, and it is offline-only.** On the triangle join with no pre-existing indexes the e-graph proves `WcoJoin` dominates the binary `Join` on both axes: memory `[1.0,1.0,1.0]` versus `[2.0]` and time `[1.5]` versus `[2.0,1.5]`. `JoinImplementation` picks the dominated binary plan with `enable_eager_delta_joins` off and on, because it weighs arrangement-setup count and cannot see the `N^2` blowup with statistics disabled. `raise` can tag a `WcoJoin` as `JoinImplementation::DeltaQuery` (via `plan_as_delta_query`, reusing `delta_queries::plan`), and that tag survives because `JoinImplementation::action` only replans `Unimplemented`/`Differential`. But this commit is physical-phase structure, so it only runs on the offline `optimize` path; the live logical pass cannot ship it.
 * **Logical versus physical with e-graphs.** `WcoJoin`/delta is inherently physical: it needs available-arrangement and index facts that exist only in physical optimization, and our cost model is currently index-blind (empty available arrangements). The right structure is two eqsat placements: a logical one for structural rewrites (joins `Unimplemented`, the current state) and a physical one after `JoinImplementation` (fed real arrangements, with `Rel::Join` carrying its implementation through lower/raise). E-graphs in principle dissolve the logical/physical split (one saturation, one global cost, extract the optimum), but Materialize's staged pipeline reasserts the boundary through information availability, physical-operator representation, and pipeline contracts such as `ProjectionPushdown` forbidding filled joins. Realizing the unified vision means replacing a contiguous pipeline segment with one saturation, not inserting eqsat between staged passes.
 
@@ -63,7 +63,10 @@ This is where each transform stands today.
 | `UnionBranchCancellation` | `union_cancel` plus the empty-drop rules |
 | `ThresholdElision` | `threshold_elision` (uses the `non_negative` analysis) |
 | `ReduceElision` | `reduce_elision` (uses the `is_unique_key` analysis) |
-| `FoldConstants` (empty and null only) | empty-propagation rules plus the nullability lit-flag |
+| `FoldConstants` | empty-propagation rules, the nullability lit-flag, and lower-time `MirScalarExpr::reduce` on every scalar payload |
+| `ReduceScalars` | lower-time `MirScalarExpr::reduce` on Filter, Map, Join-equivalence, Reduce-key/aggregate, and TopK-limit payloads |
+| `CoalesceCase` | subsumed by lower-time `reduce` (CASE coalescing) |
+| `CaseLiteralTransform` | subsumed by lower-time `reduce` (literal CASE rewriting) |
 
 **Partial** (movement covered, value inference not):
 
@@ -76,7 +79,7 @@ This is where each transform stands today.
 
 **Missing**, in two clusters:
 
-* **Scalar layer** (scalar payloads are opaque whole lists): `ReduceScalars`, general `FoldConstants`, `LiteralLifting`, `LiteralConstraints`, `CoalesceCase`, `CaseLiteralTransform`, `CanonicalizeMfp` (there is no MFP node).
+* **Scalar layer**: `LiteralLifting`, `LiteralConstraints`, and `CanonicalizeMfp` (there is no MFP node).
 * **Analysis-propagation**: `EquivalencePropagation`, `Demand` and `ProjectionPushdown` (no column-liveness analysis), `NonNullRequirements`, `RedundantJoin`, `SemijoinIdempotence`, `ReductionPushdown`, `ReduceReduction`, `WillDistinct`. Plus `RelationCSE` (the graph shares internally, but raise emits a tree with no `Let`) and `FlatMapElimination` (`FlatMap` is bailed to opaque).
 
 **Irreducible** (not equality rewrites; eqsat may decide them, but something must still lower): `Typecheck` and `CollectNotices` (validation and diagnostics), the `MonotonicFlag` annotation, the final MFP canonicalization the renderer demands, and `NormalizeLets` hygiene.
@@ -90,7 +93,7 @@ Five workstreams supply the capabilities; four deletion phases retire the pipeli
 **Workstreams** (capabilities):
 
 * **A. E-class analyses.** Re-express Materialize's `analysis::{Equivalences, UniqueKeys, NonNegative, ColumnNames, Arity, Types}` and a column-liveness/demand lattice as egg-style e-class analyses that merge to a fixpoint during saturation. We already carry `non_negative`, keys, nullability, and monotonic. Equivalences and demand are the high-value additions; they unlock the entire analysis-propagation cluster.
-* **B. Scalar canonicalization.** De-opaque the payloads pragmatically by running `MirScalarExpr::reduce` and `ReduceScalars` on payloads before interning, reusing battle-tested scalar code (the same way the lit-flag is already computed). This buys constant folding, `CoalesceCase`, and `CaseLiteral` without a scalar e-graph. A full scalar e-graph is deferred until a rewrite needs cross-operator scalar saturation.
+* **(done) B. Scalar canonicalization.** De-opaqued the payloads pragmatically by running `MirScalarExpr::reduce` on payloads at lower time, reusing battle-tested scalar code (the same way the lit-flag is already computed). This buys constant folding, `CoalesceCase`, and `CaseLiteral` without a scalar e-graph. A full scalar e-graph is deferred until a rewrite needs cross-operator scalar saturation.
 * **C. MFP coalescing.** At raise time, fold adjacent Map/Filter/Project into `mz_expr::MapFilterProject`, subsuming `CanonicalizeMfp` and part of `LiteralLifting`.
 * **D. Index-aware cost and join carry-through.** Make the cost model consume arrangement and index availability (today empty), and make `Rel::Join` carry and restore its implementation through lower/raise (today wiped to `Unimplemented`). This is the only way to subsume `JoinImplementation` and the real home of the `WcoJoin` win. Inherently physical.
 * **E. CSE, Let, and remaining variants.** Make extraction emit `Let` for e-classes referenced more than once in the DAG (subsuming `RelationCSE` and `NormalizeLets`), lower `Let`/`LetRec` structurally instead of bailing, and de-opaque `FlatMap`/`ArrangeBy`/`Constant`/`TopK`.
@@ -125,6 +128,7 @@ Two hard risks to budget for: saturation cost and termination on production plan
 * Replace the ad-hoc termination guards with a payload-growth detector.
 * Exercise the cost-model `Recommendation` end to end (it is unit-tested only).
 * Discharge the 20 `sorry` Lean obligations (column-structure and n-ary list laws are provable; the empty-oracle ones need the `is_rel_empty` fact modeled).
+* Add a Lean obligation for the lower-time reduction soundness invariant: reduced scalar payloads are valid only because no active rule moves a scalar into a context with relaxed nullability for its referenced columns. Encode the invariant so a future nullability-relaxing rule is forced to discharge it.
 
 ## How to run
 

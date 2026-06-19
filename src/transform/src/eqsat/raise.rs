@@ -11,9 +11,10 @@
 //! directly off their `MirScalarExpr` payloads and re-emitting bailed leaves
 //! verbatim.
 //!
-//! This is the exact inverse of [`crate::eqsat::lower::lower`]. A round-trip
-//! `raise(lower(x)) == x` holds for all plans that lower structurally (i.e.
-//! those containing only the supported variants).
+//! This is the structural inverse of [`crate::eqsat::lower::lower`]. The
+//! round-trip is semantics-preserving and scalar-canonicalizing rather than
+//! byte-identical: lower reduces every scalar payload, so `raise(lower(x))`
+//! returns `x` with its scalars in `MirScalarExpr::reduce` canonical form.
 
 use mz_expr::{LocalId, MirRelationExpr, MirScalarExpr};
 use mz_ore::cast::CastFrom;

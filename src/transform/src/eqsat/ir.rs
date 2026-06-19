@@ -42,11 +42,14 @@ pub struct TopKShape {
     pub expected_group_size: Option<u64>,
 }
 
-/// A scalar payload: the real [`MirScalarExpr`] plus one precomputed fact.
+/// A scalar payload: the reduced [`MirScalarExpr`] plus one precomputed fact.
 ///
-/// `expr` is the authoritative value (raise returns it verbatim). The column
-/// support and bare-column-reference facts the rewrite rules read are computed
-/// live from `expr` (see [`EScalar::cols`], [`EScalar::is_col`]).
+/// `expr` is the authoritative value (raise returns it verbatim). It is the
+/// `MirScalarExpr::reduce` canonical form computed once at lower time against
+/// the column types of the relation the scalar is evaluated over, so the
+/// e-graph carries `ReduceScalars`-equivalent payloads. The column support and
+/// bare-column-reference facts the rewrite rules read are computed live from
+/// `expr` (see [`EScalar::cols`], [`EScalar::is_col`]).
 ///
 /// `lit` records whether `expr` folds to a literal `true`/`false` against the
 /// column types of the relation it is evaluated over. The e-graph tracks only
