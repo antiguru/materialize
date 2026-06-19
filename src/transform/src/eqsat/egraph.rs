@@ -27,7 +27,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use mz_expr::{AggregateExpr, MirRelationExpr};
 
-use crate::eqsat::analysis::{Analysis, KeySet, Keys, LocalFacts, Monotonic, NonNeg, is_superkey};
+use crate::analysis::equivalences::EquivalenceClasses;
+use crate::eqsat::analysis::{
+    Analysis, Equivalences, KeySet, Keys, LocalFacts, Monotonic, NonNeg, is_superkey,
+};
 use crate::eqsat::cost::{Cost, CostModel};
 use crate::eqsat::dsl::*;
 use crate::eqsat::ir::{EScalar, Rel};
@@ -879,6 +882,7 @@ struct Analyses {
     nn: HashMap<Id, bool>,
     keys: HashMap<Id, KeySet>,
     mono: HashMap<Id, bool>,
+    eq: HashMap<Id, Option<EquivalenceClasses>>,
 }
 
 impl EGraph {
@@ -925,6 +929,9 @@ impl EGraph {
                 }),
                 mono: self.run_analysis(&Monotonic {
                     locals: locals.monotonic.clone(),
+                }),
+                eq: self.run_analysis(&Equivalences {
+                    locals: locals.equivalences.clone(),
                 }),
             };
             let mut pending: Vec<(usize, EBindings)> = Vec::new();

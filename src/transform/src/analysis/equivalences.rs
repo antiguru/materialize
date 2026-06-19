@@ -1200,7 +1200,7 @@ impl ExpressionReducer for BTreeMap<MirScalarExpr, MirScalarExpr> {
 }
 
 /// True iff the aggregate function returns an input datum.
-fn aggregate_is_input(aggregate: &AggregateFunc) -> bool {
+pub(crate) fn aggregate_is_input(aggregate: &AggregateFunc) -> bool {
     match aggregate {
         AggregateFunc::MaxInt16
         | AggregateFunc::MaxInt32

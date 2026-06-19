@@ -25,6 +25,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use mz_expr::MirScalarExpr;
+use mz_repr::{Datum, ReprScalarType};
+
+use crate::analysis::equivalences::{EquivalenceClasses, aggregate_is_input};
 use crate::eqsat::egraph::{ENode, Id};
 use crate::eqsat::ir::{Col, Rel};
 
@@ -246,6 +250,215 @@ fn combine_join_keys(parts: &[(KeySet, usize)]) -> KeySet {
     combos.into_iter().collect()
 }
 
+/// Equivalence-class analysis: per e-class, the scalar-expression equivalences
+/// known to hold over the relation the class denotes.
+///
+/// Reuses Materialize's `EquivalenceClasses` (the same type the production
+/// `Equivalences` analysis produces), built here by mirroring that analysis's
+/// per-operator derivation in `analysis/equivalences.rs`.
+///
+/// `None` means the relation is empty (vacuously all expressions equivalent),
+/// the top of the lattice. `Some(default)` means no equivalences are known, the
+/// bottom. `merge` combines the facts of two e-nodes that denote the same
+/// relation, so it asserts all equivalences of both and re-minimizes.
+pub struct Equivalences {
+    pub locals: BTreeMap<usize, Option<EquivalenceClasses>>,
+}
+
+impl Analysis for Equivalences {
+    type Domain = Option<EquivalenceClasses>;
+
+    fn bottom(&self) -> Self::Domain {
+        Some(EquivalenceClasses::default())
+    }
+
+    fn make(
+        &self,
+        node: &ENode,
+        get: &dyn Fn(Id) -> Self::Domain,
+        arity: &dyn Fn(Id) -> usize,
+    ) -> Self::Domain {
+        // Mirror `Equivalences::derive` in analysis/equivalences.rs, arm by arm.
+        // Scalar payloads are `EScalar`; use `.expr` to get the `MirScalarExpr`.
+        match node {
+            // Leaves with no useful row data: emit empty equivalences (bottom).
+            // The eqsat engine bails Constant and Get to opaque leaves; trawling
+            // rows or type schemas is not available here.
+            ENode::Constant { .. } | ENode::Get { .. } | ENode::Opaque(_) => {
+                Some(EquivalenceClasses::default())
+            }
+
+            // A recursive reference: use the Rel-level recursion fact if we have
+            // one, else assume nothing (conservative).
+            ENode::LocalGet { id, .. } => self
+                .locals
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| Some(EquivalenceClasses::default())),
+
+            // Project: restrict equivalences to the surviving columns, introducing
+            // equivalences for repeated output positions.
+            ENode::Project { input, outputs } => {
+                let mut equivalences = get(*input);
+                equivalences
+                    .as_mut()
+                    .map(|e| e.project(outputs.iter().cloned()));
+                equivalences
+            }
+
+            // Map: for each new scalar at position (input_arity + pos), record
+            // the equivalence [column(input_arity+pos), scalar_expr].
+            ENode::Map { input, scalars } => {
+                let mut equivalences = get(*input);
+                if let Some(equivalences) = &mut equivalences {
+                    let input_arity = arity(*input);
+                    for (pos, e) in scalars.iter().enumerate() {
+                        equivalences.classes.push(vec![
+                            MirScalarExpr::column(input_arity + pos),
+                            e.expr.clone(),
+                        ]);
+                    }
+                }
+                equivalences
+            }
+
+            // Filter: add a class that equates all predicates with literal true.
+            ENode::Filter { input, predicates } => {
+                let mut equivalences = get(*input);
+                if let Some(equivalences) = &mut equivalences {
+                    let mut class: Vec<MirScalarExpr> =
+                        predicates.iter().map(|p| p.expr.clone()).collect();
+                    class.push(MirScalarExpr::literal_ok(Datum::True, ReprScalarType::Bool));
+                    equivalences.classes.push(class);
+                }
+                equivalences
+            }
+
+            // Join: permute each input's equivalences to the join's column
+            // layout, then extend with the join's own equivalence scalars.
+            // If any input is None (empty), the whole join is None.
+            ENode::Join {
+                inputs,
+                equivalences: join_equivs,
+            }
+            | ENode::WcoJoin {
+                inputs,
+                equivalences: join_equivs,
+            } => {
+                let mut result = Some(EquivalenceClasses::default());
+                let mut columns: usize = 0;
+                for &inp in inputs.iter() {
+                    let input_arity = arity(inp);
+                    let child_equivs = get(inp);
+                    if let Some(mut child_equivs) = child_equivs {
+                        let permutation: Vec<usize> = (columns..(columns + input_arity)).collect();
+                        child_equivs.permute(&permutation);
+                        result
+                            .as_mut()
+                            .map(|e| e.classes.extend(child_equivs.classes));
+                    } else {
+                        result = None;
+                    }
+                    columns += input_arity;
+                }
+                // Fold the join's own equivalence scalars (each vec is one class).
+                result.as_mut().map(|e| {
+                    e.classes.extend(
+                        join_equivs
+                            .iter()
+                            .map(|class| class.iter().map(|s| s.expr.clone()).collect()),
+                    )
+                });
+                result
+            }
+
+            // Reduce: mirror lines 204-252 of derive.
+            // Add group-key column equivalences as if a Map, minimize, project
+            // to key columns, then handle input-passthrough aggregates.
+            ENode::Reduce {
+                input,
+                group_key,
+                aggregates,
+                ..
+            } => {
+                let input_arity = arity(*input);
+                let mut equivalences = get(*input);
+                if let Some(equivalences) = &mut equivalences {
+                    // Introduce key-column equivalences at positions input_arity + pos.
+                    for (pos, expr) in group_key.iter().enumerate() {
+                        equivalences.classes.push(vec![
+                            MirScalarExpr::column(input_arity + pos),
+                            expr.expr.clone(),
+                        ]);
+                    }
+                    // Minimize before projecting so cross-class information is folded.
+                    equivalences.minimize(None);
+
+                    // Keep a copy for aggregate reasoning before narrowing.
+                    let extended = equivalences.clone();
+
+                    // Project down to the group-key output columns.
+                    equivalences.project(input_arity..(input_arity + group_key.len()));
+
+                    // For aggregates that pass through an input datum (MIN/MAX/ANY/ALL),
+                    // propagate their equivalences into the output.
+                    for (index, aggregate) in aggregates.iter().enumerate() {
+                        if aggregate_is_input(&aggregate.func) {
+                            let mut temp_equivs = extended.clone();
+                            temp_equivs.classes.push(vec![
+                                MirScalarExpr::column(input_arity + group_key.len()),
+                                aggregate.expr.clone(),
+                            ]);
+                            temp_equivs.minimize(None);
+                            temp_equivs.project(input_arity..(input_arity + group_key.len() + 1));
+                            let columns: Vec<usize> = (0..group_key.len())
+                                .chain(std::iter::once(group_key.len() + index))
+                                .collect();
+                            temp_equivs.permute(&columns[..]);
+                            equivalences.classes.extend(temp_equivs.classes);
+                        }
+                    }
+                }
+                equivalences
+            }
+
+            // Passthrough: these operators do not change which rows are present
+            // (Negate flips signs but not values; TopK/Threshold filter rows but
+            // do not change column values of surviving rows).
+            ENode::Negate { input } | ENode::Threshold { input } | ENode::TopK { input, .. } => {
+                get(*input)
+            }
+
+            // Union: intersection of equivalences across all non-empty branches.
+            // Mirrors derive's `flat_map(|c| &results[c])`: None children (empty
+            // relations) are vacuously skipped because an empty branch cannot
+            // constrain the union's equivalences. If all branches are None (all
+            // empty), the union is also None.
+            ENode::Union { inputs } => {
+                // Collect only the Some values; None (empty relation) is skipped.
+                let mut some_iter = inputs.iter().filter_map(|&inp| get(inp));
+                let Some(first) = some_iter.next() else {
+                    // All children were None (empty): union of empty relations is empty.
+                    return None;
+                };
+                Some(first.union_many(some_iter.collect::<Vec<_>>().iter()))
+            }
+        }
+    }
+
+    fn merge(&self, a: Self::Domain, b: Self::Domain) -> Self::Domain {
+        match (a, b) {
+            // None = empty relation = absorbing top (vacuously all equivalences hold).
+            (None, _) | (_, None) => None,
+            (Some(mut a), Some(b)) => {
+                a.classes.extend(b.classes);
+                a.minimize(None);
+                Some(a)
+            }
+        }
+    }
+}
+
 // --- recursion: the same analysis as a fixpoint over `LetRec` ---------------
 //
 // The e-class `Analysis` above is solved by a monotone fixpoint over the
@@ -352,16 +565,32 @@ pub struct LocalFacts {
     pub nonneg: BTreeMap<usize, bool>,
     pub monotonic: BTreeMap<usize, bool>,
     pub keys: BTreeMap<usize, KeySet>,
+    /// Per-binding equivalence classes, seeded `Some(default)` for LetRec
+    /// bindings (conservative: we assume no equivalences are known for the
+    /// recursive reference until a fixpoint is computed). A full recursion-aware
+    /// equivalences fixpoint is left as future work; the conservative seeding
+    /// is sound but misses facts provable only across recursive steps.
+    pub equivalences: BTreeMap<usize, Option<EquivalenceClasses>>,
 }
 
 /// Solve the recursion fixpoints for a `LetRec`'s `bindings`, given the facts
 /// `outer` already known for enclosing bound ids. Returns facts for the bound
 /// ids (and the inherited outer ones), ready to seed fragment saturation.
 pub fn letrec_local_facts(bindings: &[(usize, Rel)], outer: &LocalFacts) -> LocalFacts {
+    // Seed each binding's equivalences conservatively at Some(default). A full
+    // recursion-aware fixpoint for EquivalenceClasses is future work; for now we
+    // inherit only the outer facts and seed new bindings as unknown.
+    let mut equivalences = outer.equivalences.clone();
+    for (id, _) in bindings {
+        equivalences
+            .entry(*id)
+            .or_insert_with(|| Some(EquivalenceClasses::default()));
+    }
     LocalFacts {
         nonneg: rec_solve(&NonNegRec, bindings, &outer.nonneg),
         monotonic: rec_solve(&MonotonicRec, bindings, &outer.monotonic),
         keys: rec_solve(&KeysRec, bindings, &outer.keys),
+        equivalences,
     }
 }
 
@@ -496,6 +725,181 @@ mod tests {
 
     fn col0() -> EScalar {
         EScalar::plain(MirScalarExpr::column(0))
+    }
+
+    // --- Equivalences analysis tests ------------------------------------------
+
+    /// Check that a Filter over a bottom input (no equivalences known on the
+    /// input) with predicate `#0 = #1` yields a class containing
+    /// `{#0, #1, true}` after minimize. The equality predicate is pushed into a
+    /// class together with literal true, so minimize unpacks `Eq(#0,#1) = true`
+    /// into the class `[#0, #1]`.
+    #[mz_ore::test]
+    fn equivalences_filter_equality_class() {
+        let analysis = Equivalences {
+            locals: BTreeMap::new(),
+        };
+        // ENode ids: 0 = input leaf (Get), 1 = Filter over it.
+        // Input: 2 columns (arity 2), no known equivalences.
+        let input_id: Id = 0;
+        let input_arity = 2usize;
+
+        // Predicate: #0 = #1
+        let pred = EScalar::plain(MirScalarExpr::column(0).call_binary(
+            MirScalarExpr::column(1),
+            mz_expr::BinaryFunc::Eq(mz_expr::func::Eq),
+        ));
+
+        let filter_node = ENode::Filter {
+            input: input_id,
+            predicates: vec![pred],
+        };
+
+        // get(input_id) returns bottom (no equivalences).
+        let get = |_: Id| analysis.bottom();
+        let arity = |_: Id| input_arity;
+
+        let result = analysis.make(&filter_node, &get, &arity);
+        let mut result = result.expect("Filter over non-empty input must be Some");
+        result.minimize(None);
+
+        // After minimize, the class [Eq(#0,#1), true] is unpacked:
+        // minimize_once detects Eq(x,y)=true and adds class [x, y], so
+        // columns 0 and 1 must be in the same equivalence class.
+        let col0 = MirScalarExpr::column(0);
+        let col1 = MirScalarExpr::column(1);
+        let reducer = result.reducer();
+        let canon0 = reducer.get(&col0).unwrap_or(&col0);
+        let canon1 = reducer.get(&col1).unwrap_or(&col1);
+        assert_eq!(
+            canon0, canon1,
+            "Filter[#0=#1]: columns 0 and 1 must be equivalent; classes={:?}",
+            result.classes
+        );
+    }
+
+    /// A Join of two arity-1 inputs with join equivalence [#0, #1] (equating
+    /// the first column of each input at the join's combined layout) must yield
+    /// a class equating columns 0 and 1 of the joined output.
+    #[mz_ore::test]
+    fn equivalences_join_equiv_offsets() {
+        let analysis = Equivalences {
+            locals: BTreeMap::new(),
+        };
+        // Two inputs each with arity 1 at ids 0 and 1.
+        let left_id: Id = 0;
+        let right_id: Id = 1;
+
+        // Join equivalence: column 0 (from left, offset 0) = column 1 (from right, offset 1).
+        let join_node = ENode::Join {
+            inputs: vec![left_id, right_id],
+            equivalences: vec![vec![
+                EScalar::plain(MirScalarExpr::column(0)),
+                EScalar::plain(MirScalarExpr::column(1)),
+            ]],
+        };
+
+        let get = |_: Id| Some(EquivalenceClasses::default());
+        let arity = |_: Id| 1usize;
+
+        let result = analysis.make(&join_node, &get, &arity);
+        let mut result = result.expect("Join of non-empty inputs must be Some");
+        result.minimize(None);
+
+        let col0 = MirScalarExpr::column(0);
+        let col1 = MirScalarExpr::column(1);
+        let reducer = result.reducer();
+        let canon0 = reducer.get(&col0).unwrap_or(&col0);
+        let canon1 = reducer.get(&col1).unwrap_or(&col1);
+        assert_eq!(
+            canon0, canon1,
+            "Join[#0=#1]: columns 0 and 1 must be equivalent; classes={:?}",
+            result.classes
+        );
+    }
+
+    /// `merge(Some(default), x) == x` (bottom is the identity) and
+    /// `merge(None, x) == None` (None is absorbing).
+    #[mz_ore::test]
+    fn equivalences_merge_identity_and_absorbing() {
+        let analysis = Equivalences {
+            locals: BTreeMap::new(),
+        };
+        let bottom = analysis.bottom();
+        let top: Option<EquivalenceClasses> = None;
+
+        // Build a non-trivial Some value: {#0, #1} in one class.
+        let mut ec = EquivalenceClasses::default();
+        ec.classes
+            .push(vec![MirScalarExpr::column(0), MirScalarExpr::column(1)]);
+
+        // bottom is identity for merge.
+        let merged = analysis.merge(bottom.clone(), Some(ec.clone()));
+        let merged = merged.expect("merge(bottom, Some(_)) must be Some");
+        let col0 = MirScalarExpr::column(0);
+        let col1 = MirScalarExpr::column(1);
+        let reducer = merged.reducer();
+        let canon0 = reducer.get(&col0).unwrap_or(&col0);
+        let canon1 = reducer.get(&col1).unwrap_or(&col1);
+        assert_eq!(
+            canon0, canon1,
+            "merge(bottom, Some([#0,#1])): columns 0 and 1 must be equivalent"
+        );
+
+        // None is absorbing.
+        assert_eq!(
+            analysis.merge(top.clone(), Some(ec.clone())),
+            None,
+            "merge(None, x) must be None"
+        );
+        assert_eq!(
+            analysis.merge(Some(ec.clone()), top),
+            None,
+            "merge(x, None) must be None"
+        );
+    }
+
+    /// `merge` of `{#0=#1}` and `{#1=#2}` yields a single class `{#0,#1,#2}`
+    /// after minimize (transitivity closure).
+    #[mz_ore::test]
+    fn equivalences_merge_transitive_closure() {
+        let analysis = Equivalences {
+            locals: BTreeMap::new(),
+        };
+
+        let mut ec1 = EquivalenceClasses::default();
+        ec1.classes
+            .push(vec![MirScalarExpr::column(0), MirScalarExpr::column(1)]);
+
+        let mut ec2 = EquivalenceClasses::default();
+        ec2.classes
+            .push(vec![MirScalarExpr::column(1), MirScalarExpr::column(2)]);
+
+        let merged = analysis.merge(Some(ec1), Some(ec2));
+        let merged = merged.expect("merge of two Some must be Some");
+
+        let col0 = MirScalarExpr::column(0);
+        let col1 = MirScalarExpr::column(1);
+        let col2 = MirScalarExpr::column(2);
+        let reducer = merged.reducer();
+        let canon0 = reducer.get(&col0).unwrap_or(&col0);
+        let canon1 = reducer.get(&col1).unwrap_or(&col1);
+        let canon2 = reducer.get(&col2).unwrap_or(&col2);
+        assert_eq!(
+            canon0, canon1,
+            "merge of [#0=#1] and [#1=#2]: 0 and 1 must be equivalent; classes={:?}",
+            merged.classes
+        );
+        assert_eq!(
+            canon1, canon2,
+            "merge of [#0=#1] and [#1=#2]: 1 and 2 must be equivalent; classes={:?}",
+            merged.classes
+        );
+        assert_eq!(
+            canon0, canon2,
+            "merge of [#0=#1] and [#1=#2]: 0 and 2 must be equivalent (transitivity); classes={:?}",
+            merged.classes
+        );
     }
 
     #[mz_ore::test]
