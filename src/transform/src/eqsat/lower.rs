@@ -100,16 +100,29 @@ pub fn lower(expr: &MirRelationExpr) -> Rel {
             aggregates,
             monotonic,
             expected_group_size,
-        } => Rel::Reduce {
-            input: Box::new(lower(input)),
-            group_key: group_key
+        } => {
+            // Group keys and aggregate input expressions reference the input
+            // columns; fold them against the input type.
+            let col_types = input.typ().column_types;
+            let aggregates = aggregates
                 .iter()
-                .map(|e| EScalar::plain(e.clone()))
-                .collect(),
-            aggregates: aggregates.clone(),
-            monotonic: *monotonic,
-            expected_group_size: *expected_group_size,
-        },
+                .map(|agg| {
+                    let mut agg = agg.clone();
+                    agg.expr.reduce(&col_types);
+                    agg
+                })
+                .collect();
+            Rel::Reduce {
+                input: Box::new(lower(input)),
+                group_key: group_key
+                    .iter()
+                    .map(|e| reduced_escalar(e, &col_types))
+                    .collect(),
+                aggregates,
+                monotonic: *monotonic,
+                expected_group_size: *expected_group_size,
+            }
+        }
         TopK {
             input,
             group_key,
@@ -118,17 +131,26 @@ pub fn lower(expr: &MirRelationExpr) -> Rel {
             offset,
             monotonic,
             expected_group_size,
-        } => Rel::TopK {
-            input: Box::new(lower(input)),
-            shape: TopKShape {
-                group_key: group_key.clone(),
-                order_key: order_key.clone(),
-                limit: limit.clone(),
-                offset: *offset,
-                monotonic: *monotonic,
-                expected_group_size: *expected_group_size,
-            },
-        },
+        } => {
+            // The limit is a scalar evaluated over the input; fold it.
+            let col_types = input.typ().column_types;
+            let limit = limit.as_ref().map(|l| {
+                let mut l = l.clone();
+                l.reduce(&col_types);
+                l
+            });
+            Rel::TopK {
+                input: Box::new(lower(input)),
+                shape: TopKShape {
+                    group_key: group_key.clone(),
+                    order_key: order_key.clone(),
+                    limit,
+                    offset: *offset,
+                    monotonic: *monotonic,
+                    expected_group_size: *expected_group_size,
+                },
+            }
+        }
         // Unsupported: bail the entire subtree to an opaque leaf, carried
         // verbatim. Their payloads are type/row-sensitive and no rule rewrites
         // them, so an opaque leaf makes raising trivially exact. Global Get and
@@ -318,6 +340,32 @@ mod tests {
                 );
             }
             other => panic!("expected Filter, got {other:?}"),
+        }
+    }
+
+    #[mz_ore::test]
+    fn reduce_group_key_payload_is_reduced() {
+        // A group key `#0 AND true` over a boolean column reduces to `#0`.
+        let typ = ReprRelationType::new(vec![ReprScalarType::Bool.nullable(false)]);
+        let input = MirRelationExpr::constant(vec![], typ);
+        let r = MirRelationExpr::Reduce {
+            input: Box::new(input),
+            group_key: vec![MirScalarExpr::column(0).and(MirScalarExpr::literal_true())],
+            aggregates: vec![],
+            monotonic: false,
+            expected_group_size: None,
+        };
+        let rel = lower(&r);
+        match rel {
+            Rel::Reduce { group_key, .. } => {
+                assert_eq!(group_key.len(), 1);
+                assert_eq!(
+                    group_key[0].expr,
+                    MirScalarExpr::column(0),
+                    "reduce group key payload was not reduced"
+                );
+            }
+            other => panic!("expected Reduce, got {other:?}"),
         }
     }
 
