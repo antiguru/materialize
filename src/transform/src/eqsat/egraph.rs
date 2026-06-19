@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use mz_expr::{AggregateExpr, MirRelationExpr};
 
-use crate::analysis::equivalences::EquivalenceClasses;
+use crate::analysis::equivalences::{EquivalenceClasses, ExpressionReducer};
 use crate::eqsat::analysis::{
     Analysis, Equivalences, KeySet, Keys, LocalFacts, Monotonic, NonNeg, is_superkey,
 };
@@ -958,8 +958,55 @@ impl EGraph {
                 }
             }
 
-            // Phase 2: mutate — instantiate right-hand sides and union.
+            // Phase 2: mutate — in two sub-phases.
             let mut changed = false;
+
+            // Phase 2a: equivalence-reducer canonicalization. For each e-class
+            // whose equivalence analysis produced a non-trivial reducer, rewrite
+            // the scalar payloads of every e-node in that class to their
+            // canonical representatives and union the result back into the class.
+            // This is the e-graph form of EquivalencePropagation's reducer
+            // application.
+            //
+            // Runs BEFORE the DSL rules (phase 2b) so that analyses.eq IDs are
+            // still the current canonical IDs (rebuild() at the top of the loop
+            // stabilizes them; no mutations have happened yet in this iteration).
+            //
+            // Loop-safety: the reducer is idempotent — applying it a second
+            // time to an already-canonical expression yields the same expression
+            // (the representative maps to itself in the BTreeMap). The rewritten
+            // e-node is therefore hash-consed to an existing one after the first
+            // round that produces it, so `self.union` returns `false` and the
+            // saturation loop's `!changed` guard terminates normally.
+            for (canon_id, ec_opt) in &analyses.eq {
+                let Some(ec) = ec_opt else {
+                    continue;
+                };
+                let reducer = ec.reducer();
+                if reducer.is_empty() {
+                    continue;
+                }
+                // analyses.eq is keyed by canonical IDs from the last rebuild.
+                // Before any mutation in this iteration, self.find(*canon_id) ==
+                // *canon_id, so self.classes[canon_id] is the right entry.
+                let Some(nodes) = self.classes.get(canon_id) else {
+                    continue;
+                };
+                let nodes: Vec<ENode> = nodes.iter().cloned().collect();
+                for node in nodes {
+                    let Some(new_node) = rewrite_escalars(&node, reducer) else {
+                        continue;
+                    };
+                    let new_id = self.add(new_node);
+                    if self.union(new_id, *canon_id) {
+                        changed = true;
+                    }
+                }
+            }
+
+            // Phase 2b: DSL rule application — instantiate right-hand sides and
+            // union. Runs after canonicalization so that the next iteration's
+            // analyses see both the canonical rewrites and the DSL rewrites.
             for (ri, b) in pending {
                 let rule = &rules.rules[ri];
                 let arities = self.binding_arities(&b);
@@ -1355,5 +1402,195 @@ impl EGraph {
                 Rel::Union { base, inputs: rels }
             }
         })
+    }
+}
+
+/// Apply a scalar-expression reducer to each `EScalar` payload of `node`.
+///
+/// Returns `Some(new_node)` if any payload changed (at least one `EScalar`
+/// expression was rewritten), `None` if no rewriting occurred. The `lit` hint
+/// is set to `None` for any rewritten scalar because the rewritten expression
+/// may no longer evaluate to the same literal, and the column types needed to
+/// re-reduce it are not available at saturation time.
+///
+/// Only operators that carry scalar payloads are rewritten: `Filter`
+/// (predicates), `Map` (scalars), and `Join`/`WcoJoin` (equivalences). All
+/// other e-node variants are returned as `None` (they have no scalar payloads
+/// to rewrite).
+fn rewrite_escalars(
+    node: &ENode,
+    reducer: &BTreeMap<mz_expr::MirScalarExpr, mz_expr::MirScalarExpr>,
+) -> Option<ENode> {
+    /// Apply the reducer to a single `EScalar`, returning `(changed, new_escalar)`.
+    fn apply(
+        escalar: &EScalar,
+        reducer: &BTreeMap<mz_expr::MirScalarExpr, mz_expr::MirScalarExpr>,
+    ) -> (bool, EScalar) {
+        let mut expr = escalar.expr.clone();
+        let changed = reducer.reduce_expr(&mut expr);
+        if changed {
+            // The lit hint is cleared because we cannot recompute it without
+            // column type information (not available at saturation time).
+            (true, EScalar::plain(expr))
+        } else {
+            (false, escalar.clone())
+        }
+    }
+
+    /// Apply the reducer to a list of `EScalar`s. Returns `(any_changed, new_list)`.
+    fn apply_list(
+        scalars: &[EScalar],
+        reducer: &BTreeMap<mz_expr::MirScalarExpr, mz_expr::MirScalarExpr>,
+    ) -> (bool, Vec<EScalar>) {
+        let mut any_changed = false;
+        let new_scalars: Vec<EScalar> = scalars
+            .iter()
+            .map(|s| {
+                let (changed, ns) = apply(s, reducer);
+                any_changed = any_changed || changed;
+                ns
+            })
+            .collect();
+        (any_changed, new_scalars)
+    }
+
+    match node {
+        ENode::Filter { input, predicates } => {
+            let (changed, new_preds) = apply_list(predicates, reducer);
+            changed.then(|| ENode::Filter {
+                input: *input,
+                predicates: new_preds,
+            })
+        }
+        ENode::Map { input, scalars } => {
+            let (changed, new_scalars) = apply_list(scalars, reducer);
+            changed.then(|| ENode::Map {
+                input: *input,
+                scalars: new_scalars,
+            })
+        }
+        ENode::Join {
+            inputs,
+            equivalences,
+        } => {
+            let mut any_changed = false;
+            let new_equivs: Vec<Vec<EScalar>> = equivalences
+                .iter()
+                .map(|class| {
+                    let (changed, new_class) = apply_list(class, reducer);
+                    any_changed = any_changed || changed;
+                    new_class
+                })
+                .collect();
+            any_changed.then(|| ENode::Join {
+                inputs: inputs.clone(),
+                equivalences: new_equivs,
+            })
+        }
+        ENode::WcoJoin {
+            inputs,
+            equivalences,
+        } => {
+            let mut any_changed = false;
+            let new_equivs: Vec<Vec<EScalar>> = equivalences
+                .iter()
+                .map(|class| {
+                    let (changed, new_class) = apply_list(class, reducer);
+                    any_changed = any_changed || changed;
+                    new_class
+                })
+                .collect();
+            any_changed.then(|| ENode::WcoJoin {
+                inputs: inputs.clone(),
+                equivalences: new_equivs,
+            })
+        }
+        // No scalar payloads to rewrite.
+        ENode::Constant { .. }
+        | ENode::Get { .. }
+        | ENode::Project { .. }
+        | ENode::Reduce { .. }
+        | ENode::TopK { .. }
+        | ENode::Negate { .. }
+        | ENode::Threshold { .. }
+        | ENode::Union { .. }
+        | ENode::Opaque(_)
+        | ENode::LocalGet { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use mz_expr::MirScalarExpr;
+
+    use super::*;
+    use crate::eqsat::ir::EScalar;
+
+    /// `rewrite_escalars` replaces `#1` with `#0` inside a Filter predicate
+    /// when the reducer maps `Column(1) → Column(0)`.
+    #[mz_ore::test]
+    fn rewrite_escalars_rewrites_filter_predicate() {
+        let mut reducer = BTreeMap::new();
+        reducer.insert(MirScalarExpr::column(1), MirScalarExpr::column(0));
+
+        // Node: Filter[#1] with a dummy input id.
+        let node = ENode::Filter {
+            input: 0,
+            predicates: vec![EScalar::plain(MirScalarExpr::column(1))],
+        };
+        let result = rewrite_escalars(&node, &reducer);
+        let Some(ENode::Filter { predicates, .. }) = result else {
+            panic!("expected rewritten Filter node");
+        };
+        assert_eq!(
+            predicates[0].expr,
+            MirScalarExpr::column(0),
+            "predicate #1 must be rewritten to #0"
+        );
+    }
+
+    /// `rewrite_escalars` returns `None` when no scalar in the node is in the
+    /// reducer's domain (the node is already canonical).
+    #[mz_ore::test]
+    fn rewrite_escalars_returns_none_when_already_canonical() {
+        let mut reducer = BTreeMap::new();
+        reducer.insert(MirScalarExpr::column(1), MirScalarExpr::column(0));
+
+        // Node: Filter[#0] — #0 is already canonical, not in reducer.
+        let node = ENode::Filter {
+            input: 0,
+            predicates: vec![EScalar::plain(MirScalarExpr::column(0))],
+        };
+        assert!(
+            rewrite_escalars(&node, &reducer).is_none(),
+            "a node with canonical scalars must not be rewritten"
+        );
+    }
+
+    /// `rewrite_escalars` rewrites inside a Map scalar.
+    #[mz_ore::test]
+    fn rewrite_escalars_rewrites_map_scalar() {
+        let mut reducer = BTreeMap::new();
+        reducer.insert(MirScalarExpr::column(1), MirScalarExpr::column(0));
+
+        // Scalar: #1 + #1 (two occurrences of non-canonical #1).
+        let add64 = mz_expr::BinaryFunc::AddInt64(mz_expr::func::AddInt64);
+        let scalar_expr =
+            MirScalarExpr::column(1).call_binary(MirScalarExpr::column(1), add64.clone());
+        let node = ENode::Map {
+            input: 0,
+            scalars: vec![EScalar::plain(scalar_expr)],
+        };
+        let result = rewrite_escalars(&node, &reducer);
+        let Some(ENode::Map { scalars, .. }) = result else {
+            panic!("expected rewritten Map node");
+        };
+        let expected = MirScalarExpr::column(0).call_binary(MirScalarExpr::column(0), add64);
+        assert_eq!(
+            scalars[0].expr, expected,
+            "both #1 occurrences must become #0"
+        );
     }
 }
