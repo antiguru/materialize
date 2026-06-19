@@ -145,24 +145,35 @@ pub fn lower(expr: &MirRelationExpr) -> Rel {
     }
 }
 
-/// Build a scalar payload with its `lit` fold against the column types of the
-/// relation it is evaluated over. The original expression is carried unchanged;
-/// only `lit` is sharpened.
+/// Reduce `expr` against `col_types` (its evaluation context) and wrap the
+/// reduced form in an [`EScalar`], recording the `lit` fact off the reduced
+/// expression. This is `ReduceScalars` performed once at lower time, so every
+/// scalar canonicalization MIR's simplifier provides (constant folding, CASE
+/// coalescing, literal CASE rewriting) lands in the interned payload and rides
+/// through saturation unchanged.
+///
+/// `reduce` may use column nullability to simplify, so the reduced form is only
+/// valid in a context whose referenced columns share the nullability of
+/// `col_types`. The active rules preserve those types (see the soundness
+/// invariant in the workstream plan), so reducing once here is sound.
+fn reduced_escalar(expr: &MirScalarExpr, col_types: &[ReprColumnType]) -> EScalar {
+    let mut folded = expr.clone();
+    folded.reduce(col_types);
+    let lit = if folded.is_literal_true() {
+        Some(true)
+    } else if folded.is_literal_false() {
+        Some(false)
+    } else {
+        None
+    };
+    EScalar::new(folded, lit)
+}
+
+/// Reduce each scalar against `col_types` and wrap it in an [`EScalar`].
 fn escalars_in_context(exprs: &[MirScalarExpr], col_types: &[ReprColumnType]) -> Vec<EScalar> {
     exprs
         .iter()
-        .map(|e| {
-            let mut folded = e.clone();
-            folded.reduce(col_types);
-            let lit = if folded.is_literal_true() {
-                Some(true)
-            } else if folded.is_literal_false() {
-                Some(false)
-            } else {
-                None
-            };
-            EScalar::new(e.clone(), lit)
-        })
+        .map(|e| reduced_escalar(e, col_types))
         .collect()
 }
 
@@ -176,19 +187,12 @@ fn escalars_in_map_context(
 ) -> Vec<EScalar> {
     let mut out = Vec::with_capacity(exprs.len());
     for e in exprs {
-        let mut folded = e.clone();
-        folded.reduce(&col_types);
-        let lit = if folded.is_literal_true() {
-            Some(true)
-        } else if folded.is_literal_false() {
-            Some(false)
-        } else {
-            None
-        };
-        out.push(EScalar::new(e.clone(), lit));
+        let escalar = reduced_escalar(e, &col_types);
         // Extend the context with this scalar's type so the next scalar can
-        // reference it. Use the original expression against the current context.
-        let typ = e.typ(&col_types);
+        // reference it. `reduce` preserves the type, so the reduced payload's
+        // type matches the original's.
+        let typ = escalar.expr.typ(&col_types);
+        out.push(escalar);
         col_types.push(typ);
     }
     out
@@ -197,8 +201,8 @@ fn escalars_in_map_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mz_expr::{MirRelationExpr, MirScalarExpr};
-    use mz_repr::{ReprRelationType, ReprScalarType};
+    use mz_expr::{BinaryFunc, MirRelationExpr, MirScalarExpr};
+    use mz_repr::{Datum, ReprRelationType, ReprScalarType};
 
     use crate::eqsat::ir::Rel;
 
@@ -292,6 +296,51 @@ mod tests {
         match rel {
             Rel::Opaque(m) => assert_eq!(m.arity(), 3),
             other => panic!("expected opaque leaf, got {other:?}"),
+        }
+    }
+
+    #[mz_ore::test]
+    fn filter_predicate_payload_is_reduced() {
+        // `#0 AND true` over a boolean column reduces to `#0`. The stored
+        // payload must be the reduced form, not the original conjunction.
+        let typ = ReprRelationType::new(vec![ReprScalarType::Bool.nullable(false)]);
+        let r = MirRelationExpr::constant(vec![], typ).filter(vec![
+            MirScalarExpr::column(0).and(MirScalarExpr::literal_true()),
+        ]);
+        let rel = lower(&r);
+        match rel {
+            Rel::Filter { predicates, .. } => {
+                assert_eq!(predicates.len(), 1);
+                assert_eq!(
+                    predicates[0].expr,
+                    MirScalarExpr::column(0),
+                    "filter predicate payload was not reduced"
+                );
+            }
+            other => panic!("expected Filter, got {other:?}"),
+        }
+    }
+
+    #[mz_ore::test]
+    fn map_scalar_payload_is_reduced() {
+        // `1 + 1` is constant-folded to `2`. The stored Map payload must be the
+        // folded literal.
+        let one = MirScalarExpr::literal_ok(Datum::Int64(1), ReprScalarType::Int64);
+        let sum = one
+            .clone()
+            .call_binary(one, BinaryFunc::AddInt64(mz_expr::func::AddInt64));
+        let r = base(1).map(vec![sum]);
+        let rel = lower(&r);
+        match rel {
+            Rel::Map { scalars, .. } => {
+                assert_eq!(scalars.len(), 1);
+                assert_eq!(
+                    scalars[0].expr,
+                    MirScalarExpr::literal_ok(Datum::Int64(2), ReprScalarType::Int64),
+                    "map scalar payload was not constant-folded"
+                );
+            }
+            other => panic!("expected Map, got {other:?}"),
         }
     }
 }

@@ -74,3 +74,14 @@ Filter (false)
   Get t0
 ----
 Constant <empty>
+
+# Case (e): a constant Map scalar is folded at lower time.
+#
+# `reduced_escalar` runs `MirScalarExpr::reduce` on the payload, so `1 + 1`
+# is stored (and raised) as the literal `2`.
+apply pipeline=eqsat
+Map (1 + 1)
+  Get t0
+----
+Map (2)
+  Get t0
