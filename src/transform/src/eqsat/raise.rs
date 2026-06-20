@@ -29,7 +29,9 @@ use mz_repr::optimize::OptimizerFeatures;
 use mz_repr::{ReprRelationType, ReprScalarType};
 
 use crate::canonicalize_mfp::CanonicalizeMfp;
+use crate::demand::Demand;
 use crate::eqsat::ir::{EScalar, Rel};
+use crate::movement::ProjectionPushdown;
 
 /// Raise `rel` to a `MirRelationExpr`. Inverse of [`crate::eqsat::lower::lower`].
 ///
@@ -228,6 +230,51 @@ pub(crate) fn coalesce_mfp(expr: &mut MirRelationExpr) {
     // production canonicalizer, which also runs Filter::action (predicate
     // canonicalization: sort, dedup, split conjuncts, reduce).
     CanonicalizeMfp::rebuild_mfp(mfp, expr);
+}
+
+/// Demand-narrow the raised plan by reusing the production `Demand` and
+/// `ProjectionPushdown` passes, seeded at the root with full demand.
+///
+/// The e-graph does not reason about column liveness during search, so this
+/// post-extraction pass acquires it the same way `coalesce_mfp` acquires MFP
+/// canonicalization: by running the real production transforms over the
+/// equivalent raised tree. The reused passes union demand across all uses of a
+/// shared `Let` binding, which the bottom-up e-class analyses cannot express.
+///
+/// `commit_wcoj` selects the phase. In the logical phase all joins are
+/// `Unimplemented`, so `Demand` (which introduces the `Project(#0,#0)` join
+/// column-duplication trick) and full `ProjectionPushdown` are both safe. In the
+/// physical phase joins are filled (`DeltaQuery`); `ProjectionPushdown` must skip
+/// joins, and `Demand` is omitted because it manipulates join equivalences and
+/// would corrupt a committed delta plan. The physical phase is gated off and
+/// unvalidated by the SLT differential gate, so it stays conservative.
+///
+/// Applies the narrowing on a clone and adopts it only on success, so a
+/// (practically impossible, given the bounded plan size) recursion-limit error
+/// leaves the input untouched rather than half-transformed.
+pub(crate) fn demand_pushdown(expr: &mut MirRelationExpr, commit_wcoj: bool) {
+    let mut work = expr.clone();
+    let arity = work.arity();
+    if !commit_wcoj {
+        if Demand::default()
+            .action(&mut work, (0..arity).collect(), &mut BTreeMap::new())
+            .is_err()
+        {
+            return;
+        }
+    }
+    let pp = if commit_wcoj {
+        ProjectionPushdown::skip_joins()
+    } else {
+        ProjectionPushdown::default()
+    };
+    if pp
+        .action(&mut work, &(0..arity).collect(), &mut BTreeMap::new())
+        .is_err()
+    {
+        return;
+    }
+    *expr = work;
 }
 
 /// Returns true iff the Map/Filter/Project chain rooted at `expr` has

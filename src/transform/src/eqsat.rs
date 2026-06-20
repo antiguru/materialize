@@ -112,5 +112,10 @@ fn optimize_inner(
     // into the Map-then-Filter-then-Project canonical form that the rest of the
     // pipeline expects from CanonicalizeMfp. Run once over the finished tree.
     raise::coalesce_mfp(&mut raised);
+    // Acquire column-liveness by reusing the production Demand and
+    // ProjectionPushdown passes over the raised plan. The e-graph search does
+    // not reason about demand, so folding these in here lets the pipeline drop
+    // its standalone Demand/ProjectionPushdown runs once eqsat moves earlier.
+    raise::demand_pushdown(&mut raised, commit_wcoj);
     raised
 }
