@@ -38,6 +38,18 @@ proptest.workspace = true
 proptest-derive.workspace = true
 serde_json.workspace = true
 
+[[test]]
+name = "compare_real"
+path = "tests/compare_real.rs"
+
+[[test]]
+name = "wcoj_decision"
+path = "tests/wcoj_decision.rs"
+
+[[test]]
+name = "roundtrip"
+path = "tests/roundtrip.rs"
+
 [features]
 default = []
 proptest = ["dep:proptest", "dep:proptest-derive", "mz-repr/proptest", "mz-expr/proptest"]
