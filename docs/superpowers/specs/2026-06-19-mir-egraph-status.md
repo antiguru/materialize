@@ -14,10 +14,10 @@ The engine began life as the standalone prototype `misc/mir-rewrite-dsl/`; that 
 
 * Engine lives in `mz_transform::eqsat`; the old offline `src/transform-egraph` crate is gone.
 * Registered live in `logical_optimizer` behind `enable_eqsat_optimizer` (default on, temporary).
-* 33 active rewrite rules, 0 disabled.
+* 32 active rewrite rules, 0 disabled (the two unsound negate-join rules were removed).
 * `Reduce` and `TopK` lower structurally; the bail set is `Constant`, global `Get`, `FlatMap`, `ArrangeBy`, `LetRec`.
-* The live logical pass does structural rewrites only and leaves every join `Unimplemented`; the `WcoJoin`-to-`DeltaQuery` decision is committed only on the offline `optimize` path (see findings).
-* Lean 4 spec ported to `src/transform/lean/`: 33 theorems, 13 proved, 20 `sorry` (column-structure, n-ary list laws, and empty-oracle obligations). Regenerate with `cargo run -p mz-transform --example gen-lean`.
+* The logical pass leaves every join `Unimplemented`; the `WcoJoin`-to-`DeltaQuery` decision ships live via the physical placement (`PhysicalEqSatTransform`, flag `enable_eqsat_physical_optimizer`, default off) and on the offline `optimize` path (see findings).
+* Lean 4 spec ported to `src/transform/lean/`: 32 theorems, 13 proved, 19 `sorry` in `Generated.lean` plus 5 `sorry` in `Semantics.lean` (24 total: column-structure, n-ary list laws, and empty-oracle obligations). Regenerate with `cargo run -p mz-transform --example gen-lean`.
 * Differential harness `compare_real.rs`: harness registered for the first time as a Cargo test target in this task (Cargo.toml `[[test]]` entries added); as of 2026-06-20 it terminates in ~30s with `SUMMARY: 3 wins / 0 losses / 17 ties`.
 The 4 prior empty-propagation losses are now ties, closed by the unsatisfiable rule and canonicalization.
 Termination is bounded by three guards: `run_analysis` `MAX_ANALYSIS_ITERS`, Phase 2b mid-loop `MAX_ENODES` recheck, and a bounded `minimize` in the eqsat merge (production `minimize` is unbounded).
@@ -155,7 +155,7 @@ Two hard risks to budget for: saturation cost and termination on production plan
 * Incremental compositional cost in extraction (compute each node's `Cost` from its children's cached `Cost`, avoiding whole-subtree rebuilds), and `Id`-indexed dense storage (also a prerequisite for any SIMD extraction).
 * Replace the ad-hoc termination guards with a payload-growth detector.
 * Exercise the cost-model `Recommendation` end to end (it is unit-tested only).
-* Discharge the 20 `sorry` Lean obligations (column-structure and n-ary list laws are provable; the empty-oracle ones need the `is_rel_empty` fact modeled).
+* Discharge the 24 `sorry` Lean obligations (19 in `Generated.lean`, 5 in `Semantics.lean`): column-structure and n-ary list laws are provable; the empty-oracle ones need the `is_rel_empty` fact modeled; and `Semantics.lean` should model `Reduce`/`TopK`/`Distinct` as non-linear (defined only on non-negative bags) so the negative-multiplicity class becomes a provable obligation rather than being masked by a linear model.
 * Add a Lean obligation for the lower-time reduction soundness condition. The condition is per-rule semantic identity, not a blanket no-relaxation rule: most rules keep a scalar in an equal-or-stricter context, and the one rule that moves it from a stricter to a looser context (filter pushdown into a join input) stays sound because the join equivalence enforces the strengthened non-null fact on every surviving row, mirroring the production `predicate_pushdown`. Encode the per-rule identity so a future rule that moves a scalar without preserving its evaluated semantics is forced to discharge the obligation.
 * ~~**BLOCKER: Fix `run_analysis` non-termination for `Equivalences`.**~~ Resolved (2026-06-20): three guards bound execution: `MAX_ANALYSIS_ITERS` in `run_analysis`, a mid-loop `MAX_ENODES` recheck in Phase 2b, and `minimize_bounded(None, 100)` in the eqsat `Equivalences::merge`.
 Production `EquivalenceClasses::minimize` is unbounded (eqsat isolation is precise).
