@@ -65,6 +65,21 @@ const MATCH_LIMIT: usize = 1_000;
 /// The ban doubles on each re-offense.
 const INITIAL_BAN_LEN: usize = 4;
 
+/// Maximum iterations for [`EGraph::run_analysis`]. The three original
+/// analyses (`NonNeg`, `Monotonic`, `Keys`) operate over finite-height
+/// lattices and converge in a handful of rounds -- well under this cap.
+/// The `Equivalences` analysis is NOT finite-height: its domain is
+/// `Option<EquivalenceClasses>` ranging over arbitrary `MirScalarExpr`
+/// sets, so it may never stabilize on plans with Union+Filter. Bounding
+/// iterations keeps the optimizer from spinning forever. Stopping early
+/// yields a sound under-approximation: every equivalence in the partial
+/// result was derived from real node structure, and both consumers
+/// (canonicalization and `unsatisfiable`) are correct with fewer known
+/// equivalences -- they miss optimizations, not soundness. 100 rounds is
+/// more than enough for any finite-height analysis and provides a
+/// meaningful partial result for the unbounded one.
+const MAX_ANALYSIS_ITERS: usize = 100;
+
 /// A node in the e-graph: an operator whose children are e-class ids. Mirrors
 /// [`Rel`], with `Union` flattened to a single non-empty input list.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1026,6 +1041,15 @@ impl EGraph {
             // Phase 2b: DSL rule application — instantiate right-hand sides and
             // union. Runs after canonicalization so that the next iteration's
             // analyses see both the canonical rewrites and the DSL rewrites.
+            //
+            // The e-node budget is rechecked here because Phase 2b can add many
+            // new nodes in one pass (each `instantiate` call may hash-cons to a
+            // fresh node). rebuild() at the top of the loop collapses equivalent
+            // nodes, so the count before Phase 2b can be far below MAX_ENODES
+            // even after Phase 2b last iteration added thousands. Stopping mid-pass
+            // when the budget is reached is sound: already-applied rewrites are
+            // unioned, and skipped ones are conservatively omitted (same semantics
+            // as the outer MAX_ENODES guard).
             for (ri, b) in pending {
                 let rule = &rules.rules[ri];
                 let arities = self.binding_arities(&b);
@@ -1033,6 +1057,10 @@ impl EGraph {
                     if self.union(new_id, b.root) {
                         changed = true;
                     }
+                }
+                let n_nodes: usize = self.classes.values().map(|ns| ns.len()).sum();
+                if n_nodes > MAX_ENODES {
+                    break;
                 }
             }
 
@@ -1140,10 +1168,16 @@ impl EGraph {
     }
 
     /// Run a lattice-valued [`Analysis`] to a fixpoint, one fact per e-class.
+    ///
+    /// Iteration stops when no value changes (true fixpoint) or when
+    /// [`MAX_ANALYSIS_ITERS`] rounds have elapsed. Early termination yields a
+    /// sound under-approximation: all derived facts are individually sound, and
+    /// both consumers (canonicalization and `unsatisfiable`) are correct with
+    /// fewer known facts than a full fixpoint.
     pub fn run_analysis<A: Analysis>(&self, a: &A) -> HashMap<Id, A::Domain> {
         let mut m: HashMap<Id, A::Domain> =
             self.classes.keys().map(|&id| (id, a.bottom())).collect();
-        loop {
+        for iter in 0..MAX_ANALYSIS_ITERS {
             let mut updates: Vec<(Id, A::Domain)> = Vec::new();
             for (&id, nodes) in &self.classes {
                 let get = |c: Id| m.get(&self.find(c)).cloned().unwrap_or_else(|| a.bottom());
@@ -1157,6 +1191,16 @@ impl EGraph {
                 }
             }
             if updates.is_empty() {
+                break;
+            }
+            if iter + 1 == MAX_ANALYSIS_ITERS {
+                tracing::debug!(
+                    "run_analysis: did not converge after {MAX_ANALYSIS_ITERS} iterations; \
+                     returning partial (under-approximate) result"
+                );
+                for (id, d) in updates {
+                    m.insert(id, d);
+                }
                 break;
             }
             for (id, d) in updates {

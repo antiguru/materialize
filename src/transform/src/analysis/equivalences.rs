@@ -682,7 +682,17 @@ impl EquivalenceClasses {
         self.refresh();
 
         // Termination will be detected by comparing to the map of equivalence classes.
+        // The outer loop is expected to converge quickly because each round either
+        // reduces the complexity of existing equivalences or merges classes. In
+        // practice this converges in very few rounds. However, the `expand` step
+        // can add derived equivalences that interact with the expression reducer,
+        // and in pathological cases (arbitrary MirScalarExpr from e-graph Union
+        // nodes) this loop may not converge. Cap it to avoid non-termination;
+        // stopping early yields a sound under-approximation -- fewer known
+        // equivalences, never incorrect ones.
+        let max_minimize_iters: usize = 100;
         let mut previous = Some(self.remap.clone());
+        let mut iters = 0usize;
         while let Some(prev) = previous {
             // Attempt to add new equivalences.
             let novel = self.expand();
@@ -698,8 +708,16 @@ impl EquivalenceClasses {
                 stable = !self.minimize_once(columns.as_ref().map(|x| &x[..]));
             }
 
+            iters += 1;
             // Termination detection.
             if prev != self.remap {
+                if iters >= max_minimize_iters {
+                    tracing::debug!(
+                        "EquivalenceClasses::minimize: did not converge after \
+                         {max_minimize_iters} iterations; returning partial result"
+                    );
+                    break;
+                }
                 previous = Some(self.remap.clone());
             } else {
                 previous = None;
