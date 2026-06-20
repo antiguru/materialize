@@ -46,6 +46,8 @@
 //! WcoJoin dominates on **both** axes.
 
 use crate::eqsat::ir::{EScalar, Rel};
+use mz_expr::{Columns, Id, MirRelationExpr, MirScalarExpr};
+use mz_repr::GlobalId;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Numerical slack for comparing degrees.
@@ -142,14 +144,42 @@ fn cmp_vecs(a: &[f64], b: &[f64]) -> std::cmp::Ordering {
     Equal
 }
 
-/// The abstract cost model.  Currently parameter-free, but kept as a struct so
-/// policy knobs can be added later.
+/// The abstract cost model.
+///
+/// Optionally carries arrangement availability derived from `ctx.indexes`:
+/// for each global relation, the set of available index keys (each key is an
+/// ordered list of [`MirScalarExpr`]s).  When non-empty, the WcoJoin memory
+/// cost for an input whose join key is already covered by an available
+/// arrangement is zeroed, making WcoJoin correctly cheap when arrangements
+/// exist for free.
+///
+/// `CostModel::default()` and `CostModel::new()` produce an index-blind model
+/// (empty availability), preserving the existing behavior for the logical pass
+/// and for callers that do not have index information.
 #[derive(Clone, Debug, Default)]
-pub struct CostModel;
+pub struct CostModel {
+    /// Available arrangement keys, keyed by the `GlobalId` of the relation they
+    /// belong to.  Each inner `Vec<MirScalarExpr>` is one index key (the ordered
+    /// list of key columns/expressions reported by the [`IndexOracle`]).
+    ///
+    /// [`IndexOracle`]: crate::IndexOracle
+    available: BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>>,
+}
 
 impl CostModel {
+    /// Create an index-blind cost model (empty availability).
     pub fn new() -> Self {
-        CostModel
+        CostModel::default()
+    }
+
+    /// Create a cost model seeded with index availability.
+    ///
+    /// `available` maps each global relation id to the list of index keys
+    /// available on it.  The WcoJoin memory cost for an input that is a direct
+    /// global `Get` whose join key is covered by one of these index keys is
+    /// zeroed.
+    pub fn with_available(available: BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>>) -> Self {
+        CostModel { available }
     }
 
     /// The worst-case output-size degree of `rel` (exponent of `N`).
@@ -270,9 +300,19 @@ impl CostModel {
                 equivalences,
             } => out.extend(self.binary_join_terms(inputs, equivalences)),
             // WcoJoin (leapfrog/generic join) arranges every input.
-            Rel::WcoJoin { inputs, .. } => {
-                for input in inputs {
-                    out.push(self.size_degree(input));
+            // An input whose join key is already covered by an available index
+            // is not charged the arrangement-build memory term: the arrangement
+            // exists for free.
+            Rel::WcoJoin {
+                inputs,
+                equivalences,
+            } => {
+                let mut offset = 0usize;
+                for input in inputs.iter() {
+                    if !self.input_already_arranged(input, offset, equivalences) {
+                        out.push(self.size_degree(input));
+                    }
+                    offset += input.arity();
                 }
             }
             // All other operators do not arrange their inputs.
@@ -282,6 +322,56 @@ impl CostModel {
         for c in rel.children() {
             self.collect_memory(c, out);
         }
+    }
+
+    /// Whether `input` (the join input at `inp_idx` with concatenated-column
+    /// `offset`) is already arranged by the key required by `equivalences`.
+    ///
+    /// Returns `true` only when:
+    /// 1. `input` is directly a `Rel::Opaque` wrapping a global `Get` (a base
+    ///    relation with no intervening projections or filters that would shift
+    ///    columns), AND
+    /// 2. the join key derived from `equivalences` for this input (the set of
+    ///    local column indices the equivalences reference inside this input)
+    ///    matches the column set of some available index on that global id.
+    ///
+    /// Only direct opaque-global-get inputs are matched; wrapped inputs (with
+    /// a filter or project on top) are conservatively treated as unarranged.
+    fn input_already_arranged(
+        &self,
+        input: &Rel,
+        offset: usize,
+        equivalences: &[Vec<EScalar>],
+    ) -> bool {
+        if self.available.is_empty() {
+            return false;
+        }
+        // Only match a bare opaque global Get.
+        let gid = match global_id_from_leaf(input) {
+            Some(g) => g,
+            None => return false,
+        };
+        let keys = match self.available.get(&gid) {
+            Some(ks) => ks,
+            None => return false,
+        };
+        // Compute the set of local column indices (relative to this input's
+        // arity) that the equivalences require this input to be keyed by.
+        let input_arity = input.arity();
+        let join_key_cols = join_key_cols_for_input(offset, input_arity, equivalences);
+        if join_key_cols.is_empty() {
+            // No join constraint on this input: no arrangement needed.
+            return true;
+        }
+        // Check whether any available index covers exactly the join key columns.
+        // An index whose key column set equals the join key column set means the
+        // collection is already arranged by exactly what is needed.
+        keys.iter().any(|key| {
+            // Collect the column indices in this index key (only plain column
+            // references; expressions are not matched).
+            let idx_cols: BTreeSet<usize> = key.iter().filter_map(|e| e.as_column()).collect();
+            idx_cols == join_key_cols
+        })
     }
 
     /// The AGM-bound degree of the full join.
@@ -352,6 +442,59 @@ impl CostModel {
         }
         best[full as usize].clone().unwrap_or_default()
     }
+}
+
+/// Extract the `GlobalId` from a leaf `Rel` if it is a direct opaque global
+/// `Get`.
+///
+/// Returns `Some(gid)` only for `Rel::Opaque(MirRelationExpr::Get { Id::Global(gid) })`.
+/// All other leaves (local gets, filtered/projected inputs) return `None`.
+fn global_id_from_leaf(rel: &Rel) -> Option<GlobalId> {
+    if let Rel::Opaque(mir) = rel {
+        if let MirRelationExpr::Get {
+            id: Id::Global(gid),
+            ..
+        } = mir.as_ref()
+        {
+            return Some(*gid);
+        }
+    }
+    None
+}
+
+/// Compute the set of local column indices (relative to the start of `input`)
+/// that `equivalences` require as a join key for a specific join input.
+///
+/// A column `c` in the concatenated column space belongs to the input at
+/// `[offset, offset + input_arity)`.  The local index is `c - offset`.  A
+/// column is part of the join key for this input when its equivalence class
+/// also references at least one column from another input (so it is actually
+/// constrained, not merely appearing unshared).
+fn join_key_cols_for_input(
+    offset: usize,
+    input_arity: usize,
+    equivalences: &[Vec<EScalar>],
+) -> BTreeSet<usize> {
+    let mut key_cols = BTreeSet::new();
+    for class in equivalences {
+        // Gather columns from this class that fall inside this input's range.
+        let mut local_cols: Vec<usize> = Vec::new();
+        let mut touches_other = false;
+        for escalar in class {
+            for col in escalar.cols() {
+                if col >= offset && col < offset + input_arity {
+                    local_cols.push(col - offset);
+                } else {
+                    touches_other = true;
+                }
+            }
+        }
+        // Only include columns that are genuinely constrained across inputs.
+        if touches_other {
+            key_cols.extend(local_cols);
+        }
+    }
+    key_cols
 }
 
 /// Wrap a list of degrees in a [`Cost`] for comparison (node count ignored,
@@ -759,6 +902,133 @@ mod tests {
             mem_cost.cmp_memory_first(&time_cost),
             std::cmp::Ordering::Less,
             "memory-first ordering must prefer the memory-optimal plan"
+        );
+    }
+
+    // Helpers for index-aware cost model tests.
+
+    use mz_expr::{AccessStrategy, Id};
+    use mz_repr::{GlobalId, ReprRelationType, ReprScalarType};
+
+    /// Build a `Rel::Opaque` wrapping a global `Get` for the given transient id
+    /// and arity.  This mirrors how `lower` handles `MirRelationExpr::Get { Id::Global }`.
+    fn global_opaque(id: u64, arity: usize) -> Rel {
+        let typ = ReprRelationType::new(
+            (0..arity)
+                .map(|_| ReprScalarType::Int64.nullable(false))
+                .collect(),
+        );
+        Rel::Opaque(Box::new(MirRelationExpr::Get {
+            id: Id::Global(GlobalId::Transient(id)),
+            typ,
+            access_strategy: AccessStrategy::UnknownOrLocal,
+        }))
+    }
+
+    /// Build an availability map with a single index key for a global relation.
+    fn avail_one(id: u64, key_cols: &[usize]) -> BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>> {
+        let key: Vec<MirScalarExpr> = key_cols.iter().map(|&c| MirScalarExpr::column(c)).collect();
+        let mut m = BTreeMap::new();
+        m.insert(GlobalId::Transient(id), vec![key]);
+        m
+    }
+
+    /// The WcoJoin memory terms for the triangle with the given cost model.
+    /// Triangle: R(2), S(2), T(2) with equivalences #0=#4, #1=#2, #3=#5.
+    fn triangle_wcoj_memory(model: &CostModel) -> Vec<f64> {
+        let eq = |a: usize, b: usize| vec![col(a), col(b)];
+        let inputs = vec![
+            global_opaque(1, 2),
+            global_opaque(2, 2),
+            global_opaque(3, 2),
+        ];
+        let equivalences = vec![eq(0, 4), eq(1, 2), eq(3, 5)];
+        let wcoj = Rel::WcoJoin {
+            inputs,
+            equivalences,
+        };
+        let cost = model.cost(&wcoj);
+        cost.memory
+    }
+
+    #[mz_ore::test]
+    fn index_aware_no_arrangement_term_for_indexed_input() {
+        // When input R (id=1) has an index on its join key (columns 0 and 1,
+        // the local columns referenced in the #0=#4 and #1=#2 equivalences),
+        // the cost model must NOT charge R's arrangement-build memory term.
+        //
+        // R's join key in the triangle: #0 (from eq #0=#4) and #1 (from eq
+        // #1=#2).  The local columns are 0 and 1, so the index key is [0, 1].
+        let available = avail_one(1, &[0, 1]);
+        let model_aware = CostModel::with_available(available);
+        let model_blind = CostModel::new();
+
+        let mem_aware = triangle_wcoj_memory(&model_aware);
+        let mem_blind = triangle_wcoj_memory(&model_blind);
+
+        // Blind model: 3 memory terms (one per input, each at degree 1.0).
+        assert_eq!(
+            mem_blind.len(),
+            3,
+            "blind model must charge all 3 WcoJoin inputs; got {mem_blind:?}"
+        );
+        // Index-aware model: 2 memory terms (R is free, S and T are charged).
+        assert_eq!(
+            mem_aware.len(),
+            2,
+            "index-aware model must omit R's arrangement term; got {mem_aware:?}"
+        );
+    }
+
+    #[mz_ore::test]
+    fn index_aware_wrong_key_still_charges_arrangement() {
+        // An index on R with the wrong key (only column 0, not [0,1]) does not
+        // cover the full join key for R, so the arrangement term is still charged.
+        let available = avail_one(1, &[0]); // partial key only
+        let model = CostModel::with_available(available);
+        let mem = triangle_wcoj_memory(&model);
+        // All 3 inputs must still be charged.
+        assert_eq!(
+            mem.len(),
+            3,
+            "partial-key index must not suppress the arrangement term; got {mem:?}"
+        );
+    }
+
+    #[mz_ore::test]
+    fn index_blind_triangle_still_prefers_wcoj() {
+        // Regression guard: without any index availability, the index-blind
+        // model (CostModel::new()) must still prefer WcoJoin over binary join
+        // for the triangle.  This ensures the new index-aware path does not
+        // alter the default (index-blind) behavior.
+        let model = CostModel::new();
+        let eq = |a: usize, b: usize| vec![col(a), col(b)];
+        let inputs = vec![
+            global_opaque(1, 2),
+            global_opaque(2, 2),
+            global_opaque(3, 2),
+        ];
+        let equivalences = vec![eq(0, 4), eq(1, 2), eq(3, 5)];
+
+        let join = Rel::Join {
+            inputs: inputs.clone(),
+            equivalences: equivalences.clone(),
+        };
+        let wcoj = Rel::WcoJoin {
+            inputs,
+            equivalences,
+        };
+
+        let cj = model.cost(&join);
+        let cw = model.cost(&wcoj);
+        // WcoJoin must still dominate binary join on both axes.
+        assert!(
+            cw.lt(&cj),
+            "index-blind WcoJoin must dominate binary join; wcoj={cw:?} join={cj:?}"
+        );
+        assert!(
+            cw.memory.first().copied().unwrap_or(0.0) < cj.memory.first().copied().unwrap_or(0.0),
+            "WcoJoin memory max must be lower than binary join memory max"
         );
     }
 }

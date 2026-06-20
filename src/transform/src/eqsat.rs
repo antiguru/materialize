@@ -36,7 +36,9 @@ pub mod transform;
 
 pub use transform::{EqSatTransform, PhysicalEqSatTransform};
 
-use mz_expr::MirRelationExpr;
+use mz_expr::{MirRelationExpr, MirScalarExpr};
+use mz_repr::GlobalId;
+use std::collections::BTreeMap;
 
 /// The built-in rule file, embedded at compile time.
 pub const RULES_SRC: &str = include_str!("eqsat/rules/relational.rewrite");
@@ -55,7 +57,25 @@ pub fn default_ruleset() -> dsl::RuleSet {
 /// so it is only valid after `JoinImplementation`. The live logical-phase
 /// transform uses [`optimize_logical`] instead.
 pub fn optimize(expr: MirRelationExpr) -> MirRelationExpr {
-    optimize_inner(expr, true)
+    optimize_inner(expr, true, BTreeMap::new())
+}
+
+/// Like [`optimize`], but seeds the cost model with arrangement/index
+/// availability so the WcoJoin-vs-binary-join decision is index-aware.
+///
+/// `available` maps each global relation id to the list of index keys
+/// available on it (as reported by the `IndexOracle`).  Join inputs that are
+/// already arranged by their join key are not charged the arrangement-build
+/// memory term, making WcoJoin correctly cheaper when those arrangements exist.
+///
+/// This is the entry point used by [`PhysicalEqSatTransform`].
+///
+/// [`PhysicalEqSatTransform`]: transform::PhysicalEqSatTransform
+pub fn optimize_with_availability(
+    expr: MirRelationExpr,
+    available: BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>>,
+) -> MirRelationExpr {
+    optimize_inner(expr, true, available)
 }
 
 /// Like [`optimize`], but emits worst-case-optimal joins as plain
@@ -63,12 +83,21 @@ pub fn optimize(expr: MirRelationExpr) -> MirRelationExpr {
 /// carries only logical-phase structure (no arranged inputs, no filled
 /// implementations), so it is valid where the logical optimizer runs.
 pub fn optimize_logical(expr: MirRelationExpr) -> MirRelationExpr {
-    optimize_inner(expr, false)
+    optimize_inner(expr, false, BTreeMap::new())
 }
 
-fn optimize_inner(expr: MirRelationExpr, commit_wcoj: bool) -> MirRelationExpr {
+fn optimize_inner(
+    expr: MirRelationExpr,
+    commit_wcoj: bool,
+    available: BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>>,
+) -> MirRelationExpr {
     let rel = lower::lower(&expr);
-    let optimizer = engine::Optimizer::new(default_ruleset(), cost::CostModel::new());
+    let model = if available.is_empty() {
+        cost::CostModel::new()
+    } else {
+        cost::CostModel::with_available(available)
+    };
+    let optimizer = engine::Optimizer::new(default_ruleset(), model);
     let best = optimizer.optimize(rel).plan;
     // The equivalence-preserving arity guard lives at the live transform
     // boundary (`EqSatTransform`), which adopts this output only if its arity

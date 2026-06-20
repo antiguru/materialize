@@ -11,6 +11,9 @@
 //! physical optimizers behind per-phase feature flags.
 
 use mz_expr::MirRelationExpr;
+use mz_expr::MirScalarExpr;
+use mz_repr::GlobalId;
+use std::collections::BTreeMap;
 
 use crate::{Transform, TransformCtx, TransformError};
 
@@ -91,7 +94,7 @@ impl Transform for PhysicalEqSatTransform {
     fn actually_perform_transform(
         &self,
         relation: &mut MirRelationExpr,
-        _ctx: &mut TransformCtx,
+        ctx: &mut TransformCtx,
     ) -> Result<(), TransformError> {
         // Same size cap as the logical pass: saturation cost is superlinear and
         // a large plan can take tens of seconds.
@@ -102,9 +105,15 @@ impl Transform for PhysicalEqSatTransform {
         // Hard arity guard: optimize a clone, adopt only if arity is preserved.
         // On any mismatch, leave the input untouched and log loudly.
         let input_arity = relation.arity();
-        // Unlike the logical pass, this calls `optimize` (commit_wcoj=true) so
-        // the e-graph's WcoJoin choice is lowered to a live DeltaQuery.
-        let optimized = crate::eqsat::optimize(relation.clone());
+        // Build index availability from ctx.indexes so the cost model does not
+        // charge the arrangement-build memory term for join inputs that are
+        // already arranged by an available index.  The physical pass has access
+        // to the real index oracle; the logical pass uses empty availability.
+        let available = build_availability(relation, ctx.indexes);
+        // Unlike the logical pass, this calls optimize_with_availability
+        // (commit_wcoj=true) so the e-graph's WcoJoin choice is lowered to a
+        // live DeltaQuery with an index-aware cost model.
+        let optimized = crate::eqsat::optimize_with_availability(relation.clone(), available);
         if optimized.arity() == input_arity {
             *relation = optimized;
         } else {
@@ -116,4 +125,39 @@ impl Transform for PhysicalEqSatTransform {
         }
         Ok(())
     }
+}
+
+/// Build an index-availability map from the oracle for all global `Get`s
+/// reachable in `relation`.
+///
+/// Walks `relation` to collect every `GlobalId` referenced by a global `Get`,
+/// then queries `oracle.indexes_on` for each to gather available index keys.
+/// The result is passed to the cost model so indexed join inputs are not
+/// charged the arrangement-build memory term.
+fn build_availability(
+    relation: &MirRelationExpr,
+    oracle: &dyn crate::IndexOracle,
+) -> BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>> {
+    use mz_expr::Id;
+    let mut gids: std::collections::BTreeSet<GlobalId> = std::collections::BTreeSet::new();
+    relation.visit_pre(|e| {
+        if let MirRelationExpr::Get {
+            id: Id::Global(gid),
+            ..
+        } = e
+        {
+            gids.insert(*gid);
+        }
+    });
+    let mut available: BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>> = BTreeMap::new();
+    for gid in gids {
+        let keys: Vec<Vec<MirScalarExpr>> = oracle
+            .indexes_on(gid)
+            .map(|(_idx_id, key)| key.to_vec())
+            .collect();
+        if !keys.is_empty() {
+            available.insert(gid, keys);
+        }
+    }
+    available
 }
