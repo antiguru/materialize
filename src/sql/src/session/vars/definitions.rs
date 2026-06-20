@@ -2089,8 +2089,9 @@ feature_flags!(
     },
     {
         name: enable_eqsat_optimizer,
-        // TODO(eqsat): defaulted on temporarily so CI exercises the pass across
-        // the test corpus. Revert to `false` before this leaves draft.
+        // Defaulted on: the pass is exercised across the whole test corpus and
+        // is the intended steady state. The flag stays as a safeguard that can
+        // be turned off if a regression surfaces, not as a pre-merge revert.
         desc: "run the equality-saturation MIR optimizer pass",
         default: true,
         enable_for_item_parsing: false,
