@@ -166,6 +166,25 @@ The `LiteralConstraints`/`JoinImplementation` deletion is the substance of index
 4. **Unify (optional).** Collapse the two placements into one saturation only if index availability can be exposed as an analysis to a single graph; otherwise two placements is the honest steady-state.
 The index-aware part of this phase (index selection modulo projection) is sub-phase I4 in the index-selection plan.
 
+## Concrete next sequence (measured, post first fixpoint_02 cutover)
+
+The path is driven by an earlier-placement experiment loop: insert eqsat before the fixpoints behind a toggle, run the SLT subset, catalog what breaks, build the proven blocker, repeat.
+Confirmed so far: the reorder is soundness-clean (zero wrong-result failures across all variants); the two hard crash blockers were `ReduceReduction` (mixed reduction-type split, landed) and a CSE `LetRec` id-collision (landed).
+
+* **fixpoint_logical_02 cutover** (in progress): remaining gap is plan-quality only, `SemijoinIdempotence` and the `RelationCSE` gap.
+* **fixpoint_logical_01**: harder; the load-bearing missing capability is `PredicatePushdown` equivalence-setting (eqsat must emit join equivalence classes that downstream join planning and the strict-join-equivalences Typecheck require) plus `EquivalencePropagation`.
+* **fuse_and_collapse**: `FoldConstants` is covered by scalar `reduce` at lower; the snag is `NormalizeLets` `LetRec` normalization, which needs `LetRec` de-opaquing for full subsumption.
+* **Phase 2/3/4** as above; Phase 3 (physical join planning plus index selection) is the largest remaining effort and a legitimate stopping point (a fully-eqsat logical optimizer with the heuristic physical pipeline kept).
+
+## Developer iteration tooling (planned, not built)
+
+Cycle time is the dominant friction: any `mz-transform` change relinks `sqllogictest` (links the whole engine), so each iteration is roughly a six-to-ten-minute build plus a five-to-ten-minute run.
+The eqsat pass is pure MIR-to-MIR inside `mz-transform`, so the fix is to iterate at that level.
+The plan is a replay harness: capture the unoptimized `MirRelationExpr` fed to `EqSatTransform` (it already has Proto/serde for persistence) behind an env var, harvested in one `sqllogictest` run over the heavy files, then replay each fixture through `optimize_logical` in a test or bench that links only `mz-transform` (about a two-minute build, instant run).
+This gives fast plan-shape and crash iteration and lets `samply` profile a tiny binary instead of the whole stack.
+The one subtlety is capturing the `TransformCtx` (types travel in the MIR, but indexes and features must be captured too); validate fidelity once against a `sqllogictest` golden.
+`test/clusterd-test-driver` is complementary: it renders and executes dataflows, so it checks answer-correctness of a plan rather than the optimizer, making it a second-tier correctness gate while `sqllogictest` becomes the final golden gate run rarely.
+
 **A concrete payoff: index selection as e-matching modulo equivalence.**
 Today index use is brittle because it matches the lookup key against an indexed key syntactically.
 An index on `#0 + 5` goes unused if the plan computed `5 + #0`, and an index on an `int8` column goes unused when type widening leaves the lookup key as `numeric` (or the reverse).
