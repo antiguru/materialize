@@ -128,19 +128,20 @@ Join on=(#0 = #0)
 # Case (f): equivalence-canonical scalar rewriting.
 #
 # The Filter establishes #0 = #1. The Map computes #1 + 1 over that input.
-# The equivalences analysis for the Map's e-class knows three things:
+# The equivalences analysis for the Map's e-class knows:
 #   - #0 = #1 (from the filter),
 #   - col2 = #0 + 1 (= #1 + 1, the Map's own new column).
-# The canonicalization step rewrites #1 to #0 (canonical) and then #0 + 1 to
-# col2 (#2), because #2 is a bare column (lower complexity than a call
-# expression). The Map[#2] is then converted to a Project by
-# map_columns_to_projection, and the filter predicate #0 = #1 is rewritten
-# to #0 = #0. The combined result is semantically equivalent to the input.
+# The canonicalization step rewrites #1 to #0 (canonical), yielding Map(#0+1).
+# The second equivalence (#0+1 -> col2=#2) is rejected by the validity guard:
+# rewriting the Map scalar at pos=0 to column(input_arity+0)=column(2) would
+# produce a forward self-reference to the column the Map is still constructing.
+# The filter predicate #0=#1 is rewritten to #0=#0.
+# The result keeps the Map and simplifies the filter.
 apply pipeline=eqsat
 Map (#1 + 1)
   Filter (#0 = #1)
     Get t0
 ----
-Project (#0..=#2)
-  Filter (#0 = #0)
+Filter (#0 = #0)
+  Map ((#0 + 1))
     Get t0

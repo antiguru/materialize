@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use mz_expr::{AggregateExpr, MirRelationExpr};
+use mz_expr::{AggregateExpr, Columns, MirRelationExpr};
 
 use crate::analysis::equivalences::{EquivalenceClasses, ExpressionReducer};
 use crate::eqsat::analysis::{
@@ -1029,7 +1029,8 @@ impl EGraph {
                 };
                 let nodes: Vec<ENode> = nodes.iter().cloned().collect();
                 for node in nodes {
-                    let Some(new_node) = rewrite_escalars(&node, reducer) else {
+                    let Some(new_node) = rewrite_escalars(&node, reducer, &|id| self.arity(id))
+                    else {
                         continue;
                     };
                     let new_id = self.add(new_node);
@@ -1489,36 +1490,70 @@ impl EGraph {
 /// (predicates), `Map` (scalars), and `Join`/`WcoJoin` (equivalences). All
 /// other e-node variants are returned as `None` (they have no scalar payloads
 /// to rewrite).
+///
+/// # Canonicalization validity invariant
+///
+/// A rewritten scalar is accepted only if every column reference it contains is
+/// strictly less than the column index that is valid in the scalar's evaluation
+/// context. A rewrite that would produce an out-of-range column reference is
+/// silently dropped (the original scalar is kept). This is always sound: fewer
+/// rewrites means fewer canonicalizations, never an incorrect plan.
+///
+/// The specific bounds, per node type:
+/// * `Map` scalar at position `pos`: valid columns are `0..(input_arity + pos)`.
+///   The scalar may reference input columns and earlier scalars defined by the
+///   same `Map`, but never its own output column or a later one.
+/// * `Filter` predicate: valid columns are `0..input_arity`.
+/// * `Join`/`WcoJoin` equivalence scalar: valid columns are `0..total_input_arity`.
+///
+/// This guard prevents a common pathology: the `Equivalences` analysis adds
+/// `[column(input_arity+pos), defining_expr]` for each `Map` scalar and then
+/// `minimize` picks `column(input_arity+pos)` as the canonical representative,
+/// giving a reducer entry `defining_expr -> column(input_arity+pos)`. Applying
+/// that reducer to the Map's own scalar at `pos` would replace the definition
+/// with a forward reference to the column the Map is still constructing.
 fn rewrite_escalars(
     node: &ENode,
     reducer: &BTreeMap<mz_expr::MirScalarExpr, mz_expr::MirScalarExpr>,
+    arity_fn: &dyn Fn(Id) -> usize,
 ) -> Option<ENode> {
     /// Apply the reducer to a single `EScalar`, returning `(changed, new_escalar)`.
+    /// Rejects the rewrite (keeps the original) if the result references any
+    /// column index `>= max_col`.
     fn apply(
         escalar: &EScalar,
         reducer: &BTreeMap<mz_expr::MirScalarExpr, mz_expr::MirScalarExpr>,
+        max_col: usize,
     ) -> (bool, EScalar) {
         let mut expr = escalar.expr.clone();
         let changed = reducer.reduce_expr(&mut expr);
         if changed {
-            // The lit hint is cleared because we cannot recompute it without
-            // column type information (not available at saturation time).
-            (true, EScalar::plain(expr))
+            // Reject the rewrite if it produces a column reference that is out
+            // of range for the scalar's evaluation context (see invariant above).
+            if expr.support().into_iter().all(|c| c < max_col) {
+                // The lit hint is cleared because we cannot recompute it without
+                // column type information (not available at saturation time).
+                (true, EScalar::plain(expr))
+            } else {
+                (false, escalar.clone())
+            }
         } else {
             (false, escalar.clone())
         }
     }
 
-    /// Apply the reducer to a list of `EScalar`s. Returns `(any_changed, new_list)`.
+    /// Apply the reducer to a list of `EScalar`s with a uniform `max_col` bound.
+    /// Returns `(any_changed, new_list)`.
     fn apply_list(
         scalars: &[EScalar],
         reducer: &BTreeMap<mz_expr::MirScalarExpr, mz_expr::MirScalarExpr>,
+        max_col: usize,
     ) -> (bool, Vec<EScalar>) {
         let mut any_changed = false;
         let new_scalars: Vec<EScalar> = scalars
             .iter()
             .map(|s| {
-                let (changed, ns) = apply(s, reducer);
+                let (changed, ns) = apply(s, reducer, max_col);
                 any_changed = any_changed || changed;
                 ns
             })
@@ -1528,15 +1563,30 @@ fn rewrite_escalars(
 
     match node {
         ENode::Filter { input, predicates } => {
-            let (changed, new_preds) = apply_list(predicates, reducer);
+            // Predicates are evaluated over the input's columns: valid range is 0..input_arity.
+            let input_arity = arity_fn(*input);
+            let (changed, new_preds) = apply_list(predicates, reducer, input_arity);
             changed.then(|| ENode::Filter {
                 input: *input,
                 predicates: new_preds,
             })
         }
         ENode::Map { input, scalars } => {
-            let (changed, new_scalars) = apply_list(scalars, reducer);
-            changed.then(|| ENode::Map {
+            // Scalar at position `pos` is evaluated over input columns and the
+            // earlier same-Map scalars: valid range is 0..(input_arity + pos).
+            let input_arity = arity_fn(*input);
+            let mut any_changed = false;
+            let new_scalars: Vec<EScalar> = scalars
+                .iter()
+                .enumerate()
+                .map(|(pos, s)| {
+                    let max_col = input_arity + pos;
+                    let (changed, ns) = apply(s, reducer, max_col);
+                    any_changed = any_changed || changed;
+                    ns
+                })
+                .collect();
+            any_changed.then(|| ENode::Map {
                 input: *input,
                 scalars: new_scalars,
             })
@@ -1545,11 +1595,14 @@ fn rewrite_escalars(
             inputs,
             equivalences,
         } => {
+            // Equivalence scalars reference the concatenated input space: valid
+            // range is 0..total_input_arity.
+            let total_arity: usize = inputs.iter().map(|&i| arity_fn(i)).sum();
             let mut any_changed = false;
             let new_equivs: Vec<Vec<EScalar>> = equivalences
                 .iter()
                 .map(|class| {
-                    let (changed, new_class) = apply_list(class, reducer);
+                    let (changed, new_class) = apply_list(class, reducer, total_arity);
                     any_changed = any_changed || changed;
                     new_class
                 })
@@ -1563,11 +1616,13 @@ fn rewrite_escalars(
             inputs,
             equivalences,
         } => {
+            // Same layout as Join.
+            let total_arity: usize = inputs.iter().map(|&i| arity_fn(i)).sum();
             let mut any_changed = false;
             let new_equivs: Vec<Vec<EScalar>> = equivalences
                 .iter()
                 .map(|class| {
-                    let (changed, new_class) = apply_list(class, reducer);
+                    let (changed, new_class) = apply_list(class, reducer, total_arity);
                     any_changed = any_changed || changed;
                     new_class
                 })
@@ -1602,17 +1657,25 @@ mod tests {
 
     /// `rewrite_escalars` replaces `#1` with `#0` inside a Filter predicate
     /// when the reducer maps `Column(1) → Column(0)`.
+    /// A dummy arity function for tests: returns the id itself as the arity
+    /// (e.g., id=2 means input has 2 columns). This lets tests control input
+    /// arities by choosing their input id.
+    fn arity_by_id(id: Id) -> usize {
+        id
+    }
+
     #[mz_ore::test]
     fn rewrite_escalars_rewrites_filter_predicate() {
         let mut reducer = BTreeMap::new();
         reducer.insert(MirScalarExpr::column(1), MirScalarExpr::column(0));
 
-        // Node: Filter[#1] with a dummy input id.
+        // Node: Filter[#1] with input id=2 (arity 2 via arity_by_id).
+        // Column 1 < input_arity (2), so the rewrite is valid.
         let node = ENode::Filter {
-            input: 0,
+            input: 2,
             predicates: vec![EScalar::plain(MirScalarExpr::column(1))],
         };
-        let result = rewrite_escalars(&node, &reducer);
+        let result = rewrite_escalars(&node, &reducer, &arity_by_id);
         let Some(ENode::Filter { predicates, .. }) = result else {
             panic!("expected rewritten Filter node");
         };
@@ -1630,13 +1693,13 @@ mod tests {
         let mut reducer = BTreeMap::new();
         reducer.insert(MirScalarExpr::column(1), MirScalarExpr::column(0));
 
-        // Node: Filter[#0]. #0 is already canonical, not in reducer.
+        // Node: Filter[#0] with input id=2 (arity 2). #0 is not in the reducer.
         let node = ENode::Filter {
-            input: 0,
+            input: 2,
             predicates: vec![EScalar::plain(MirScalarExpr::column(0))],
         };
         assert!(
-            rewrite_escalars(&node, &reducer).is_none(),
+            rewrite_escalars(&node, &reducer, &arity_by_id).is_none(),
             "a node with canonical scalars must not be rewritten"
         );
     }
@@ -1647,15 +1710,17 @@ mod tests {
         let mut reducer = BTreeMap::new();
         reducer.insert(MirScalarExpr::column(1), MirScalarExpr::column(0));
 
-        // Scalar: #1 + #1 (two occurrences of non-canonical #1).
+        // Map with input id=2 (arity 2). Scalar at pos=0: #1+#1.
+        // Valid range for pos=0 is 0..(2+0)=2, so column 1 is in range and
+        // the rewrite to column 0 is accepted.
         let add64 = mz_expr::BinaryFunc::AddInt64(mz_expr::func::AddInt64);
         let scalar_expr =
             MirScalarExpr::column(1).call_binary(MirScalarExpr::column(1), add64.clone());
         let node = ENode::Map {
-            input: 0,
+            input: 2,
             scalars: vec![EScalar::plain(scalar_expr)],
         };
-        let result = rewrite_escalars(&node, &reducer);
+        let result = rewrite_escalars(&node, &reducer, &arity_by_id);
         let Some(ENode::Map { scalars, .. }) = result else {
             panic!("expected rewritten Map node");
         };
@@ -1664,5 +1729,68 @@ mod tests {
             scalars[0].expr, expected,
             "both #1 occurrences must become #0"
         );
+    }
+
+    /// A reducer that maps `defining_expr -> column(input_arity+pos)` (the
+    /// pathological case from `Equivalences` analysis) MUST NOT be applied to
+    /// the Map scalar at `pos`, because the result would self-reference the
+    /// column the Map is still constructing.
+    ///
+    /// Concretely: Map over input of arity 1. The scalar at pos=0 is some expr
+    /// `e`. The Equivalences analysis adds `[column(1), e]` and `minimize` picks
+    /// `column(1)` as canonical, giving `reducer[e] = column(1)`. Applying that
+    /// to the Map's scalar would rewrite `e` to `column(1)`, a self-reference.
+    /// The guard in `rewrite_escalars` must detect that column 1 >= max_col (=
+    /// input_arity + pos = 1 + 0 = 1) and keep the original scalar.
+    #[mz_ore::test]
+    fn rewrite_escalars_rejects_map_self_reference() {
+        // input_arity = 1 (input id=1, arity_by_id returns 1).
+        // Scalar at pos=0: some expression that the reducer would map to #1.
+        let defining_expr = MirScalarExpr::column(0); // the original scalar
+        let mut reducer = BTreeMap::new();
+        // The pathological reducer entry: defining_expr -> column(input_arity+pos) = column(1).
+        reducer.insert(defining_expr.clone(), MirScalarExpr::column(1));
+
+        let node = ENode::Map {
+            input: 1, // arity_by_id(1) = 1, so input_arity = 1
+            scalars: vec![EScalar::plain(defining_expr.clone())],
+        };
+        // Before the fix: rewrite_escalars would return Some(Map { scalars: [#1] }),
+        // a self-reference. After the fix: it must return None (no valid rewrite).
+        let result = rewrite_escalars(&node, &reducer, &arity_by_id);
+        assert!(
+            result.is_none(),
+            "rewrite must be rejected: #1 is out of range for Map scalar at pos=0 \
+             with input_arity=1 (max_col=1, column 1 is not < 1)"
+        );
+        // Verify the original scalar is unchanged.
+        if let Some(ENode::Map { scalars, .. }) = result {
+            assert_eq!(
+                scalars[0].expr, defining_expr,
+                "original scalar must be preserved when rewrite is rejected"
+            );
+        }
+    }
+
+    /// The validity guard must NOT reject legitimate rewrites. A Map scalar at
+    /// pos=0 with input_arity=2 may reference column 0 or 1; a reducer that
+    /// maps column(1)->column(0) is valid and must be accepted.
+    #[mz_ore::test]
+    fn rewrite_escalars_accepts_in_range_map_rewrite() {
+        // input_arity = 2 (input id=2, arity_by_id returns 2).
+        // Scalar at pos=0: #1. Reducer: column(1)->column(0).
+        // max_col = 2 + 0 = 2. Column 0 < 2, so the rewrite is valid.
+        let mut reducer = BTreeMap::new();
+        reducer.insert(MirScalarExpr::column(1), MirScalarExpr::column(0));
+
+        let node = ENode::Map {
+            input: 2,
+            scalars: vec![EScalar::plain(MirScalarExpr::column(1))],
+        };
+        let result = rewrite_escalars(&node, &reducer, &arity_by_id);
+        let Some(ENode::Map { scalars, .. }) = result else {
+            panic!("expected rewritten Map node; the rewrite is in range and must be accepted");
+        };
+        assert_eq!(scalars[0].expr, MirScalarExpr::column(0));
     }
 }
