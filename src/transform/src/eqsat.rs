@@ -117,5 +117,11 @@ fn optimize_inner(
     // not reason about demand, so folding these in here lets the pipeline drop
     // its standalone Demand/ProjectionPushdown runs once eqsat moves earlier.
     raise::demand_pushdown(&mut raised, commit_wcoj);
+    // Tidy the projections that demand pushdown introduces, mirroring the
+    // production pipeline which always re-runs CanonicalizeMfp after
+    // ProjectionPushdown. Without this, demand pushdown can leave redundant
+    // nested Project nodes that the downstream pipeline would otherwise clean
+    // up (which is why the optimized-plan SLT gate did not surface them).
+    raise::coalesce_mfp(&mut raised);
     raised
 }

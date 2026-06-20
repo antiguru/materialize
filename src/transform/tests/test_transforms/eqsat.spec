@@ -71,7 +71,8 @@ Filter (#0 = 1)
 ----
 Filter (#0 = 1)
   Distinct project=[#0]
-    Get t0
+    Project (#0)
+      Get t0
 
 # Case (d): filter with a literal-false predicate rewrites to an empty constant.
 #
@@ -131,10 +132,11 @@ Filter (#0 = #2)
     Get t0
     Get t1
 ----
-Join on=(#0 = #2)
-  Filter (#0 = #0)
-    Get t0
-  Get t1
+Project (#0, #1, #0, #3)
+  Join on=(#0 = #2)
+    Filter (#0 = #0)
+      Get t0
+    Get t1
 
 # Case (f): equivalence-canonical scalar rewriting.
 #
