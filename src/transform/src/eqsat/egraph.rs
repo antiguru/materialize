@@ -1067,8 +1067,26 @@ impl EGraph {
                 };
                 let nodes: Vec<ENode> = nodes.iter().cloned().collect();
                 for node in nodes {
-                    let Some(new_node) = rewrite_escalars(&node, reducer, &|id| self.arity(id))
-                    else {
+                    // For Filter nodes, use the input's reducer to avoid the circular
+                    // rewrite where the Filter's own predicates are used to derive
+                    // equivalences that are then fed back into those same predicates.
+                    // See the doc-comment on `rewrite_escalars` for details.
+                    let filter_input_reducer = if let ENode::Filter { input, .. } = &node {
+                        let canon_input = self.find(*input);
+                        analyses
+                            .eq
+                            .get(&canon_input)
+                            .and_then(|ec| ec.as_ref())
+                            .map(|ec| ec.reducer())
+                    } else {
+                        None
+                    };
+                    let Some(new_node) = rewrite_escalars(
+                        &node,
+                        reducer,
+                        filter_input_reducer.as_ref().map(|r| r as &_),
+                        &|id| self.arity(id),
+                    ) else {
                         continue;
                     };
                     let new_id = self.add(new_node);
@@ -1565,9 +1583,33 @@ impl EGraph {
 /// giving a reducer entry `defining_expr -> column(input_arity+pos)`. Applying
 /// that reducer to the Map's own scalar at `pos` would replace the definition
 /// with a forward reference to the column the Map is still constructing.
+/// Rewrite the scalar payloads (predicates, map scalars, join equivalences) of an
+/// [`ENode`] by applying equivalence-class reducers, returning the rewritten node or
+/// `None` if nothing changed.
+///
+/// # Reducer selection
+///
+/// The `reducer` argument is the reducer derived from the *node's own e-class*.
+/// For most nodes (e.g. `Map`) this is correct: the node's output equivalences are a
+/// strict superset of the input's, and the column-range guard in [`apply`] prevents the
+/// circular rewrites that would otherwise be possible.
+///
+/// `filter_input_reducer` is the reducer derived from the *Filter input's e-class*.
+/// Filter predicates must be simplified only by the input's reducer, never the Filter's
+/// own reducer. The Filter's output equivalences include facts derived directly from the
+/// predicates themselves (e.g., `#2 = f()` → `f() ≡ #2`). Feeding those back into the
+/// predicates is circular and unsound: it rewrites `#2 = f()` to `#2 = #2`, making the
+/// predicate trivially true and causing the filter to be dropped entirely.
+///
+/// `Join`/`WcoJoin` have an analogous circularity — their join conditions are part of
+/// their own output equivalences — so those variants return `None` unconditionally (no
+/// scalar rewrite at saturation time).
+// `reducer` is the reducer for the node's own e-class; `filter_input_reducer` is
+// the reducer for the Filter input's e-class (see doc-comment above).
 fn rewrite_escalars(
     node: &ENode,
     reducer: &BTreeMap<mz_expr::MirScalarExpr, mz_expr::MirScalarExpr>,
+    filter_input_reducer: Option<&BTreeMap<mz_expr::MirScalarExpr, mz_expr::MirScalarExpr>>,
     arity_fn: &dyn Fn(Id) -> usize,
 ) -> Option<ENode> {
     /// Apply the reducer to a single `EScalar`, returning `(changed, new_escalar)`.
@@ -1617,8 +1659,13 @@ fn rewrite_escalars(
     match node {
         ENode::Filter { input, predicates } => {
             // Predicates are evaluated over the input's columns: valid range is 0..input_arity.
+            // Use the INPUT's reducer, not the Filter's own. The Filter's own equivalences
+            // include facts derived from the predicates (e.g. `#2 = f()` → `f() ≡ #2`).
+            // Applying those back to the predicates is circular: it rewrites `#2 = f()` to
+            // `#2 = #2`, makes the predicate trivially true, and drops the filter entirely.
+            let input_reducer = filter_input_reducer?;
             let input_arity = arity_fn(*input);
-            let (changed, new_preds) = apply_list(predicates, reducer, input_arity);
+            let (changed, new_preds) = apply_list(predicates, input_reducer, input_arity);
             changed.then(|| ENode::Filter {
                 input: *input,
                 predicates: new_preds,
@@ -1627,6 +1674,11 @@ fn rewrite_escalars(
         ENode::Map { input, scalars } => {
             // Scalar at position `pos` is evaluated over input columns and the
             // earlier same-Map scalars: valid range is 0..(input_arity + pos).
+            // Using the Map's own reducer is safe: the Map adds equivalences for new
+            // output columns at indices >= input_arity, but the column-range guard in
+            // `apply` rejects rewrites that would introduce such out-of-range references
+            // into the scalars themselves (each scalar at position pos has max_col =
+            // input_arity + pos, and a new-column reference has index >= input_arity).
             let input_arity = arity_fn(*input);
             let mut any_changed = false;
             let new_scalars: Vec<EScalar> = scalars
@@ -1644,47 +1696,21 @@ fn rewrite_escalars(
                 scalars: new_scalars,
             })
         }
-        ENode::Join {
-            inputs,
-            equivalences,
-        } => {
-            // Equivalence scalars reference the concatenated input space: valid
-            // range is 0..total_input_arity.
-            let total_arity: usize = inputs.iter().map(|&i| arity_fn(i)).sum();
-            let mut any_changed = false;
-            let new_equivs: Vec<Vec<EScalar>> = equivalences
-                .iter()
-                .map(|class| {
-                    let (changed, new_class) = apply_list(class, reducer, total_arity);
-                    any_changed = any_changed || changed;
-                    new_class
-                })
-                .collect();
-            any_changed.then(|| ENode::Join {
-                inputs: inputs.clone(),
-                equivalences: new_equivs,
-            })
-        }
-        ENode::WcoJoin {
-            inputs,
-            equivalences,
-        } => {
-            // Same layout as Join.
-            let total_arity: usize = inputs.iter().map(|&i| arity_fn(i)).sum();
-            let mut any_changed = false;
-            let new_equivs: Vec<Vec<EScalar>> = equivalences
-                .iter()
-                .map(|class| {
-                    let (changed, new_class) = apply_list(class, reducer, total_arity);
-                    any_changed = any_changed || changed;
-                    new_class
-                })
-                .collect();
-            any_changed.then(|| ENode::WcoJoin {
-                inputs: inputs.clone(),
-                equivalences: new_equivs,
-            })
-        }
+        // Join/WcoJoin: do NOT rewrite equivalence scalars using any e-class reducer.
+        // The Equivalences analysis for a Join e-class derives facts from the join
+        // conditions themselves (e.g. from `[#a, #b]` it concludes `#a = #b` and maps
+        // `#b -> #a`). Feeding that reducer back into the join conditions is circular
+        // and unsound: it rewrites `[#a, #b]` to `[#a, #a]`, silently dropping the
+        // constraint that #a and #b must be equal — effectively turning an equijoin
+        // into a broader (potentially cross-product-like) join that produces more rows.
+        // The extra rows then propagate through the outer-join Threshold/Union/Negate
+        // pattern and produce negative multiplicities that crash dataflow rendering.
+        //
+        // Canonicalizing a join's equivalences is a separate, sound step that must
+        // use only facts from the join's INPUTS, not from the join's own output.
+        // That step is deferred to the typed/physical phase where column types are
+        // available.
+        ENode::Join { .. } | ENode::WcoJoin { .. } => None,
         // No scalar payloads to rewrite.
         ENode::Constant { .. }
         | ENode::Get { .. }
@@ -1728,7 +1754,8 @@ mod tests {
             input: 2,
             predicates: vec![EScalar::plain(MirScalarExpr::column(1))],
         };
-        let result = rewrite_escalars(&node, &reducer, &arity_by_id);
+        // Pass the reducer as `filter_input_reducer` (simulating the input's reducer).
+        let result = rewrite_escalars(&node, &reducer, Some(&reducer), &arity_by_id);
         let Some(ENode::Filter { predicates, .. }) = result else {
             panic!("expected rewritten Filter node");
         };
@@ -1752,7 +1779,7 @@ mod tests {
             predicates: vec![EScalar::plain(MirScalarExpr::column(0))],
         };
         assert!(
-            rewrite_escalars(&node, &reducer, &arity_by_id).is_none(),
+            rewrite_escalars(&node, &reducer, Some(&reducer), &arity_by_id).is_none(),
             "a node with canonical scalars must not be rewritten"
         );
     }
@@ -1773,7 +1800,8 @@ mod tests {
             input: 2,
             scalars: vec![EScalar::plain(scalar_expr)],
         };
-        let result = rewrite_escalars(&node, &reducer, &arity_by_id);
+        // Map nodes do not use `filter_input_reducer`; pass `None`.
+        let result = rewrite_escalars(&node, &reducer, None, &arity_by_id);
         let Some(ENode::Map { scalars, .. }) = result else {
             panic!("expected rewritten Map node");
         };
@@ -1810,7 +1838,8 @@ mod tests {
         };
         // Before the fix: rewrite_escalars would return Some(Map { scalars: [#1] }),
         // a self-reference. After the fix: it must return None (no valid rewrite).
-        let result = rewrite_escalars(&node, &reducer, &arity_by_id);
+        // Map nodes do not use `filter_input_reducer`; pass `None`.
+        let result = rewrite_escalars(&node, &reducer, None, &arity_by_id);
         assert!(
             result.is_none(),
             "rewrite must be rejected: #1 is out of range for Map scalar at pos=0 \
@@ -1840,7 +1869,8 @@ mod tests {
             input: 2,
             scalars: vec![EScalar::plain(MirScalarExpr::column(1))],
         };
-        let result = rewrite_escalars(&node, &reducer, &arity_by_id);
+        // Map nodes do not use `filter_input_reducer`; pass `None`.
+        let result = rewrite_escalars(&node, &reducer, None, &arity_by_id);
         let Some(ENode::Map { scalars, .. }) = result else {
             panic!("expected rewritten Map node; the rewrite is in range and must be accepted");
         };

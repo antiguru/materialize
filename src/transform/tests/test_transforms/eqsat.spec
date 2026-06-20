@@ -101,12 +101,14 @@ Constant <empty>
 # Case (h): equality predicate canonicalized by join equivalences, but retained.
 #
 # The inner join forces #0 = #2. The canonicalization step rewrites #2 to #0
-# (canonical representative), turning the filter predicate #0 = #2 into #0 = #0
-# and the join equivalence #0 = #2 into #0 = #0 as well. The filter is then
-# pushed into the first join input by push_filter_into_join_first. The filter is
-# NOT dropped: dropping Filter[#a=#b] when the input's equivalences prove #a=#b
-# is unsound for null-preserving sources (the equivalences analysis has no
-# nullability facts), so that step is deferred to the typed/physical phase.
+# (canonical representative) in the FILTER predicate, turning #0 = #2 into
+# #0 = #0. The join's own equivalence [#0, #2] is NOT rewritten: applying the
+# join's output reducer back to the join's own conditions is circular and unsound
+# (it would turn an equijoin into a weaker join, producing extra rows). The
+# filter #0 = #0 is pushed into the first join input by push_filter_into_join_first.
+# The filter is NOT dropped: dropping Filter[#a=#b] when the input's equivalences
+# prove #a=#b is unsound for null-preserving sources (the equivalences analysis
+# has no nullability facts), so that step is deferred to the typed/physical phase.
 define
 DefSource name=t1
   - c0: bigint
@@ -120,7 +122,7 @@ Filter (#0 = #2)
     Get t0
     Get t1
 ----
-Join on=(#0 = #0)
+Join on=(#0 = #2)
   Filter (#0 = #0)
     Get t0
   Get t1
@@ -129,19 +131,25 @@ Join on=(#0 = #0)
 #
 # The Filter establishes #0 = #1. The Map computes #1 + 1 over that input.
 # The equivalences analysis for the Map's e-class knows:
-#   - #0 = #1 (from the filter),
+#   - #0 = #1 (from the filter below it),
 #   - col2 = #0 + 1 (= #1 + 1, the Map's own new column).
-# The canonicalization step rewrites #1 to #0 (canonical), yielding Map(#0+1).
+# The Map scalar #1 + 1 is rewritten to #0 + 1 (using the Map's e-class reducer,
+# which includes the filter's #0 = #1 fact from the input). This rewrite is correct
+# because the fact comes from the Map's input chain, not from the Map's own scalars.
 # The second equivalence (#0+1 -> col2=#2) is rejected by the validity guard:
 # rewriting the Map scalar at pos=0 to column(input_arity+0)=column(2) would
 # produce a forward self-reference to the column the Map is still constructing.
-# The filter predicate #0=#1 is rewritten to #0=#0.
-# The result keeps the Map and simplifies the filter.
+#
+# The filter predicate #0 = #1 is NOT rewritten. The Filter's own equivalences
+# include the fact `#0 = #1` derived from the predicate itself, which would map
+# #1 → #0 and rewrite the predicate to #0 = #0 (trivially true, causing the filter
+# to be dropped). Using only the input's (Get t0's) reducer avoids this circular
+# rewrite. Get t0 has no non-trivial equivalences, so the predicate stays as #0 = #1.
 apply pipeline=eqsat
 Map (#1 + 1)
   Filter (#0 = #1)
     Get t0
 ----
-Filter (#0 = #0)
+Filter (#0 = #1)
   Map ((#0 + 1))
     Get t0

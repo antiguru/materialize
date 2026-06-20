@@ -108,24 +108,25 @@ rule distribute_negate_union {
     Negate (Union(a, b)) => Union(Negate a, Negate b)
 }
 
-# Negate distributes onto a SINGLE join input. A join's output multiplicity is
-# the product of its input multiplicities, so negating exactly one factor
-# negates the product: -(a join rest) = (-a) join rest. Negating more than one
-# input would cancel (a double negation), so only the first input is negated.
-# The join inputs are ordered and the e-graph models no join commutativity, so
-# this canonicalizes negation on the first input only.
-rule distribute_negate_join {
-    doc "negate(join(a, rest)) = join(negate(a), rest)"
-    Negate (Join[e](a, rest...)) => Join[e](Negate a, rest...)
-}
-
-# The pull-out direction of the same equivalence. This is the one that unlocks
-# cancellation: it lets `union_cancel` recognize `join(negate(a), rest)` as a
-# negated join, so `Union(join(negate(a), b), join(a, b))` collapses to empty.
-rule factor_negate_join {
-    doc "join(negate(a), rest) = negate(join(a, rest))"
-    Join[e](Negate a, rest...) => Negate (Join[e](a, rest...))
-}
+# NOTE: Both negate-join rewrite directions are UNSOUND in general.
+#
+# The "pull-out" direction — `join(negate(a), rest) => negate(join(a, rest))` — merges
+# `join(negate(a), rest)` and `negate(join(a, rest))` into the same e-class. When a Reduce
+# with a non-linear aggregate (MAX, MIN, ANY, ALL) sits above the join, the extractor may
+# pick `negate(join(a, rest))` as the Reduce input, producing
+# `Reduce_MAX(negate(join(a, rest)))`, which is incorrect because
+# `reduce(r) != negate(reduce(negate(r)))` for non-linear aggregates.
+#
+# The "push-in" direction — `negate(join(a, rest)) => join(negate(a), rest)` — has the
+# same problem. E-graph merging is bidirectional: once the two e-nodes are in the same
+# class (regardless of which rule fired), the extractor may pick either form as the child
+# of a Reduce. The difference between the two directions is only which node triggers the
+# merge; the resulting class equivalence and the extractor's freedom are the same.
+#
+# Both rules are therefore omitted. The cost is that `union_cancel` no longer fires on
+# `Union(join(negate(a), rest), join(a, rest))` and that a
+# `Negate(Join(...))` in the plan stays in that form rather than being pushed inside
+# the join. Correctness takes precedence.
 
 # Push a filter that only reads the *first* join input's columns onto that
 # input (a slice of predicate_pushdown). The first input occupies columns

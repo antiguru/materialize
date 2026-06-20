@@ -70,18 +70,6 @@ theorem rule_distribute_negate_union :
     ∀ (a : Bag) (b : Bag), negateB (unionB a b) = unionB (negateB a) (negateB b) := by
     intro a b; funext x; simp only [filterB, unionB, negateB, thresholdB, predAnd, emptyBag]; omega
 
--- negate(join(a, rest)) = join(negate(a), rest)
-theorem rule_distribute_negate_join :
-    ∀ (e : JoinSpec) (a : Bag) (rest : List Bag), negateB (joinB e (a :: rest)) = joinB e ([negateB a] ++ rest) := by
-    -- not modeled at the bag level (acts on row/column structure)
-    sorry
-
--- join(negate(a), rest) = negate(join(a, rest))
-theorem rule_factor_negate_join :
-    ∀ (e : JoinSpec) (a : Bag) (rest : List Bag), joinB e ((negateB a) :: rest) = negateB (joinB e ([a] ++ rest)) := by
-    -- not modeled at the bag level (acts on row/column structure)
-    sorry
-
 -- filter(p, join(a, rest)) = join(filter(p, a), rest)  when p reads only a's columns
 theorem rule_push_filter_into_join_first :
     ∀ (p : Row → Bool) (e : JoinSpec) (a : Bag) (rest : List Bag), filterB p (joinB e (a :: rest)) = joinB e ([filterB p a] ++ rest) := by
@@ -149,6 +137,11 @@ theorem rule_drop_true_filter :
 theorem rule_empty_false_filter :
     ∀ (p : Row → Bool) (r : Bag) (h_p : ∀ x, p x = false), filterB p r = emptyBag := by
     intro p r h_p; funext x; simp only [filterB, emptyBag]; rw [h_p x]
+
+-- r = 0  when r's equivalences are unsatisfiable
+theorem rule_collapse_unsatisfiable :
+    ∀ (r : Bag), r = emptyBag := by
+    intro r; sorry
 
 -- map(s, r) = project(iota(|r|) ++ cols_of(s), r)  when s is all column refs
 theorem rule_map_columns_to_projection :

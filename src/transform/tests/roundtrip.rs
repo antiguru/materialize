@@ -414,10 +414,13 @@ fn topk_over_empty_collapses() {
 }
 
 #[mz_ore::test]
-fn negate_join_unlocks_cancellation() {
-    // Union(join(a, b), join(negate(a), b)): factor_negate_join rewrites
-    // join(negate(a), b) into negate(join(a, b)), so the two union arms become
-    // r and negate(r) and union_cancel collapses the whole plan to empty.
+fn negate_join_no_longer_cancels() {
+    // Union(join(a, b), join(negate(a), b)): the `factor_negate_join` rule that
+    // rewrote `join(negate(a), b)` into `negate(join(a, b))` was removed because
+    // it is UNSOUND when a non-linear aggregate (MAX, MIN, ANY, ALL) sits above
+    // the join. Without that rule, `union_cancel` does not fire here, and the
+    // plan is returned structurally unchanged (modulo safe rewrites like
+    // threshold-elision). Arity must still be preserved.
     let a = src(1, 2);
     let b = src(2, 2);
     let lhs = MirRelationExpr::join(vec![a.clone(), b.clone()], vec![]);
@@ -428,10 +431,7 @@ fn negate_join_unlocks_cancellation() {
     };
     let out = optimize(r);
     assert_eq!(out.arity(), 4, "arity preserved");
-    assert!(
-        is_empty_constant(&out),
-        "a join and its negated-input twin must cancel to empty, got {out:?}"
-    );
+    // NOT asserting is_empty_constant: the plan no longer collapses.
 }
 
 #[mz_ore::test]
