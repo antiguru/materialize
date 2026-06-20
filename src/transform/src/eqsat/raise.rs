@@ -20,8 +20,10 @@
 //! `raise(lower(x))` returns `x` with scalars in `MirScalarExpr::reduce`
 //! canonical form and with MFP runs in `MapFilterProject` canonical form.
 
+use std::collections::BTreeMap;
+
 use mz_expr::visit::VisitChildren;
-use mz_expr::{LocalId, MapFilterProject, MirRelationExpr, MirScalarExpr};
+use mz_expr::{AccessStrategy, Id, LocalId, MapFilterProject, MirRelationExpr, MirScalarExpr};
 use mz_ore::cast::CastFrom;
 use mz_repr::optimize::OptimizerFeatures;
 use mz_repr::{ReprRelationType, ReprScalarType};
@@ -34,33 +36,56 @@ use crate::eqsat::ir::{EScalar, Rel};
 /// Scalars are read directly off their `MirScalarExpr` payloads. `Rel::Opaque`
 /// leaves re-emit their stored subtree verbatim. Local `Get`s return the
 /// original node carried at lower time, preserving their exact type.
-/// Raise an extracted [`Rel`] back to a [`MirRelationExpr`].
+/// CSE-introduced `LocalGet { get: None }` nodes are raised to
+/// `MirRelationExpr::Get { Id::Local, .. }` using the type of the bound value,
+/// which is threaded via `scope` in [`raise_inner`].
 ///
 /// When `commit_wcoj` is set, a [`Rel::WcoJoin`] is committed to a `DeltaQuery`
 /// implementation via the real delta planner (physical-phase output). When it
 /// is clear, the same node is raised as a plain `Unimplemented` join, which is
 /// the only form valid in the logical optimizer.
 pub fn raise(rel: &Rel, commit_wcoj: bool) -> MirRelationExpr {
-    let raise = |r: &Rel| raise(r, commit_wcoj);
+    let mut scope = BTreeMap::new();
+    raise_inner(rel, commit_wcoj, &mut scope)
+}
+
+/// Inner recursive raise, carrying `scope`: a map from CSE-bound local ids to
+/// the `ReprRelationType` of their bound value. Populated when entering a
+/// `Rel::Let` arm and consumed by `Rel::LocalGet { get: None }` arms.
+fn raise_inner(
+    rel: &Rel,
+    commit_wcoj: bool,
+    scope: &mut BTreeMap<usize, ReprRelationType>,
+) -> MirRelationExpr {
+    let raise =
+        |r: &Rel, scope: &mut BTreeMap<usize, ReprRelationType>| raise_inner(r, commit_wcoj, scope);
     match rel {
         Rel::Opaque(m) => (**m).clone(),
         Rel::LocalGet { get, id, .. } => {
             // The exact original MirRelationExpr::Get{Local} node was carried at
-            // lower time; return it verbatim so types are preserved. A `None`
-            // here means an engine scope placeholder escaped substitution.
+            // lower time; return it verbatim so types are preserved.
+            // A `None` means a CSE-introduced placeholder: emit a local Get with
+            // the type of the bound value, threaded through `scope`.
             match get {
                 Some(g) => (**g).clone(),
                 None => {
-                    panic!("raise of a placeholder LocalGet (id {id}) without an original node")
+                    let typ = scope.get(id).unwrap_or_else(|| {
+                        panic!("raise of a placeholder LocalGet (id {id}) without an original node and no scope entry")
+                    });
+                    MirRelationExpr::Get {
+                        id: Id::Local(LocalId::new(u64::cast_from(*id))),
+                        typ: typ.clone(),
+                        access_strategy: AccessStrategy::UnknownOrLocal,
+                    }
                 }
             }
         }
         Rel::Get { name, .. } => {
             unreachable!("lowering never emits Rel::Get (test-only base); got {name:?}")
         }
-        Rel::Project { input, outputs } => raise(input).project(outputs.clone()),
-        Rel::Map { input, scalars } => raise(input).map(resolve(scalars)),
-        Rel::Filter { input, predicates } => raise(input).filter(resolve(predicates)),
+        Rel::Project { input, outputs } => raise(input, scope).project(outputs.clone()),
+        Rel::Map { input, scalars } => raise(input, scope).map(resolve(scalars)),
+        Rel::Filter { input, predicates } => raise(input, scope).filter(resolve(predicates)),
         Rel::Join {
             inputs,
             equivalences,
@@ -70,25 +95,34 @@ pub fn raise(rel: &Rel, commit_wcoj: bool) -> MirRelationExpr {
             // byte-identical for such inputs but is arity- and
             // semantics-preserving.
             MirRelationExpr::join_scalars(
-                inputs.iter().map(raise).collect(),
+                inputs.iter().map(|r| raise(r, scope)).collect(),
                 equivalences.iter().map(|class| resolve(class)).collect(),
             )
         }
-        Rel::Negate { input } => raise(input).negate(),
-        Rel::Threshold { input } => raise(input).threshold(),
+        Rel::Negate { input } => raise(input, scope).negate(),
+        Rel::Threshold { input } => raise(input, scope).threshold(),
         Rel::Union { base, inputs } => {
             // Use the enum directly rather than the .union() builder to
             // preserve the exact n-ary structure without flattening.
             MirRelationExpr::Union {
-                base: Box::new(raise(base)),
-                inputs: inputs.iter().map(raise).collect(),
+                base: Box::new(raise(base, scope)),
+                inputs: inputs.iter().map(|r| raise(r, scope)).collect(),
             }
         }
-        Rel::Let { id, value, body } => MirRelationExpr::Let {
-            id: LocalId::new(u64::cast_from(*id)),
-            value: Box::new(raise(value)),
-            body: Box::new(raise(body)),
-        },
+        Rel::Let { id, value, body } => {
+            // Raise the bound value, compute its type, insert into scope for the
+            // body, then remove after (scope is lexically scoped by the binding).
+            let mir_value = raise(value, scope);
+            let typ = mir_value.typ();
+            scope.insert(*id, typ);
+            let mir_body = raise(body, scope);
+            scope.remove(id);
+            MirRelationExpr::Let {
+                id: LocalId::new(u64::cast_from(*id)),
+                value: Box::new(mir_value),
+                body: Box::new(mir_body),
+            }
+        }
         Rel::Constant { arity, .. } => {
             // Saturation rules (`empty_false_filter`, `union_cancel`) synthesize
             // `Empty(r)` nodes that the engine encodes as `Constant { card: 0,
@@ -103,14 +137,14 @@ pub fn raise(rel: &Rel, commit_wcoj: bool) -> MirRelationExpr {
             monotonic,
             expected_group_size,
         } => MirRelationExpr::Reduce {
-            input: Box::new(raise(input)),
+            input: Box::new(raise(input, scope)),
             group_key: group_key.iter().map(|s| s.expr.clone()).collect(),
             aggregates: aggregates.clone(),
             monotonic: *monotonic,
             expected_group_size: *expected_group_size,
         },
         Rel::TopK { input, shape } => MirRelationExpr::TopK {
-            input: Box::new(raise(input)),
+            input: Box::new(raise(input, scope)),
             group_key: shape.group_key.clone(),
             order_key: shape.order_key.clone(),
             limit: shape.limit.clone(),
@@ -129,7 +163,7 @@ pub fn raise(rel: &Rel, commit_wcoj: bool) -> MirRelationExpr {
             // Unimplemented and Differential joins, so a DeltaQuery-tagged join
             // survives the downstream pipeline unchanged.
             let join = MirRelationExpr::join_scalars(
-                inputs.iter().map(raise).collect(),
+                inputs.iter().map(|r| raise(r, scope)).collect(),
                 equivalences.iter().map(|class| resolve(class)).collect(),
             );
             if !commit_wcoj {
@@ -375,6 +409,45 @@ mod tests {
         let inner = base(2);
         let r = inner.arrange_by(&[vec![MirScalarExpr::column(0)]]);
         roundtrip(r);
+    }
+
+    #[mz_ore::test]
+    fn raise_cse_let_with_placeholder_local_get() {
+        // Simulate a CSE-produced tree: Let { id=1, value=base(2), body=LocalGet { id=1, get=None } }.
+        // The `get: None` form is what CSE produces; raise must emit a local Get
+        // using the bound value's type rather than panicking.
+        use crate::eqsat::ir::Rel;
+
+        let value_rel = Rel::Constant { card: 0, arity: 2 };
+        let cse_let = Rel::Let {
+            id: 1,
+            value: Box::new(value_rel),
+            body: Box::new(Rel::LocalGet {
+                id: 1,
+                arity: 2,
+                get: None,
+            }),
+        };
+        // Must not panic; raise threads the bound value's type into scope.
+        let raised = raise(&cse_let, false);
+        match &raised {
+            MirRelationExpr::Let { id, value, body } => {
+                assert_eq!(u64::from(id), 1);
+                let expected_typ = value.typ();
+                match body.as_ref() {
+                    MirRelationExpr::Get {
+                        id: Id::Local(lid),
+                        typ,
+                        access_strategy: AccessStrategy::UnknownOrLocal,
+                    } => {
+                        assert_eq!(u64::from(lid), 1);
+                        assert_eq!(typ, &expected_typ);
+                    }
+                    other => panic!("expected local Get body, got {other:?}"),
+                }
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
     }
 
     #[mz_ore::test]

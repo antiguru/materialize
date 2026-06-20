@@ -99,6 +99,10 @@ fn optimize_inner(
     };
     let optimizer = engine::Optimizer::new(default_ruleset(), model);
     let best = optimizer.optimize(rel).plan;
+    // Hoist e-classes referenced more than once into Let bindings, turning the
+    // extracted tree back into a DAG with sharing. This subsumes RelationCSE:
+    // shared compound subterms are bound once and referenced by LocalGet.
+    let best = crate::eqsat::cse::eliminate_common_subexpressions(&best);
     // The equivalence-preserving arity guard lives at the live transform
     // boundary (`EqSatTransform`), which adopts this output only if its arity
     // matches the input. Direct test callers assert arity themselves.

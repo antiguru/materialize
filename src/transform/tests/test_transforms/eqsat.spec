@@ -50,11 +50,14 @@ Filter (#0 = 1)
     Filter (#1 = 1)
       Get t0
 ----
-Union
-  Filter (#0 = 1) AND (#1 = 1)
-    Get t0
-  Filter (#0 = 1) AND (#1 = 1)
-    Get t0
+With
+  cte l1 =
+    Filter (#0 = 1) AND (#1 = 1)
+      Get t0
+Return
+  Union
+    Get l1
+    Get l1
 
 # Case (c): unsupported node (Reduce) under a Filter is preserved verbatim.
 #
@@ -178,3 +181,24 @@ Filter (#2 = 0)
 Filter (#2 = 0) AND (#0 = #1)
   Map ((#0 + 1))
     Get t0
+
+# Case (j): CSE witness: a shared filtered subterm is bound once via Let.
+#
+# The Union of two identical Filter(Get t0) branches has a shared subterm.
+# CSE extracts it into a Let binding with two LocalGet references, so the
+# filter is computed once rather than duplicated in the raised plan.
+apply pipeline=eqsat
+Union
+  Filter (#0 = 1)
+    Get t0
+  Filter (#0 = 1)
+    Get t0
+----
+With
+  cte l1 =
+    Filter (#0 = 1)
+      Get t0
+Return
+  Union
+    Get l1
+    Get l1

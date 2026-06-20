@@ -44,11 +44,15 @@ pub fn eliminate_common_subexpressions(rel: &Rel) -> Rel {
         return rel.clone();
     }
 
-    // 3. Assign a local id to each shared subtree.
+    // 3. Assign a local id to each shared subtree. Ids start above the maximum
+    //    id already present in the tree so CSE-introduced ids never clash with
+    //    lowered Let/LocalGet ids (real LocalId numbers).
+    let max_existing = max_local_id(rel);
+    let id_base = max_existing.saturating_add(1);
     let ids: BTreeMap<Rel, usize> = shared
         .iter()
         .enumerate()
-        .map(|(i, r)| (r.clone(), i))
+        .map(|(i, r)| (r.clone(), id_base + i))
         .collect();
 
     // 4. The body, with every shared subtree replaced by its `LocalGet`.
@@ -70,12 +74,56 @@ pub fn eliminate_common_subexpressions(rel: &Rel) -> Rel {
 }
 
 /// A subtree is worth binding if it is compound (sharing a `Get`/`Constant`/
-/// `Opaque`/`LocalGet` saves nothing).
+/// `Opaque`/`LocalGet` saves nothing) AND closed (contains no references to
+/// lower'd local ids via `LocalGet { get: Some }` or nested `Let` bindings).
+/// Open subtrees reference locals from an outer scope and cannot be hoisted
+/// outside that scope without breaking the scoping invariant.
 fn worth_binding(rel: &Rel) -> bool {
     !matches!(
         rel,
         Rel::Get { .. } | Rel::Constant { .. } | Rel::Opaque(_) | Rel::LocalGet { .. }
-    )
+    ) && is_closed(rel)
+}
+
+/// Returns true iff `rel` contains no `LocalGet { get: Some }` references and
+/// no `Rel::Let` nodes. Such subtrees depend on an outer Let scope and cannot
+/// be hoisted above it.
+fn is_closed(rel: &Rel) -> bool {
+    match rel {
+        Rel::LocalGet { get: Some(_), .. } => false,
+        Rel::LocalGet { get: None, .. } => true,
+        Rel::Let { .. } => false,
+        _ => rel.children().iter().all(|c| is_closed(c)),
+    }
+}
+
+/// Walk `rel` and return the maximum `id` seen in any `Let` or `LocalGet` node,
+/// or 0 if none are present. Used to pick a fresh id base for CSE bindings.
+fn max_local_id(rel: &Rel) -> usize {
+    fn walk(rel: &Rel, max: &mut usize) {
+        match rel {
+            Rel::Let { id, value, body } => {
+                if *id > *max {
+                    *max = *id;
+                }
+                walk(value, max);
+                walk(body, max);
+            }
+            Rel::LocalGet { id, .. } => {
+                if *id > *max {
+                    *max = *id;
+                }
+            }
+            _ => {
+                for c in rel.children() {
+                    walk(c, max);
+                }
+            }
+        }
+    }
+    let mut max = 0;
+    walk(rel, &mut max);
+    max
 }
 
 fn count(rel: &Rel, counts: &mut BTreeMap<Rel, usize>) {
