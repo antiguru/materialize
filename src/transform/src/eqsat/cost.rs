@@ -48,6 +48,7 @@
 use crate::eqsat::ir::{EScalar, Rel};
 use mz_expr::{Columns, Id, MirRelationExpr, MirScalarExpr};
 use mz_repr::GlobalId;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Numerical slack for comparing degrees.
@@ -164,6 +165,41 @@ pub struct CostModel {
     ///
     /// [`IndexOracle`]: crate::IndexOracle
     available: BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>>,
+    /// Memoization cache for the AGM fractional-edge-cover LP solved by
+    /// [`Hypergraph::agm_degree_subset`].
+    ///
+    /// Extraction re-costs every candidate plan across many passes, and the LP
+    /// solve dominates the cost-model profile. The LP result is a pure function
+    /// of its inputs, so each distinct query is solved once and reused.
+    ///
+    /// The model is created fresh per optimization and used single-threaded, so
+    /// `RefCell` interior mutability (needed because `cost` takes `&self`) is
+    /// sound: there is no cross-thread or re-entrant access.
+    agm_cache: RefCell<BTreeMap<AgmKey, f64>>,
+}
+
+/// The complete, exact signature of an [`Hypergraph::agm_degree_subset`] query.
+///
+/// `agm_degree_subset(degs, subset)` reads only: the per-input size degrees
+/// (`degs`), the hypergraph structure (`arities` and the per-class set of input
+/// indices, both captured in [`Hypergraph::build`]), and the `subset` mask. Two
+/// queries with equal `AgmKey` therefore produce byte-identical results, so the
+/// memo is exact: it never changes a cost decision.
+///
+/// `degs` are stored as raw IEEE-754 bits so the key is `Eq`/`Ord` and an exact
+/// match requires bit-identical degrees (no float tolerance, which is correct
+/// here because identical inputs yield bit-identical `size_degree` values).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AgmKey {
+    /// Per-input arities (the `Hypergraph::arities` field).
+    arities: Vec<usize>,
+    /// Per equivalence class, the set of input indices it touches (the
+    /// `Hypergraph::classes` field).
+    classes: Vec<BTreeSet<usize>>,
+    /// Per-input size degrees, as raw `f64` bits.
+    deg_bits: Vec<u64>,
+    /// The subset mask of inputs participating in this sub-join.
+    subset: u32,
 }
 
 impl CostModel {
@@ -179,7 +215,10 @@ impl CostModel {
     /// global `Get` whose join key is covered by one of these index keys is
     /// zeroed.
     pub fn with_available(available: BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>>) -> Self {
-        CostModel { available }
+        CostModel {
+            available,
+            ..Default::default()
+        }
     }
 
     /// The worst-case output-size degree of `rel` (exponent of `N`).
@@ -374,6 +413,26 @@ impl CostModel {
         })
     }
 
+    /// The memoized AGM-bound degree for `subset` of `hg`'s inputs.
+    ///
+    /// Wraps [`Hypergraph::agm_degree_subset`] with the [`AgmKey`] memo. The key
+    /// captures every input the LP reads (degrees, arities, classes, subset), so
+    /// the cached value equals the freshly computed one bit-for-bit.
+    fn agm_degree_subset_memo(&self, hg: &Hypergraph, degs: &[f64], subset: u32) -> f64 {
+        let key = AgmKey {
+            arities: hg.arities.clone(),
+            classes: hg.classes.clone(),
+            deg_bits: degs.iter().map(|d| d.to_bits()).collect(),
+            subset,
+        };
+        if let Some(v) = self.agm_cache.borrow().get(&key) {
+            return *v;
+        }
+        let v = hg.agm_degree_subset(degs, subset);
+        self.agm_cache.borrow_mut().insert(key, v);
+        v
+    }
+
     /// The AGM-bound degree of the full join.
     fn join_degree(&self, inputs: &[Rel], equivalences: &[Vec<EScalar>]) -> f64 {
         let degs: Vec<f64> = inputs.iter().map(|r| self.size_degree(r)).collect();
@@ -383,7 +442,7 @@ impl CostModel {
         } else {
             (1u32 << inputs.len()) - 1
         };
-        hg.agm_degree_subset(&degs, full)
+        self.agm_degree_subset_memo(&hg, &degs, full)
     }
 
     /// The work terms of a binary-join plan: the intermediate degrees of the
@@ -404,7 +463,7 @@ impl CostModel {
             let mut terms = Vec::new();
             for i in 1..n {
                 set |= 1 << i;
-                terms.push(hg.agm_degree_subset(&degs, set));
+                terms.push(self.agm_degree_subset_memo(&hg, &degs, set));
             }
             return terms;
         }
@@ -419,7 +478,7 @@ impl CostModel {
             if s.count_ones() < 2 {
                 continue;
             }
-            let agm = hg.agm_degree_subset(&degs, s);
+            let agm = self.agm_degree_subset_memo(&hg, &degs, s);
             let mut sub = s;
             while sub > 0 {
                 let i = sub.trailing_zeros();
