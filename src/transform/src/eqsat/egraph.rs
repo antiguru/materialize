@@ -65,20 +65,30 @@ const MATCH_LIMIT: usize = 1_000;
 /// The ban doubles on each re-offense.
 const INITIAL_BAN_LEN: usize = 4;
 
-/// Maximum iterations for [`EGraph::run_analysis`]. The three original
-/// analyses (`NonNeg`, `Monotonic`, `Keys`) operate over finite-height
-/// lattices and converge in a handful of rounds -- well under this cap.
-/// The `Equivalences` analysis is NOT finite-height: its domain is
-/// `Option<EquivalenceClasses>` ranging over arbitrary `MirScalarExpr`
-/// sets, so it may never stabilize on plans with Union+Filter. Bounding
-/// iterations keeps the optimizer from spinning forever. Stopping early
-/// yields a sound under-approximation: every equivalence in the partial
-/// result was derived from real node structure, and both consumers
-/// (canonicalization and `unsatisfiable`) are correct with fewer known
-/// equivalences -- they miss optimizations, not soundness. 100 rounds is
-/// more than enough for any finite-height analysis and provides a
-/// meaningful partial result for the unbounded one.
+/// Maximum iterations for [`EGraph::run_analysis`] on the three cheap
+/// finite-height analyses (`NonNeg`, `Monotonic`, `Keys`). Those lattices
+/// have height bounded by the plan size, so they converge in a handful of
+/// rounds -- well under this cap.
 const MAX_ANALYSIS_ITERS: usize = 100;
+
+/// Maximum inner fixpoint rounds for the `Equivalences` analysis when it is
+/// run inside the saturation loop (once per outer iteration). The analysis is
+/// NOT finite-height, so bounding iterations prevents non-termination.
+///
+/// This cap is intentionally much smaller than [`MAX_ANALYSIS_ITERS`]:
+/// each inner round of the Equivalences fixpoint calls
+/// `minimize_bounded(None, 100)` per merge, which is itself expensive
+/// (expand/implications/minimize_once over `MirScalarExpr` sets). A tight
+/// cap keeps per-round cost proportional to plan size. Stopping early is
+/// sound: every derived equivalence reflects real node structure, and
+/// both consumers (Phase 2a canonicalization and `Unsatisfiable`) are
+/// correct with fewer known equivalences -- they miss optimizations, never
+/// produce incorrect plans.
+///
+/// The outer saturation loop repeats the analysis on later rounds when the
+/// e-graph changes, so equivalences that require multiple inner rounds to
+/// derive still emerge over time -- just spread across outer iterations.
+const MAX_EQUIVALENCES_ANALYSIS_ITERS: usize = 4;
 
 /// A node in the e-graph: an operator whose children are e-class ids. Mirrors
 /// [`Rel`], with `Union` flattened to a single non-empty input list.
@@ -930,6 +940,18 @@ impl EGraph {
         let mut banned_until = vec![0usize; queries.len()];
         let mut ban_len = vec![INITIAL_BAN_LEN; queries.len()];
 
+        // Cached Equivalences analysis result, recomputed only when the
+        // e-graph changes between rounds. The analysis is expensive (each
+        // inner fixpoint round calls `minimize_bounded` per merge), so
+        // avoiding redundant recomputation is the dominant performance win.
+        // Soundness: the cache is invalidated whenever `changed` is true, so
+        // the cached value always reflects a state at least as old as the
+        // current e-graph but never newer than the previous round's result.
+        // Both consumers (Phase 2a canonicalization and `Unsatisfiable`) are
+        // monotone: stale (under-approximate) equivalences miss optimizations
+        // but never produce incorrect plans.
+        let mut cached_eq: Option<HashMap<Id, Option<EquivalenceClasses>>> = None;
+
         let mut iters = 0;
         for iter in 0..max_iters {
             iters += 1;
@@ -949,6 +971,24 @@ impl EGraph {
             // (pure-RelVar LHS patterns such as `r => Empty(r) where ...`).
             let all_ids: HashSet<Id> = self.classes.keys().copied().collect();
 
+            // Recompute the Equivalences analysis only on the first iteration
+            // and after rounds where the e-graph changed (new e-nodes or
+            // unions). On stable rounds the cache holds a result that is still
+            // valid: no structural change means no new equivalences can arise.
+            // Using MAX_EQUIVALENCES_ANALYSIS_ITERS (<<100) keeps each
+            // recomputation cheap while the outer loop spreads the work over
+            // multiple saturation rounds.
+            if cached_eq.is_none() {
+                cached_eq = Some(self.run_analysis_bounded(
+                    &Equivalences {
+                        locals: locals.equivalences.clone(),
+                    },
+                    MAX_EQUIVALENCES_ANALYSIS_ITERS,
+                ));
+            }
+            // The `if` above ensures `cached_eq` is `Some`.
+            let eq = cached_eq.as_ref().unwrap().clone();
+
             // Phase 1 (read-only): collect every rewrite to apply.
             let analyses = Analyses {
                 nn: self.run_analysis(&NonNeg {
@@ -960,9 +1000,7 @@ impl EGraph {
                 mono: self.run_analysis(&Monotonic {
                     locals: locals.monotonic.clone(),
                 }),
-                eq: self.run_analysis(&Equivalences {
-                    locals: locals.equivalences.clone(),
-                }),
+                eq,
             };
             let mut pending: Vec<(usize, EBindings)> = Vec::new();
             for (qi, (ri, query)) in queries.iter().enumerate() {
@@ -1069,6 +1107,10 @@ impl EGraph {
             if !changed {
                 break;
             }
+            // The e-graph changed this round (new nodes or unions). Invalidate
+            // the Equivalences cache so the next round recomputes it against the
+            // updated structure.
+            cached_eq = None;
         }
         self.rebuild();
         iters
@@ -1172,14 +1214,14 @@ impl EGraph {
     /// Run a lattice-valued [`Analysis`] to a fixpoint, one fact per e-class.
     ///
     /// Iteration stops when no value changes (true fixpoint) or when
-    /// [`MAX_ANALYSIS_ITERS`] rounds have elapsed. Early termination yields a
-    /// sound under-approximation: all derived facts are individually sound, and
-    /// both consumers (canonicalization and `unsatisfiable`) are correct with
-    /// fewer known facts than a full fixpoint.
-    pub fn run_analysis<A: Analysis>(&self, a: &A) -> HashMap<Id, A::Domain> {
+    /// `max_iters` rounds have elapsed. Early termination yields a sound
+    /// under-approximation: all derived facts are individually sound, and both
+    /// consumers (canonicalization and `unsatisfiable`) are correct with fewer
+    /// known facts than a full fixpoint.
+    fn run_analysis_bounded<A: Analysis>(&self, a: &A, max_iters: usize) -> HashMap<Id, A::Domain> {
         let mut m: HashMap<Id, A::Domain> =
             self.classes.keys().map(|&id| (id, a.bottom())).collect();
-        for iter in 0..MAX_ANALYSIS_ITERS {
+        for iter in 0..max_iters {
             let mut updates: Vec<(Id, A::Domain)> = Vec::new();
             for (&id, nodes) in &self.classes {
                 let get = |c: Id| m.get(&self.find(c)).cloned().unwrap_or_else(|| a.bottom());
@@ -1195,9 +1237,9 @@ impl EGraph {
             if updates.is_empty() {
                 break;
             }
-            if iter + 1 == MAX_ANALYSIS_ITERS {
+            if iter + 1 == max_iters {
                 tracing::debug!(
-                    "run_analysis: did not converge after {MAX_ANALYSIS_ITERS} iterations; \
+                    "run_analysis: did not converge after {max_iters} iterations; \
                      returning partial (under-approximate) result"
                 );
                 for (id, d) in updates {
@@ -1210,6 +1252,17 @@ impl EGraph {
             }
         }
         m
+    }
+
+    /// Run a lattice-valued [`Analysis`] to a fixpoint, one fact per e-class.
+    ///
+    /// Iteration stops when no value changes (true fixpoint) or when
+    /// [`MAX_ANALYSIS_ITERS`] rounds have elapsed. Early termination yields a
+    /// sound under-approximation: all derived facts are individually sound, and
+    /// both consumers (canonicalization and `unsatisfiable`) are correct with
+    /// fewer known facts than a full fixpoint.
+    pub fn run_analysis<A: Analysis>(&self, a: &A) -> HashMap<Id, A::Domain> {
+        self.run_analysis_bounded(a, MAX_ANALYSIS_ITERS)
     }
 
     /// Instantiate a template against e-graph bindings, adding the result and
