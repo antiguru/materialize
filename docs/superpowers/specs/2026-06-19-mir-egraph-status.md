@@ -162,7 +162,9 @@ Five workstreams supply the capabilities; four deletion phases retire the pipeli
 3. **Physical.** Workstream D supplies the `JoinImplementation`/`WcoJoin` capability via `PhysicalEqSatTransform` (default-off flag `enable_eqsat_physical_optimizer`).
 Deletion of `fixpoint_physical_01`, `JoinImplementation`, and `LiteralConstraints` is gated on flag-on SLT parity across the full corpus.
 When parity is confirmed, delete those passes, leaving only irreducible lowering.
+The `LiteralConstraints`/`JoinImplementation` deletion is the substance of index selection, which is decomposed into its own phased plan in `docs/superpowers/plans/2026-06-20-eqsat-index-selection.md` (foundational step: de-opaque `Get`/`ArrangeBy`, since demand-parameterized extraction alone does not unlock it).
 4. **Unify (optional).** Collapse the two placements into one saturation only if index availability can be exposed as an analysis to a single graph; otherwise two placements is the honest steady-state.
+The index-aware part of this phase (index selection modulo projection) is sub-phase I4 in the index-selection plan.
 
 **A concrete payoff: index selection as e-matching modulo equivalence.**
 Today index use is brittle because it matches the lookup key against an indexed key syntactically.
