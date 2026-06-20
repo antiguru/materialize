@@ -16,7 +16,8 @@
 //! byte-identical: lower reduces every scalar payload, so `raise(lower(x))`
 //! returns `x` with its scalars in `MirScalarExpr::reduce` canonical form.
 
-use mz_expr::{LocalId, MirRelationExpr, MirScalarExpr};
+use mz_expr::visit::VisitChildren;
+use mz_expr::{LocalId, MapFilterProject, MirRelationExpr, MirScalarExpr};
 use mz_ore::cast::CastFrom;
 use mz_repr::optimize::OptimizerFeatures;
 use mz_repr::{ReprRelationType, ReprScalarType};
@@ -148,6 +149,129 @@ pub fn raise(rel: &Rel, commit_wcoj: bool) -> MirRelationExpr {
     }
 }
 
+/// Coalesce each maximal Map/Filter/Project run in `expr` into canonical
+/// Map-then-Filter-then-Project form, bottom up.
+///
+/// Reuses `MapFilterProject::extract_non_errors_from_expr_mut` and
+/// `MapFilterProject::optimize`, then re-emits the canonicalized MFP in
+/// Map-Filter-Project order (mirroring `CanonicalizeMfp::rebuild_mfp` without
+/// its `fusion::filter` call, which requires boolean-typed predicates unavailable
+/// in the eqsat engine's test-only inputs). Runs only on Map/Filter/Project
+/// nodes, so it never touches Join implementations or disturbs the logical-phase
+/// joins-Unimplemented contract.
+pub(crate) fn coalesce_mfp(expr: &mut MirRelationExpr) {
+    // Guard: the eqsat pass can produce Map-then-Project sequences where the
+    // Project references a column beyond the base arity (e.g. a Map's own
+    // output column folded back via `map_columns_to_projection`). Such chains
+    // are invalid MIR, and `extract_non_errors_from_expr_mut` panics on them.
+    // Skip coalescing for chains that fail this check; the downstream pipeline
+    // (CanonicalizeMfp) will handle them after type information is available.
+    if !mfp_chain_valid(expr) {
+        // Still recurse into children of the base so inner valid chains are
+        // coalesced. Walk past the M/F/P prefix to find the non-MFP base and
+        // recurse into its children directly.
+        coalesce_mfp_children_of_base(expr);
+        return;
+    }
+    // Extract the maximal error-free MFP run at the root of `expr`, stripping
+    // all Map/Filter/Project layers down to the non-MFP base. This matches the
+    // approach used in `CanonicalizeMfp::action`: extract first, then recurse
+    // into the base's children, then rebuild. Extracting before recursing avoids
+    // visiting intermediate M/F/P nodes as if they were independent roots (which
+    // would cause double-processing and mismatched column arities).
+    let mut mfp = MapFilterProject::extract_non_errors_from_expr_mut(expr);
+    mfp.optimize();
+    // Recurse into the children of the base (non-MFP node now in `expr`).
+    // `VisitChildren::visit_mut_children` visits direct children only, so each
+    // child recursion independently coalesces its own MFP run.
+    expr.visit_mut_children(coalesce_mfp);
+    // Rebuild the optimized MFP on top of the now-coalesced base.
+    rebuild_mfp_canonical(mfp, expr);
+}
+
+/// Returns true iff the Map/Filter/Project chain rooted at `expr` has
+/// consistent column arities (each Project's output indices are within bounds
+/// for the arity that the chain produces up to that point). An invalid chain
+/// indicates the eqsat pass produced a plan with out-of-scope column references,
+/// which `extract_non_errors_from_expr_mut` cannot handle without panicking.
+fn mfp_chain_valid(expr: &MirRelationExpr) -> bool {
+    // Walk the chain recursively, returning the output arity or None on OOB.
+    fn check(expr: &MirRelationExpr) -> Option<usize> {
+        match expr {
+            MirRelationExpr::Map { input, scalars }
+                if scalars.iter().all(|s| !s.is_literal_err()) =>
+            {
+                let inner_arity = check(input)?;
+                Some(inner_arity + scalars.len())
+            }
+            MirRelationExpr::Filter { input, predicates }
+                if predicates.iter().all(|p| !p.is_literal_err()) =>
+            {
+                check(input)
+            }
+            MirRelationExpr::Project { input, outputs } => {
+                let inner_arity = check(input)?;
+                // All output indices must be within the arity produced by the
+                // inner chain (which includes any mapped columns from Map nodes
+                // below).
+                if outputs.iter().all(|&o| o < inner_arity) {
+                    Some(outputs.len())
+                } else {
+                    None
+                }
+            }
+            x => Some(x.arity()),
+        }
+    }
+    check(expr).is_some()
+}
+
+/// Walk past the Map/Filter/Project prefix of `expr` and recurse
+/// `coalesce_mfp` into the children of the non-MFP base node.
+/// Used when the chain is invalid and we skip extraction but still want to
+/// coalesce inner sub-trees.
+fn coalesce_mfp_children_of_base(expr: &mut MirRelationExpr) {
+    match expr {
+        MirRelationExpr::Map { input, scalars } if scalars.iter().all(|s| !s.is_literal_err()) => {
+            coalesce_mfp_children_of_base(input);
+        }
+        MirRelationExpr::Filter { input, predicates }
+            if predicates.iter().all(|p| !p.is_literal_err()) =>
+        {
+            coalesce_mfp_children_of_base(input);
+        }
+        MirRelationExpr::Project { input, .. } => {
+            coalesce_mfp_children_of_base(input);
+        }
+        base => {
+            base.visit_mut_children(coalesce_mfp);
+        }
+    }
+}
+
+/// Re-emit `mfp` in canonical Map-then-Filter-then-Project order on top of
+/// `base`. Mirrors `CanonicalizeMfp::rebuild_mfp` but skips the
+/// `fusion::filter::Filter::action` call, which requires boolean-typed
+/// predicates and is not valid on the eqsat engine's untyped-predicate
+/// test inputs. Identity MFPs are dropped.
+fn rebuild_mfp_canonical(mfp: MapFilterProject, base: &mut MirRelationExpr) {
+    if mfp.is_identity() {
+        return;
+    }
+    let (map, filter, project) = mfp.as_map_filter_project();
+    let total_arity = mfp.input_arity + map.len();
+    if !map.is_empty() {
+        *base = base.take_dangerous().map(map);
+    }
+    if !filter.is_empty() {
+        *base = base.take_dangerous().filter(filter);
+    }
+    // Emit Project only when it actually permutes or drops columns.
+    if project.len() != total_arity || !project.iter().enumerate().all(|(i, o)| i == *o) {
+        *base = base.take_dangerous().project(project);
+    }
+}
+
 /// A placeholder relation type of the given arity for a synthesized empty
 /// constant (produced by `empty_false_filter` / `union_cancel`). The pass is
 /// offline; the surrounding optimizer recomputes column types when this is
@@ -172,7 +296,7 @@ mod tests {
 
     use crate::eqsat::lower::lower;
 
-    use super::raise;
+    use super::{coalesce_mfp, raise};
 
     fn base(arity: usize) -> MirRelationExpr {
         let typ = ReprRelationType::new(
@@ -262,5 +386,84 @@ mod tests {
         let inner = base(2);
         let r = inner.arrange_by(&[vec![MirScalarExpr::column(0)]]);
         roundtrip(r);
+    }
+
+    #[mz_ore::test]
+    fn coalesce_fuses_nested_filter_map_filter() {
+        // Build a Rel that represents filter(p1, map(s, filter(p2, base))).
+        // This is a non-canonical MFP run: two Filters with a Map between them.
+        // After raise + coalesce_mfp, the result must be canonical:
+        //   at most one Map, one Filter, one Project per contiguous run,
+        //   in Map-then-Filter-then-Project order.
+        use crate::eqsat::ir::{EScalar, Rel};
+
+        let base_rel = Rel::Constant { card: 0, arity: 2 };
+        // filter(p2 = is_null(#0), base) -- boolean predicate, non-trivial
+        let p2 = EScalar::plain(MirScalarExpr::column(0).call_is_null());
+        let after_inner_filter = Rel::Filter {
+            input: Box::new(base_rel),
+            predicates: vec![p2],
+        };
+        // map(s = #1, filter(p2, base))  -- appends column #2 = #1
+        let s = EScalar::plain(MirScalarExpr::column(1));
+        let after_map = Rel::Map {
+            input: Box::new(after_inner_filter),
+            scalars: vec![s],
+        };
+        // filter(p1 = is_null(#1), map(s, filter(p2, base))) -- second boolean pred
+        let p1 = EScalar::plain(MirScalarExpr::column(1).call_is_null());
+        let rel = Rel::Filter {
+            input: Box::new(after_map),
+            predicates: vec![p1],
+        };
+
+        // Raise the non-canonical tree then coalesce it.
+        let mut result = raise(&rel, false);
+        coalesce_mfp(&mut result);
+
+        // Walk the result tree and count contiguous M/F/P layers.
+        // Canonical order is: Map? then Filter? then Project? over a non-MFP base.
+        // We verify that the filter and map are not interleaved (i.e., no Filter
+        // directly below a Map below another Filter).
+        fn is_filter(e: &MirRelationExpr) -> bool {
+            matches!(e, MirRelationExpr::Filter { .. })
+        }
+        fn is_map(e: &MirRelationExpr) -> bool {
+            matches!(e, MirRelationExpr::Map { .. })
+        }
+
+        // The outermost node must NOT be a Filter sitting on top of a Map
+        // sitting on top of a Filter — that is the non-canonical pattern.
+        // After coalescing the two filters fuse, so at most one Filter survives.
+        let mut filter_count = 0usize;
+        let mut map_count = 0usize;
+        let mut e = &result;
+        loop {
+            if is_filter(e) {
+                filter_count += 1;
+                match e {
+                    MirRelationExpr::Filter { input, .. } => e = input,
+                    _ => unreachable!(),
+                }
+            } else if is_map(e) {
+                map_count += 1;
+                match e {
+                    MirRelationExpr::Map { input, .. } => e = input,
+                    _ => unreachable!(),
+                }
+            } else {
+                break;
+            }
+        }
+        // The two filters must have been fused into one: at most one Filter and
+        // one Map in the contiguous top-level MFP run.
+        assert!(
+            filter_count <= 1,
+            "expected at most 1 Filter in MFP run after coalescing, got {filter_count}"
+        );
+        assert!(
+            map_count <= 1,
+            "expected at most 1 Map in MFP run after coalescing, got {map_count}"
+        );
     }
 }

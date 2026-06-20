@@ -73,5 +73,11 @@ fn optimize_inner(expr: MirRelationExpr, commit_wcoj: bool) -> MirRelationExpr {
     // The equivalence-preserving arity guard lives at the live transform
     // boundary (`EqSatTransform`), which adopts this output only if its arity
     // matches the input. Direct test callers assert arity themselves.
-    raise::raise(&best, commit_wcoj)
+    let mut raised = raise::raise(&best, commit_wcoj);
+    // Coalesce each maximal Map/Filter/Project run into canonical form. The
+    // e-graph fusion rules reduce redundant operators but do not reorder them
+    // into the Map-then-Filter-then-Project canonical form that the rest of the
+    // pipeline expects from CanonicalizeMfp. Run once over the finished tree.
+    raise::coalesce_mfp(&mut raised);
+    raised
 }
