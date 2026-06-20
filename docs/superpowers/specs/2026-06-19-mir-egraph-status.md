@@ -79,6 +79,7 @@ This is where each transform stands today.
 | `CoalesceCase` | subsumed by lower-time `reduce` (CASE coalescing) |
 | `CaseLiteralTransform` | subsumed by lower-time `reduce` (literal CASE rewriting) |
 | `CanonicalizeMfp` | raise-time MFP coalescing: each maximal Map/Filter/Project run is extracted into `mz_expr::MapFilterProject`, optimized via `MapFilterProject::optimize`, and re-emitted via `CanonicalizeMfp::rebuild_mfp` (the full production trio) |
+| `RelationCSE` | extraction-time CSE: `cse::eliminate_common_subexpressions` runs between extraction and raise, hoisting e-classes referenced more than once in the DAG into `Rel::Let` bindings with fresh ids; raise emits real `MirRelationExpr::Let` + local `Get` (type-threaded); an `is_closed` guard ensures only subtrees with no enclosing-scope local references are hoisted |
 
 **Partial** (movement covered, value inference not):
 
@@ -86,6 +87,7 @@ This is where each transform stands today.
 | --- | --- |
 | `LiteralLifting` | `MapFilterProject::optimize` (called inside the raise-time MFP coalescing) performs the literal-lifting that `LiteralLifting` does within a single MFP run; cross-operator literal lifting (hoisting constants past joins and reductions) remains out of scope |
 | `EquivalencePropagation` | the `Equivalences` e-class analysis drives scalar-payload canonicalization (reducer substitution) and unsatisfiable-to-empty collapse; redundant equality-predicate drop is deferred because it needs nullability facts unavailable at saturation time (see note below) |
+| `NormalizeLets` | eqsat CSE produces well-formed `Let`/`Get` with fresh ids; a subsequent `NormalizeLets` is reduced to renumbering and inlining, with no structural work remaining |
 | `PredicatePushdown` | `push_filter_*` move predicates, but no equivalence-derived predicate synthesis |
 | `fusion::join::Join` | `flatten_join_first` only, first input, no join commutativity in the e-graph |
 | `JoinImplementation` | A second eqsat placement (`PhysicalEqSatTransform`, flag `enable_eqsat_physical_optimizer`, default off) commits the `WcoJoin`-to-`DeltaQuery` decision live, with an index-aware cost model (skips the arrangement-build memory term for join inputs already arranged on the join key). The WCOJ win is no longer offline-only. Remains Partial: the flag is default-off pending broader SLT validation, and `JoinImplementation` still runs for non-`WcoJoin` joins. Known concern: the physical pass is slow on large plans (~6.5s seen on a builtin-index plan); `MAX_PLAN_SIZE` caps worst cases, but tuning is needed before flag-on promotion. |
@@ -94,9 +96,11 @@ This is where each transform stands today.
 **Missing**, in two clusters:
 
 * **Scalar layer**: `LiteralConstraints` and cross-operator literal lifting (the within-MFP literal lifting is now partial via MFP coalescing).
-* **Analysis-propagation**: `Demand` and `ProjectionPushdown` (no column-liveness analysis), `NonNullRequirements`, `RedundantJoin`, `SemijoinIdempotence`, `ReductionPushdown`, `ReduceReduction`, `WillDistinct`. Plus `RelationCSE` (the graph shares internally, but raise emits a tree with no `Let`) and `FlatMapElimination` (`FlatMap` is bailed to opaque).
+* **Analysis-propagation**: `Demand` and `ProjectionPushdown` (no column-liveness analysis), `NonNullRequirements`, `RedundantJoin`, `SemijoinIdempotence`, `ReductionPushdown`, `ReduceReduction`, `WillDistinct`, and `FlatMapElimination` (`FlatMap` is bailed to opaque).
 
-**Irreducible** (not equality rewrites; eqsat may decide them, but something must still lower): `Typecheck` and `CollectNotices` (validation and diagnostics), the `MonotonicFlag` annotation, and `NormalizeLets` hygiene.
+**Deferred** (structural de-opaquing): lowering `FlatMap`, `ArrangeBy`, `LetRec`, and non-empty `Constant` is deferred because no active rules see through them, the engine already peels recursive scopes via `optimize_scope`, and non-empty `Constant` rows are not tracked in the e-graph.
+
+**Irreducible** (not equality rewrites; eqsat may decide them, but something must still lower): `Typecheck` and `CollectNotices` (validation and diagnostics), and the `MonotonicFlag` annotation.
 
 ## Roadmap: one saturation in place of the pipeline
 
@@ -113,14 +117,17 @@ Five workstreams supply the capabilities; four deletion phases retire the pipeli
   A second eqsat placement (`PhysicalEqSatTransform`) is registered before `LiteralConstraints`/`JoinImplementation`, gated on `enable_eqsat_physical_optimizer` (default off), and commits `WcoJoin`-to-`DeltaQuery` live.
   `JoinImplementation` skips `DeltaQuery` joins so the two passes do not conflict.
   The physical pass is slow on large plans (~6.5s seen on a builtin-index plan); `MAX_PLAN_SIZE` caps worst cases; tuning is required before flag-on promotion.
-* **E. CSE, Let, and remaining variants.** Make extraction emit `Let` for e-classes referenced more than once in the DAG (subsuming `RelationCSE` and `NormalizeLets`), lower `Let`/`LetRec` structurally instead of bailing, and de-opaque `FlatMap`/`ArrangeBy`/`Constant`/`TopK`.
+* **(done) E. CSE and Let.** Extraction-time CSE hoists shared e-classes into `Rel::Let` bindings with fresh ids, wired live between extraction and raise via `cse::eliminate_common_subexpressions` with an `is_closed` guard.
+  This supplies the `RelationCSE` capability and reduces `NormalizeLets` to renumbering and inlining.
+  Structural de-opaquing of `FlatMap`, `ArrangeBy`, `LetRec`, and non-empty `Constant` is DEFERRED (low value without rules that see through them; see deferred section above).
 
 **Deletion phases** (each gated on SLT parity-or-better with the flag on):
 
 1. **Logical fixpoints.** Land A (equivalences, demand, keys) plus B. eqsat then subsumes Fusion, PredicatePushdown, EquivalencePropagation, Demand/ProjectionPushdown, RedundantJoin, SemijoinIdempotence, the Reduce family, LiteralLifting, and FoldConstants. Delete `fixpoint_logical_01`, `fixpoint_logical_02`, and `fuse_and_collapse`. This is the first real pipeline removal.
-2. **Logical cleanup.** Land C plus E. Delete the `logical_cleanup_pass` clusters (CanonicalizeMfp, RelationCSE, FlatMapElimination, NormalizeLets).
-   Workstream C is complete: raise-time MFP coalescing supplies the `CanonicalizeMfp` capability.
-   The `logical_cleanup_pass` MFP canonicalization can be deleted once SLT parity with the flag on is confirmed.
+2. **Logical cleanup.** Workstream C (MFP coalescing) and workstream E (extraction-time CSE) together supply the `CanonicalizeMfp`, `RelationCSE`, and `NormalizeLets` capabilities.
+   Both workstreams are complete.
+   Deletion of the `logical_cleanup_pass` clusters (`CanonicalizeMfp`, `RelationCSE`, `NormalizeLets`) is gated on flag-on SLT parity.
+   `FlatMapElimination` remains in the cleanup pass until de-opaquing is done.
 3. **Physical.** Workstream D supplies the `JoinImplementation`/`WcoJoin` capability via `PhysicalEqSatTransform` (default-off flag `enable_eqsat_physical_optimizer`).
 Deletion of `fixpoint_physical_01`, `JoinImplementation`, and `LiteralConstraints` is gated on flag-on SLT parity across the full corpus.
 When parity is confirmed, delete those passes, leaving only irreducible lowering.
