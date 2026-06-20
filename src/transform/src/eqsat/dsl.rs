@@ -234,6 +234,20 @@ pub enum Cond {
     /// filter). Any relation with contradictory equivalences is empty, so it
     /// can be replaced by `Empty(rel)`.
     Unsatisfiable { rel: String },
+    /// `equiv(pred, rel)`: the single predicate in the payload metavariable
+    /// `pred` is a bare-column equality `#a = #b`, and the bound relation
+    /// `rel` already proves `#a` and `#b` equivalent via the equivalences
+    /// analysis. When this holds the predicate is vacuously true on every row
+    /// of `rel` (the relation already guarantees `#a = #b` with no nulls), so
+    /// a filter guarding on it is a no-op.
+    Equiv { pred: String, rel: String },
+    /// `not_self_ref(rel)`: the bound relation's e-class contains no e-node
+    /// any of whose children also belong to the same e-class (i.e. no
+    /// self-referential cycle). Used to guard `merge_filters` so it does not
+    /// fire after `drop_equiv_filter` merges a Filter class with its input,
+    /// which would create self-referential Filter nodes and cause
+    /// `merge_filters` to grow predicate lists without bound.
+    NotSelfRef { rel: String },
 }
 
 /// One rewrite rule.

@@ -21,7 +21,7 @@
 
 # Two consecutive filters are one filter of the conjoined predicates.
 # Fewer operators => strictly cheaper.
-# Guard: do not fire when r is already empty. When r is empty the inner
+# Guard 1: do not fire when r is already empty. When r is empty the inner
 # filter is already in the same empty e-class as its input (via
 # filter_empty or empty_false_filter), which would make the outer filter
 # also collapse into that class. Applying merge_filters in that situation
@@ -29,10 +29,19 @@
 # repeated application with ever-growing predicate lists. The guard is
 # semantically safe: when r is empty both sides of the rule are empty
 # regardless, so skipping the merge changes nothing.
+# Guard 2: do not fire when r's e-class is self-referential (some node in
+# it has a child in the same class). This happens after `drop_equiv_filter`
+# merges a Filter class with its input: the inner Filter and r end up in
+# the same class, making the inner Filter self-referential. Merging then
+# grows predicate lists without bound. Semantically safe: the self-
+# referential Filter is already in the same class as its input (i.e., it
+# is the identity), so both sides of any merge_filters application within
+# it are already equivalent.
 rule merge_filters {
     doc "filter(p, filter(q, r)) = filter(p && q, r)"
     Filter[p] (Filter[q] r) => Filter[concat(q, p)] r
     where not_rel_empty(r)
+    where not_self_ref(r)
 }
 
 # Two consecutive projections compose into one.
@@ -253,6 +262,18 @@ rule collapse_unsatisfiable {
     doc "r = 0  when r's equivalences are unsatisfiable"
     r => Empty(r)
     where unsatisfiable(r)
+}
+
+# A single-predicate equality filter `#a = #b` is redundant when the input
+# relation already proves `#a = #b` via its equivalences. Since MIR join
+# equivalences and filter predicates both reject NULLs (SQL 3-valued logic),
+# the equivalence class `[#a, #b]` implies every surviving row has
+# `#a IS NOT NULL AND #b IS NOT NULL AND #a = #b`. The predicate therefore
+# evaluates to `true` on every row of `r`, and the filter is a no-op.
+rule drop_equiv_filter {
+    doc "filter(#a = #b, r) = r  when r's equivalences prove #a = #b"
+    Filter[p] r => r
+    where equiv(p, r)
 }
 
 # A Map that only appends bare column references just copies columns, so it is a

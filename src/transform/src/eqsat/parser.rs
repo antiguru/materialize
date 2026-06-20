@@ -306,6 +306,20 @@ impl Parser {
                 self.expect(&Tok::RParen)?;
                 Ok(Cond::Unsatisfiable { rel })
             }
+            "equiv" => {
+                self.expect(&Tok::LParen)?;
+                let pred = self.ident()?;
+                self.expect(&Tok::Comma)?;
+                let rel = self.ident()?;
+                self.expect(&Tok::RParen)?;
+                Ok(Cond::Equiv { pred, rel })
+            }
+            "not_self_ref" => {
+                self.expect(&Tok::LParen)?;
+                let rel = self.ident()?;
+                self.expect(&Tok::RParen)?;
+                Ok(Cond::NotSelfRef { rel })
+            }
             "all_true" | "any_false" | "all_columns" | "no_false" => {
                 self.expect(&Tok::LParen)?;
                 let payload = self.ident()?;

@@ -98,6 +98,33 @@ Filter ((#0 = 1) AND (#0 = 2))
 ----
 Constant <empty>
 
+# Case (h): redundant equality predicate dropped via join equivalences.
+#
+# The inner join forces #0 = #2 (the first column of each input equal). The
+# filter above the join repeats that same predicate. Since the join's
+# equivalences analysis already places #0 and #2 in the same class, the filter
+# predicate is vacuously true on every row that reaches it, and
+# `drop_equiv_filter` removes it. Phase 2a also canonicalizes the join's own
+# equivalence `#0 = #2` to `#0 = #0` using the reducer derived from it
+# (#2 → #0); both forms are in the same e-class and extraction picks the
+# canonical form.
+define
+DefSource name=t1
+  - c0: bigint
+  - c1: bigint
+----
+Source defined as t1
+
+apply pipeline=eqsat
+Filter (#0 = #2)
+  Join on=(#0 = #2)
+    Get t0
+    Get t1
+----
+Join on=(#0 = #0)
+  Get t0
+  Get t1
+
 # Case (f): equivalence-canonical scalar rewriting.
 #
 # The Filter establishes #0 = #1. The Map computes #1 + 1 over that input.
