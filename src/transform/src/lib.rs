@@ -878,6 +878,13 @@ impl Optimizer {
                     Box::new(LiteralLifting::default()),
                 ],
             }),
+            // Physical eqsat placement: joins are still Unimplemented here (the
+            // ProjectionPushdown inside fixpoint_physical_01 that panics on
+            // filled-in implementations has already run). `optimize` commits the
+            // WcoJoin choice to a DeltaQuery; JoinImplementation downstream
+            // skips DeltaQuery, so the decision is preserved.
+            Box::new(eqsat::PhysicalEqSatTransform);
+                if ctx.features.enable_eqsat_physical_optimizer,
             Box::new(LiteralConstraints),
             Box::new(Fixpoint {
                 name: "fixpoint_join_impl",

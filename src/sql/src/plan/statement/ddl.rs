@@ -4909,6 +4909,7 @@ pub fn unplan_create_cluster(
             let OptimizerFeatureOverrides {
                 enable_reduce_mfp_fusion: _,
                 enable_eqsat_optimizer: _,
+                enable_eqsat_physical_optimizer: _,
                 enable_cardinality_estimates: _,
                 persist_fast_path_limit: _,
                 reoptimize_imported_views,

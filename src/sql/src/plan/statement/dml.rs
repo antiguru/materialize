@@ -624,6 +624,7 @@ impl TryFrom<ExplainPlanOptionExtracted> for ExplainConfig {
                 enable_letrec_fixpoint_analysis: v.enable_letrec_fixpoint_analysis,
                 enable_reduce_mfp_fusion: Default::default(),
                 enable_eqsat_optimizer: Default::default(),
+                enable_eqsat_physical_optimizer: Default::default(),
                 enable_cardinality_estimates: Default::default(),
                 persist_fast_path_limit: Default::default(),
                 reoptimize_imported_views: v.reoptimize_imported_views,

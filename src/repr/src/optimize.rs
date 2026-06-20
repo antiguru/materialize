@@ -102,6 +102,11 @@ optimizer_feature_flags!({
     // Run the equality-saturation MIR optimizer pass (mz_transform::eqsat).
     // Bound from `SystemVars::enable_eqsat_optimizer`.
     enable_eqsat_optimizer: bool,
+    // Run the physical eqsat placement that commits WcoJoin to DeltaQuery.
+    // Bound from `SystemVars::enable_eqsat_physical_optimizer`.
+    // Default off: the placement is a feasibility spike; flag-on validation
+    // against the full SLT corpus gates promotion.
+    enable_eqsat_physical_optimizer: bool,
     // Enable Lattice-based fixpoint iteration on LetRec nodes in the
     // Analysis framework.
     enable_letrec_fixpoint_analysis: bool,

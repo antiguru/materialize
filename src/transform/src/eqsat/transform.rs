@@ -7,8 +7,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-//! A `Transform` wrapper over [`crate::eqsat::optimize`], registered in the logical
-//! optimizer behind the `enable_eqsat_optimizer` feature flag.
+//! `Transform` wrappers over the eqsat optimizer, registered in the logical and
+//! physical optimizers behind per-phase feature flags.
 
 use mz_expr::MirRelationExpr;
 
@@ -63,6 +63,53 @@ impl Transform for EqSatTransform {
         } else {
             mz_ore::soft_panic_or_log!(
                 "eqsat optimize changed arity ({} -> {}); leaving the plan unchanged",
+                input_arity,
+                optimized.arity(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Runs the equality-saturation pass in the physical optimizer, committing the
+/// WcoJoin-to-DeltaQuery decision.
+///
+/// Placement contract: runs after `fixpoint_physical_01` and before
+/// `LiteralConstraints`/`JoinImplementation`. At that point joins are still
+/// `Unimplemented` (the ProjectionPushdown inside `fixpoint_physical_01` that
+/// panics on filled-in implementations has already run). The committed
+/// `DeltaQuery` survives `JoinImplementation` because that transform only
+/// replans `Unimplemented` and `Differential` joins.
+#[derive(Debug)]
+pub struct PhysicalEqSatTransform;
+
+impl Transform for PhysicalEqSatTransform {
+    fn name(&self) -> &'static str {
+        "PhysicalEqSatTransform"
+    }
+
+    fn actually_perform_transform(
+        &self,
+        relation: &mut MirRelationExpr,
+        _ctx: &mut TransformCtx,
+    ) -> Result<(), TransformError> {
+        // Same size cap as the logical pass: saturation cost is superlinear and
+        // a large plan can take tens of seconds.
+        let plan_size = relation.size();
+        if plan_size > MAX_PLAN_SIZE {
+            return Ok(());
+        }
+        // Hard arity guard: optimize a clone, adopt only if arity is preserved.
+        // On any mismatch, leave the input untouched and log loudly.
+        let input_arity = relation.arity();
+        // Unlike the logical pass, this calls `optimize` (commit_wcoj=true) so
+        // the e-graph's WcoJoin choice is lowered to a live DeltaQuery.
+        let optimized = crate::eqsat::optimize(relation.clone());
+        if optimized.arity() == input_arity {
+            *relation = optimized;
+        } else {
+            mz_ore::soft_panic_or_log!(
+                "eqsat physical optimize changed arity ({} -> {}); leaving the plan unchanged",
                 input_arity,
                 optimized.arity(),
             );

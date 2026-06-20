@@ -34,7 +34,7 @@ pub mod parser;
 pub mod raise;
 pub mod transform;
 
-pub use transform::EqSatTransform;
+pub use transform::{EqSatTransform, PhysicalEqSatTransform};
 
 use mz_expr::MirRelationExpr;
 

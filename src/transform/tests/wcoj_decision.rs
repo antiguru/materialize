@@ -24,6 +24,7 @@ use mz_expr::{AccessStrategy, Id, JoinImplementation, MirRelationExpr, MirScalar
 use mz_repr::optimize::OptimizerFeatures;
 use mz_repr::{GlobalId, ReprRelationType, ReprScalarType};
 use mz_transform::dataflow::DataflowMetainfo;
+use mz_transform::eqsat::PhysicalEqSatTransform;
 use mz_transform::eqsat::cost::CostModel;
 use mz_transform::eqsat::default_ruleset;
 use mz_transform::eqsat::engine::Optimizer;
@@ -195,6 +196,48 @@ fn delta_query_survives_join_implementation() {
             Some(JoinImplementation::DeltaQuery(_))
         ),
         "DeltaQuery must survive JoinImplementation, got {after:?}"
+    );
+}
+
+/// Run `PhysicalEqSatTransform` on `plan` and return the result.
+fn physical_eqsat(mut plan: MirRelationExpr) -> MirRelationExpr {
+    let features = OptimizerFeatures::default();
+    let tc = typecheck::empty_typechecking_context();
+    let mut df = DataflowMetainfo::default();
+    let mut ctx = TransformCtx::local(&features, &tc, &mut df, None, Some(GlobalId::Transient(96)));
+    PhysicalEqSatTransform
+        .transform(&mut plan, &mut ctx)
+        .expect("physical eqsat");
+    plan
+}
+
+#[mz_ore::test]
+fn physical_eqsat_commits_delta_query_for_triangle() {
+    // The physical placement calls `optimize` (commit_wcoj=true), so the
+    // triangle's WcoJoin choice must be committed to a DeltaQuery-tagged join.
+    let out = physical_eqsat(triangle());
+    assert_eq!(out.arity(), 6, "arity preserved");
+    assert!(
+        matches!(
+            first_join_impl(&out),
+            Some(JoinImplementation::DeltaQuery(_))
+        ),
+        "PhysicalEqSatTransform must commit the triangle to DeltaQuery, got {out:?}"
+    );
+}
+
+#[mz_ore::test]
+fn physical_eqsat_delta_query_survives_join_implementation() {
+    // DeltaQuery committed by the physical placement must survive the downstream
+    // JoinImplementation transform (it only replans Unimplemented/Differential).
+    let after_physical = physical_eqsat(triangle());
+    let after_ji = run_join_implementation(after_physical);
+    assert!(
+        matches!(
+            first_join_impl(&after_ji),
+            Some(JoinImplementation::DeltaQuery(_))
+        ),
+        "DeltaQuery from physical placement must survive JoinImplementation, got {after_ji:?}"
     );
 }
 

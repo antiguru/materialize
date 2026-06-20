@@ -2096,6 +2096,12 @@ feature_flags!(
         enable_for_item_parsing: false,
     },
     {
+        name: enable_eqsat_physical_optimizer,
+        desc: "run the physical eqsat placement that commits WcoJoin to DeltaQuery",
+        default: false,
+        enable_for_item_parsing: false,
+    },
+    {
         name: enable_off_thread_optimization,
         desc: "use off-thread optimization in `CREATE` statements",
         default: true,
@@ -2308,6 +2314,7 @@ impl From<&super::SystemVars> for OptimizerFeatures {
         Self {
             enable_eager_delta_joins: vars.enable_eager_delta_joins(),
             enable_eqsat_optimizer: vars.enable_eqsat_optimizer(),
+            enable_eqsat_physical_optimizer: vars.enable_eqsat_physical_optimizer(),
             enable_new_outer_join_lowering: vars.enable_new_outer_join_lowering(),
             enable_reduce_mfp_fusion: vars.enable_reduce_mfp_fusion(),
             enable_variadic_left_join_lowering: vars.enable_variadic_left_join_lowering(),
@@ -2353,6 +2360,7 @@ mod tests {
             enable_eq_classes_withholding_errors,
             enable_eager_delta_joins,
             enable_eqsat_optimizer,
+            enable_eqsat_physical_optimizer,
             enable_letrec_fixpoint_analysis,
             enable_new_outer_join_lowering,
             enable_reduce_mfp_fusion,
@@ -2384,6 +2392,7 @@ mod tests {
         set_var!(enable_eq_classes_withholding_errors);
         set_var!(enable_eager_delta_joins);
         set_var!(enable_eqsat_optimizer);
+        set_var!(enable_eqsat_physical_optimizer);
         set_var!(enable_letrec_fixpoint_analysis);
         set_var!(enable_new_outer_join_lowering);
         set_var!(enable_reduce_mfp_fusion);
