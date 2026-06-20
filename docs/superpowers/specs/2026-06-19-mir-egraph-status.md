@@ -51,7 +51,13 @@ graph TD
 The harness result as of 2026-06-20: `3 wins / 0 losses / 17 ties`.
 The prior 4 losses (eqsat extracting `n=2`, a residual Filter, while the real optimizer reaches `n=1`, empty/constant) are now ties, closed by the unsatisfiable-to-empty rule and canonicalization.
 The 3 wins remain cost-model artifacts (eqsat omits a canonicalizing `Project`).
-* **The genuine divergence is the cost-model decision on cyclic joins, and it is offline-only.** On the triangle join with no pre-existing indexes the e-graph proves `WcoJoin` dominates the binary `Join` on both axes: memory `[1.0,1.0,1.0]` versus `[2.0]` and time `[1.5]` versus `[2.0,1.5]`. `JoinImplementation` picks the dominated binary plan with `enable_eager_delta_joins` off and on, because it weighs arrangement-setup count and cannot see the `N^2` blowup with statistics disabled. `raise` can tag a `WcoJoin` as `JoinImplementation::DeltaQuery` (via `plan_as_delta_query`, reusing `delta_queries::plan`), and that tag survives because `JoinImplementation::action` only replans `Unimplemented`/`Differential`. But this commit is physical-phase structure, so it only runs on the offline `optimize` path; the live logical pass cannot ship it.
+* **The genuine divergence is the cost-model decision on cyclic joins.**
+On the triangle join with no pre-existing indexes the e-graph proves `WcoJoin` dominates the binary `Join` on both axes: memory `[1.0,1.0,1.0]` versus `[2.0]` and time `[1.5]` versus `[2.0,1.5]`.
+`JoinImplementation` picks the dominated binary plan with `enable_eager_delta_joins` off and on, because it weighs arrangement-setup count and cannot see the `N^2` blowup with statistics disabled.
+`raise` tags a `WcoJoin` as `JoinImplementation::DeltaQuery` (via `plan_as_delta_query`, reusing `delta_queries::plan`), and that tag survives because `JoinImplementation::action` only replans `Unimplemented`/`Differential`.
+Workstream D supplies a physical eqsat placement (`PhysicalEqSatTransform`, flag `enable_eqsat_physical_optimizer`, default off) that commits this decision live, with an index-aware cost model.
+The WCOJ win is no longer offline-only: with the flag on it is shipped by the live physical pass.
+The flag is default-off pending broader SLT validation.
 * **Logical versus physical with e-graphs.** `WcoJoin`/delta is inherently physical: it needs available-arrangement and index facts that exist only in physical optimization, and our cost model is currently index-blind (empty available arrangements). The right structure is two eqsat placements: a logical one for structural rewrites (joins `Unimplemented`, the current state) and a physical one after `JoinImplementation` (fed real arrangements, with `Rel::Join` carrying its implementation through lower/raise). E-graphs in principle dissolve the logical/physical split (one saturation, one global cost, extract the optimum), but Materialize's staged pipeline reasserts the boundary through information availability, physical-operator representation, and pipeline contracts such as `ProjectionPushdown` forbidding filled joins. Realizing the unified vision means replacing a contiguous pipeline segment with one saturation, not inserting eqsat between staged passes.
 
 ## Coverage: which pipeline transforms eqsat subsumes
@@ -82,7 +88,7 @@ This is where each transform stands today.
 | `EquivalencePropagation` | the `Equivalences` e-class analysis drives scalar-payload canonicalization (reducer substitution) and unsatisfiable-to-empty collapse; redundant equality-predicate drop is deferred because it needs nullability facts unavailable at saturation time (see note below) |
 | `PredicatePushdown` | `push_filter_*` move predicates, but no equivalence-derived predicate synthesis |
 | `fusion::join::Join` | `flatten_join_first` only, first input, no join commutativity in the e-graph |
-| `JoinImplementation` | `join_to_wcoj` to `DeltaQuery` is offline only; the live pass leaves joins `Unimplemented`; cost is index-blind |
+| `JoinImplementation` | A second eqsat placement (`PhysicalEqSatTransform`, flag `enable_eqsat_physical_optimizer`, default off) commits the `WcoJoin`-to-`DeltaQuery` decision live, with an index-aware cost model (skips the arrangement-build memory term for join inputs already arranged on the join key). The WCOJ win is no longer offline-only. Remains Partial: the flag is default-off pending broader SLT validation, and `JoinImplementation` still runs for non-`WcoJoin` joins. Known concern: the physical pass is slow on large plans (~6.5s seen on a builtin-index plan); `MAX_PLAN_SIZE` caps worst cases, but tuning is needed before flag-on promotion. |
 | `ProjectionExtraction` / `ProjectionLifting` | only `map_columns_to_projection`; no demand-driven lifting |
 
 **Missing**, in two clusters:
@@ -103,7 +109,10 @@ Five workstreams supply the capabilities; four deletion phases retire the pipeli
 * **(partial) A. E-class analyses.** Re-express Materialize's `analysis::{Equivalences, UniqueKeys, NonNegative, ColumnNames, Arity, Types}` and a column-liveness/demand lattice as egg-style e-class analyses that merge to a fixpoint during saturation. We already carry `non_negative`, keys, nullability, and monotonic. The `Equivalences` analysis is now wired (workstream A): it drives scalar-payload canonicalization via the `reducer()` substitution step and collapses unsatisfiable relations to empty. Demand remains the next high-value addition; it and the demand-driven projection cluster unlock the full analysis-propagation deletion phase.
 * **(done) B. Scalar canonicalization.** De-opaqued the payloads pragmatically by running `MirScalarExpr::reduce` on payloads at lower time, reusing battle-tested scalar code (the same way the lit-flag is already computed). This buys constant folding, `CoalesceCase`, and `CaseLiteral` without a scalar e-graph. A full scalar e-graph is deferred until a rewrite needs cross-operator scalar saturation.
 * **C. MFP coalescing.** At raise time, fold adjacent Map/Filter/Project into `mz_expr::MapFilterProject`, subsuming `CanonicalizeMfp` and part of `LiteralLifting`.
-* **D. Index-aware cost and join carry-through.** Make the cost model consume arrangement and index availability (today empty), and make `Rel::Join` carry and restore its implementation through lower/raise (today wiped to `Unimplemented`). This is the only way to subsume `JoinImplementation` and the real home of the `WcoJoin` win. Inherently physical.
+* **(done) D. Index-aware cost and join carry-through.** The cost model now consumes `ctx.indexes` and skips the arrangement-build memory term for join inputs already arranged on the join key.
+  A second eqsat placement (`PhysicalEqSatTransform`) is registered before `LiteralConstraints`/`JoinImplementation`, gated on `enable_eqsat_physical_optimizer` (default off), and commits `WcoJoin`-to-`DeltaQuery` live.
+  `JoinImplementation` skips `DeltaQuery` joins so the two passes do not conflict.
+  The physical pass is slow on large plans (~6.5s seen on a builtin-index plan); `MAX_PLAN_SIZE` caps worst cases; tuning is required before flag-on promotion.
 * **E. CSE, Let, and remaining variants.** Make extraction emit `Let` for e-classes referenced more than once in the DAG (subsuming `RelationCSE` and `NormalizeLets`), lower `Let`/`LetRec` structurally instead of bailing, and de-opaque `FlatMap`/`ArrangeBy`/`Constant`/`TopK`.
 
 **Deletion phases** (each gated on SLT parity-or-better with the flag on):
@@ -112,7 +121,9 @@ Five workstreams supply the capabilities; four deletion phases retire the pipeli
 2. **Logical cleanup.** Land C plus E. Delete the `logical_cleanup_pass` clusters (CanonicalizeMfp, RelationCSE, FlatMapElimination, NormalizeLets).
    Workstream C is complete: raise-time MFP coalescing supplies the `CanonicalizeMfp` capability.
    The `logical_cleanup_pass` MFP canonicalization can be deleted once SLT parity with the flag on is confirmed.
-3. **Physical.** Land D as a second eqsat placement after equivalences and indexes are known. Delete `fixpoint_physical_01`, `JoinImplementation`, and LiteralConstraints, leaving only irreducible lowering.
+3. **Physical.** Workstream D supplies the `JoinImplementation`/`WcoJoin` capability via `PhysicalEqSatTransform` (default-off flag `enable_eqsat_physical_optimizer`).
+Deletion of `fixpoint_physical_01`, `JoinImplementation`, and `LiteralConstraints` is gated on flag-on SLT parity across the full corpus.
+When parity is confirmed, delete those passes, leaving only irreducible lowering.
 4. **Unify (optional).** Collapse the two placements into one saturation only if index availability can be exposed as an analysis to a single graph; otherwise two placements is the honest steady-state.
 
 **A concrete payoff: index selection as e-matching modulo equivalence.**
