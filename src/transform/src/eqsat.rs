@@ -123,16 +123,19 @@ fn optimize_inner(
     // nested Project nodes that the downstream pipeline would otherwise clean
     // up (which is why the optimized-plan SLT gate did not surface them).
     raise::coalesce_mfp(&mut raised);
-    // Split any `Reduce` whose aggregates mix `ReductionType`s into one `Reduce`
-    // per type, joined on the group key, by reusing the production
-    // `ReduceReduction` transform. `ReducePlan::create_from` panics during
-    // lowering on a single `Reduce` that mixes types (e.g. Accumulable `sum`
-    // with Hierarchical `min`); the e-graph search has no rule that performs
-    // this split, so without this post-pass a mixed-type `Reduce` extracted by
-    // eqsat would reach lowering and panic. This is the prerequisite for
-    // deleting `fixpoint_logical_02` (where production runs ReduceReduction) and
-    // moving eqsat before the logical fixpoints. Logical-only: it introduces a
-    // join that must stay `Unimplemented`.
-    raise::reduce_reduction(&mut raised, commit_wcoj);
+    // Run the full production `fixpoint_logical_02` (SemijoinIdempotence,
+    // ReductionPushdown, ReduceElision, ReduceReduction, LiteralLifting,
+    // RelationCSE, FuseAndCollapse) over the raised plan. The e-graph search
+    // has no rules for these Reduce/Join simplifications, so without this
+    // post-pass the raised plan diverges from the production pipeline once
+    // eqsat moves before `fixpoint_logical_02`. In particular `ReduceReduction`
+    // is required: `ReducePlan::create_from` panics on a single `Reduce` mixing
+    // reduction types (e.g. Accumulable `sum` with Hierarchical `min`), and
+    // only `ReduceReduction` splits it. Running the full fixpoint here is the
+    // prerequisite for deleting `fixpoint_logical_02` from `logical_optimizer`
+    // and moving eqsat before the logical fixpoints. Logical-only: transforms
+    // include `ReduceReduction` (introduces a join that must stay
+    // `Unimplemented`) and others that assume logical-phase plans.
+    raise::logical_fixpoint_02(&mut raised, commit_wcoj);
     raised
 }

@@ -11,8 +11,9 @@
 //! aggregates span more than one reduction type (e.g. an Accumulable `sum`
 //! alongside a Hierarchical `min`). Production performs the split in
 //! `ReduceReduction` inside `fixpoint_logical_02`. This test verifies the eqsat
-//! post-pass (`raise::reduce_reduction`) reproduces that split so eqsat output
-//! is lowerable, which is the prerequisite for deleting `fixpoint_logical_02`.
+//! post-pass (`raise::logical_fixpoint_02`) reproduces that split so eqsat
+//! output is lowerable, which is the prerequisite for deleting
+//! `fixpoint_logical_02`.
 
 use mz_compute_types::plan::reduce::{ReductionType, reduction_type};
 use mz_expr::{AccessStrategy, AggregateExpr, AggregateFunc, Id, MirRelationExpr, MirScalarExpr};

@@ -688,6 +688,37 @@ pub fn fuse_and_collapse_fixpoint() -> Fixpoint {
     }
 }
 
+/// Run the `fixpoint_logical_02` transforms (Reduce/Join simplifications) in a
+/// fixpoint.
+///
+/// Shared between `logical_optimizer` and the eqsat raise-time cleanup
+/// (`eqsat::raise::logical_fixpoint_02`) so both run an identical transform
+/// list. Keeping one definition makes the planned eqsat cutover a one-line
+/// deletion of the `logical_optimizer` call site.
+pub fn fixpoint_logical_02() -> Fixpoint {
+    Fixpoint {
+        name: "fixpoint_logical_02",
+        limit: 100,
+        transforms: vec![
+            Box::new(SemijoinIdempotence::default()),
+            // Pushes aggregations down
+            Box::new(ReductionPushdown),
+            // Replaces reduces with maps when the group keys are
+            // unique with maps
+            Box::new(ReduceElision),
+            // Rips complex reduces apart.
+            Box::new(ReduceReduction),
+            // Converts `Cross Join {Constant(Literal) + Input}` to
+            // `Map {Cross Join (Input, Constant()), Literal}`.
+            // Join fusion will clean this up to `Map{Input, Literal}`
+            Box::new(LiteralLifting::default()),
+            // Identifies common relation subexpressions.
+            Box::new(cse::relation_cse::RelationCSE::new(false)),
+            Box::new(FuseAndCollapse::default()),
+        ],
+    }
+}
+
 /// Does constant folding to a fixpoint: An expression all of whose leaves are constants, of size
 /// small enough to be inlined and folded should reach a single `MirRelationExpr::Constant`.
 ///
@@ -781,27 +812,7 @@ impl Optimizer {
                 ],
             }),
             // 5. Reduce/Join simplifications.
-            Box::new(Fixpoint {
-                name: "fixpoint_logical_02",
-                limit: 100,
-                transforms: vec![
-                    Box::new(SemijoinIdempotence::default()),
-                    // Pushes aggregations down
-                    Box::new(ReductionPushdown),
-                    // Replaces reduces with maps when the group keys are
-                    // unique with maps
-                    Box::new(ReduceElision),
-                    // Rips complex reduces apart.
-                    Box::new(ReduceReduction),
-                    // Converts `Cross Join {Constant(Literal) + Input}` to
-                    // `Map {Cross Join (Input, Constant()), Literal}`.
-                    // Join fusion will clean this up to `Map{Input, Literal}`
-                    Box::new(LiteralLifting::default()),
-                    // Identifies common relation subexpressions.
-                    Box::new(cse::relation_cse::RelationCSE::new(false)),
-                    Box::new(FuseAndCollapse::default()),
-                ],
-            }),
+            Box::new(fixpoint_logical_02()),
         ];
         // 6. Equality-saturation pass (experimental, default off). Run it after
         //    the logical fixpoints so they do not clobber the structural rewrites

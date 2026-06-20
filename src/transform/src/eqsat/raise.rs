@@ -29,10 +29,12 @@ use mz_repr::optimize::OptimizerFeatures;
 use mz_repr::{ReprRelationType, ReprScalarType};
 
 use crate::canonicalize_mfp::CanonicalizeMfp;
+use crate::dataflow::DataflowMetainfo;
 use crate::demand::Demand;
 use crate::eqsat::ir::{EScalar, Rel};
 use crate::movement::ProjectionPushdown;
-use crate::reduce_reduction::ReduceReduction;
+use crate::typecheck::empty_typechecking_context;
+use crate::{Transform, TransformCtx};
 
 /// Raise `rel` to a `MirRelationExpr`. Inverse of [`crate::eqsat::lower::lower`].
 ///
@@ -278,33 +280,48 @@ pub(crate) fn demand_pushdown(expr: &mut MirRelationExpr, commit_wcoj: bool) {
     *expr = work;
 }
 
-/// Split every `Reduce` whose aggregates mix `ReductionType`s into one `Reduce`
-/// per type, joined back together on the group key, by reusing the production
-/// `ReduceReduction` transform.
+/// Run the production `fixpoint_logical_02` transforms (SemijoinIdempotence,
+/// ReductionPushdown, ReduceElision, ReduceReduction, LiteralLifting,
+/// RelationCSE, FuseAndCollapse) over the raised plan, reusing the exact
+/// fixpoint that `logical_optimizer` runs.
 ///
-/// `ReducePlan::create_from` (the lowering step) panics on a `Reduce` whose
-/// aggregates span more than one reduction type (e.g. an Accumulable `sum`
-/// alongside a Hierarchical `min`), because rendering produces an independent
-/// dataflow path per type and cannot collate two types in a single `Reduce`.
-/// Production performs this split in `ReduceReduction`, which runs inside
-/// `fixpoint_logical_02`. The e-graph search has no equivalent rule, so without
-/// this post-pass a mixed-type `Reduce` extracted by eqsat would reach lowering
-/// and panic. Folding the production transform in here is the prerequisite for
-/// deleting `fixpoint_logical_02` and moving eqsat before the logical fixpoints.
+/// The e-graph search has rules for none of these Reduce/Join simplifications,
+/// so without this post-pass the raised plan would diverge from the production
+/// pipeline once eqsat moves before `fixpoint_logical_02`. In particular
+/// `ReduceReduction` is required: `ReducePlan::create_from` (lowering) panics on
+/// a single `Reduce` mixing reduction types (e.g. Accumulable `sum` with
+/// Hierarchical `min`), and only `ReduceReduction` splits it. Folding the whole
+/// fixpoint in here is the prerequisite for deleting `fixpoint_logical_02` from
+/// `logical_optimizer` and moving eqsat before the logical fixpoints.
 ///
-/// This is logical-only: the transform replaces the mixed `Reduce` with a
-/// `Join` of the per-type reduces, and that join must stay `Unimplemented` until
-/// `JoinImplementation` runs. So it only fires in the logical phase
-/// (`!commit_wcoj`), mirroring how `demand_pushdown` gates `Demand`.
+/// Logical-only: every included transform assumes logical-phase plans (joins
+/// `Unimplemented`, no arrangements), so it must not run in the WcoJoin-commit
+/// (physical) phase. Mirrors `demand_pushdown` gating.
 ///
-/// `ReduceReduction::action` is structural (no `TransformCtx`) and infallible,
-/// so it is applied directly, top down, over the whole tree (replicating the
-/// `visit_pre_mut(&mut Self::action)` body of `actually_perform_transform`).
-pub(crate) fn reduce_reduction(expr: &mut MirRelationExpr, commit_wcoj: bool) {
+/// The local `TransformCtx` uses default features and empty oracles, matching
+/// the other reuse post-passes which run their production transforms without a
+/// threaded-through context. The result is adopted only if it preserves arity,
+/// guarding against an unexpected reshape (the equivalence guard at the
+/// `EqSatTransform` boundary covers the live path; direct callers rely on this).
+pub(crate) fn logical_fixpoint_02(expr: &mut MirRelationExpr, commit_wcoj: bool) {
     if commit_wcoj {
         return;
     }
-    expr.visit_pre_mut(&mut ReduceReduction::action);
+    let features = OptimizerFeatures::default();
+    let typecheck_ctx = empty_typechecking_context();
+    let mut df_meta = DataflowMetainfo::default();
+    let mut ctx = TransformCtx::local(&features, &typecheck_ctx, &mut df_meta, None, None);
+    let mut work = expr.clone();
+    let arity = work.arity();
+    if crate::fixpoint_logical_02()
+        .transform(&mut work, &mut ctx)
+        .is_err()
+    {
+        return;
+    }
+    if work.arity() == arity {
+        *expr = work;
+    }
 }
 
 /// Returns true iff the Map/Filter/Project chain rooted at `expr` has
