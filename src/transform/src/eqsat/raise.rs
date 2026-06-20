@@ -12,9 +12,13 @@
 //! verbatim.
 //!
 //! This is the structural inverse of [`crate::eqsat::lower::lower`]. The
-//! round-trip is semantics-preserving and scalar-canonicalizing rather than
-//! byte-identical: lower reduces every scalar payload, so `raise(lower(x))`
-//! returns `x` with its scalars in `MirScalarExpr::reduce` canonical form.
+//! round-trip is semantics-preserving, scalar-canonicalizing, and
+//! MFP-canonicalizing rather than byte-identical: lower reduces every scalar
+//! payload, and the post-raise [`coalesce_mfp`] pass coalesces each maximal
+//! Map/Filter/Project run into canonical Map-then-Filter-then-Project form
+//! (reusing the production `CanonicalizeMfp` machinery). Together,
+//! `raise(lower(x))` returns `x` with scalars in `MirScalarExpr::reduce`
+//! canonical form and with MFP runs in `MapFilterProject` canonical form.
 
 use mz_expr::visit::VisitChildren;
 use mz_expr::{LocalId, MapFilterProject, MirRelationExpr, MirScalarExpr};
@@ -22,6 +26,7 @@ use mz_ore::cast::CastFrom;
 use mz_repr::optimize::OptimizerFeatures;
 use mz_repr::{ReprRelationType, ReprScalarType};
 
+use crate::canonicalize_mfp::CanonicalizeMfp;
 use crate::eqsat::ir::{EScalar, Rel};
 
 /// Raise `rel` to a `MirRelationExpr`. Inverse of [`crate::eqsat::lower::lower`].
@@ -152,13 +157,13 @@ pub fn raise(rel: &Rel, commit_wcoj: bool) -> MirRelationExpr {
 /// Coalesce each maximal Map/Filter/Project run in `expr` into canonical
 /// Map-then-Filter-then-Project form, bottom up.
 ///
-/// Reuses `MapFilterProject::extract_non_errors_from_expr_mut` and
-/// `MapFilterProject::optimize`, then re-emits the canonicalized MFP in
-/// Map-Filter-Project order (mirroring `CanonicalizeMfp::rebuild_mfp` without
-/// its `fusion::filter` call, which requires boolean-typed predicates unavailable
-/// in the eqsat engine's test-only inputs). Runs only on Map/Filter/Project
-/// nodes, so it never touches Join implementations or disturbs the logical-phase
-/// joins-Unimplemented contract.
+/// Reuses `MapFilterProject::extract_non_errors_from_expr_mut`,
+/// `MapFilterProject::optimize`, and `CanonicalizeMfp::rebuild_mfp` (which
+/// includes `fusion::filter::Filter::action` for predicate canonicalization).
+/// This produces output identical to what the production `CanonicalizeMfp`
+/// transform emits, so eqsat fully subsumes that transform.
+/// Runs only on Map/Filter/Project nodes, so it never touches Join
+/// implementations or disturbs the logical-phase joins-Unimplemented contract.
 pub(crate) fn coalesce_mfp(expr: &mut MirRelationExpr) {
     // Guard: the eqsat pass can produce Map-then-Project sequences where the
     // Project references a column beyond the base arity (e.g. a Map's own
@@ -185,8 +190,10 @@ pub(crate) fn coalesce_mfp(expr: &mut MirRelationExpr) {
     // `VisitChildren::visit_mut_children` visits direct children only, so each
     // child recursion independently coalesces its own MFP run.
     expr.visit_mut_children(coalesce_mfp);
-    // Rebuild the optimized MFP on top of the now-coalesced base.
-    rebuild_mfp_canonical(mfp, expr);
+    // Rebuild the optimized MFP on top of the now-coalesced base using the
+    // production canonicalizer, which also runs Filter::action (predicate
+    // canonicalization: sort, dedup, split conjuncts, reduce).
+    CanonicalizeMfp::rebuild_mfp(mfp, expr);
 }
 
 /// Returns true iff the Map/Filter/Project chain rooted at `expr` has
@@ -249,29 +256,6 @@ fn coalesce_mfp_children_of_base(expr: &mut MirRelationExpr) {
     }
 }
 
-/// Re-emit `mfp` in canonical Map-then-Filter-then-Project order on top of
-/// `base`. Mirrors `CanonicalizeMfp::rebuild_mfp` but skips the
-/// `fusion::filter::Filter::action` call, which requires boolean-typed
-/// predicates and is not valid on the eqsat engine's untyped-predicate
-/// test inputs. Identity MFPs are dropped.
-fn rebuild_mfp_canonical(mfp: MapFilterProject, base: &mut MirRelationExpr) {
-    if mfp.is_identity() {
-        return;
-    }
-    let (map, filter, project) = mfp.as_map_filter_project();
-    let total_arity = mfp.input_arity + map.len();
-    if !map.is_empty() {
-        *base = base.take_dangerous().map(map);
-    }
-    if !filter.is_empty() {
-        *base = base.take_dangerous().filter(filter);
-    }
-    // Emit Project only when it actually permutes or drops columns.
-    if project.len() != total_arity || !project.iter().enumerate().all(|(i, o)| i == *o) {
-        *base = base.take_dangerous().project(project);
-    }
-}
-
 /// A placeholder relation type of the given arity for a synthesized empty
 /// constant (produced by `empty_false_filter` / `union_cancel`). The pass is
 /// offline; the surrounding optimizer recomputes column types when this is
@@ -291,7 +275,7 @@ fn resolve(scalars: &[EScalar]) -> Vec<MirScalarExpr> {
 
 #[cfg(test)]
 mod tests {
-    use mz_expr::{AccessStrategy, Id, LocalId, MirRelationExpr, MirScalarExpr};
+    use mz_expr::{AccessStrategy, Id, LocalId, MirRelationExpr, MirScalarExpr, func};
     use mz_repr::{ReprRelationType, ReprScalarType};
 
     use crate::eqsat::lower::lower;
@@ -319,8 +303,13 @@ mod tests {
     #[mz_ore::test]
     fn roundtrip_filter_over_constant() {
         // Filter wraps a bailed Constant leaf; the round-trip must recover the
-        // original Constant verbatim from the interner.
-        let r = base(2).filter(vec![MirScalarExpr::column(0)]);
+        // original Constant verbatim from the interner. The predicate must be
+        // boolean-typed so that coalesce_mfp can call Filter::action without
+        // triggering the boolean-type assertion in canonicalize_predicates. Use
+        // a column-equality predicate (#0 = #1) which is boolean and stable
+        // under canonicalize_predicates (not reducible to a constant).
+        let pred = MirScalarExpr::column(0).call_binary(MirScalarExpr::column(1), func::Eq);
+        let r = base(2).filter(vec![pred]);
         roundtrip(r);
     }
 

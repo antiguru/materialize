@@ -24,43 +24,49 @@ Source defined as t0
 # Case (a): nested filters fuse to one filter.
 #
 # The merge_filters rule rewrites `filter(p, filter(q, r))` into a single
-# `filter(p && q, r)`, reducing the operator count.
+# `filter(p && q, r)`, reducing the operator count. Predicates must be
+# boolean-typed: coalesce_mfp calls Filter::action which calls
+# canonicalize_predicates, asserting boolean types. Use integer comparisons
+# (#0 = 1), (#1 = 1) which are boolean and not reducible to constants since
+# #0 and #1 are column references whose runtime values are unknown.
 apply pipeline=eqsat
-Filter (#0)
-  Filter (#1)
+Filter (#0 = 1)
+  Filter (#1 = 1)
     Get t0
 ----
-Filter #0 AND #1
+Filter (#0 = 1) AND (#1 = 1)
   Get t0
 
 # Case (b): filter distributes over a union, then inner filters fuse.
 #
 # `distribute_filter_union_nary` pushes the outer filter into each branch;
-# `merge_filters` then fuses it with the per-branch filters.
+# `merge_filters` then fuses it with the per-branch filters. Boolean predicates
+# required (see case (a) comment).
 apply pipeline=eqsat
-Filter (#0)
+Filter (#0 = 1)
   Union
-    Filter (#1)
+    Filter (#1 = 1)
       Get t0
-    Filter (#1)
+    Filter (#1 = 1)
       Get t0
 ----
 Union
-  Filter #0 AND #1
+  Filter (#0 = 1) AND (#1 = 1)
     Get t0
-  Filter #0 AND #1
+  Filter (#0 = 1) AND (#1 = 1)
     Get t0
 
 # Case (c): unsupported node (Reduce) under a Filter is preserved verbatim.
 #
 # The egraph pass bails out at unsupported variants, so the Reduce is returned
-# intact and only the supported outer Filter envelope may be rewritten.
+# intact and only the supported outer Filter envelope may be rewritten. Boolean
+# predicate required (see case (a) comment).
 apply pipeline=eqsat
-Filter (#0)
+Filter (#0 = 1)
   Reduce group_by=[#0] aggregates=[]
     Get t0
 ----
-Filter #0
+Filter (#0 = 1)
   Distinct project=[#0]
     Get t0
 
@@ -151,5 +157,24 @@ Map (#1 + 1)
     Get t0
 ----
 Filter (#0 = #1)
+  Map ((#0 + 1))
+    Get t0
+
+# Case (i): coalesce_mfp end-to-end witness.
+#
+# The outer Filter references the Map-added column (#2), so
+# push_filter_through_map cannot sink it past the Map. The eqsat rules leave
+# the plan as Filter / Map / Filter / Get (three MFP operators in non-canonical
+# order). coalesce_mfp extracts the maximal MFP run, optimizes it, and
+# re-emits it in canonical Map-then-Filter-then-Project form via
+# CanonicalizeMfp::rebuild_mfp. The two separate Filter layers are merged into
+# one, demonstrating that coalescing actually fires.
+apply pipeline=eqsat
+Filter (#2 = 0)
+  Map (#0 + 1)
+    Filter (#0 = #1)
+      Get t0
+----
+Filter (#2 = 0) AND (#0 = #1)
   Map ((#0 + 1))
     Get t0

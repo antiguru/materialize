@@ -139,9 +139,12 @@ fn base(arity: usize) -> MirRelationExpr {
 #[mz_ore::test]
 fn merges_nested_filters() {
     // filter(p, filter(q, r)) should fuse to a single filter of two predicates.
-    let r = base(2)
-        .filter(vec![MirScalarExpr::column(1)])
-        .filter(vec![MirScalarExpr::column(0)]);
+    // Predicates must be boolean-typed: coalesce_mfp calls Filter::action which
+    // calls canonicalize_predicates, asserting boolean types. Use is_null on
+    // nullable columns so the predicates are not folded to false at lower time.
+    let r = src_with_nullability(5, 2, true)
+        .filter(vec![MirScalarExpr::column(1).call_is_null()])
+        .filter(vec![MirScalarExpr::column(0).call_is_null()]);
     let out = optimize(r);
     let mut filters = 0usize;
     out.visit_pre(|e| {
@@ -235,15 +238,17 @@ fn case5_filter_over_union_filter() {
 
 #[mz_ore::test]
 fn column_ref_lit_is_unaffected() {
-    // A bare column reference (#0) does not become a literal after reduce;
-    // `lit` must stay None so existing filter behaviour is unchanged.
-    let r = src_with_nullability(3, 2, false).filter(vec![MirScalarExpr::column(0)]);
+    // A non-literal filter predicate does not become a literal false after
+    // reduce; `lit` must stay None so existing filter behaviour is unchanged.
+    // Use is_null(#0) on a nullable column: not reducible to false, boolean-typed
+    // (required for coalesce_mfp's Filter::action / canonicalize_predicates call).
+    let r = src_with_nullability(3, 2, true).filter(vec![MirScalarExpr::column(0).call_is_null()]);
     // This should not panic and the filter must not be treated as false.
     let out = optimize(r);
     assert_eq!(out.arity(), 2, "arity must be preserved");
     assert!(
         !is_empty_constant(&out),
-        "bare column ref must not be treated as false literal, got {out:?}"
+        "non-literal filter predicate must not be treated as false, got {out:?}"
     );
 }
 
