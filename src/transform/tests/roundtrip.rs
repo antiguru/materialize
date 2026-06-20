@@ -455,3 +455,60 @@ fn union_cancel_under_filter_and_map_terminates() {
     let out = optimize(r);
     assert_eq!(out.arity(), 3, "arity must be preserved");
 }
+
+#[mz_ore::test]
+fn recursive_cte_with_inner_cse_does_not_panic() {
+    use mz_expr::LocalId;
+    use mz_transform::eqsat::optimize_logical;
+
+    // Regression for the CSE fresh-id collision with opaque-leaf LocalIds.
+    //
+    // `lower` bails `LetRec` into a `Rel::Opaque` carrying the verbatim MIR,
+    // which holds a `LocalId`. eqsat's CSE allocates fresh `Let` ids above the
+    // max id it can see; before the fix it scanned only `Rel` Let/LocalGet ids
+    // and missed the opaque leaf's LocalId, so a fresh CSE id could equal the
+    // recursive binding's id, shadowing it. Downstream `Demand::action` asserts
+    // a `LetRec` has no shadowed bindings and panics.
+    //
+    // We build a `LetRec` (bailed to opaque) sitting under a Union with a
+    // separate CSE opportunity (a Filter referenced twice), which forces a
+    // fresh-id allocation. The whole pipeline (lower -> CSE -> raise ->
+    // demand_pushdown) must complete without panicking and preserve arity.
+    let lid = LocalId::new(1);
+    // Arity 4 so the recursive (opaque) branch matches the self-join branch of
+    // the Union below.
+    let typ = ReprRelationType::new(
+        (0..4)
+            .map(|_| ReprScalarType::Int64.nullable(false))
+            .collect(),
+    );
+    let rec = MirRelationExpr::LetRec {
+        ids: vec![lid.clone()],
+        values: vec![MirRelationExpr::Get {
+            id: Id::Local(lid.clone()),
+            typ: typ.clone(),
+            access_strategy: AccessStrategy::UnknownOrLocal,
+        }],
+        limits: vec![None],
+        body: Box::new(MirRelationExpr::Get {
+            id: Id::Local(lid),
+            typ,
+            access_strategy: AccessStrategy::UnknownOrLocal,
+        }),
+    };
+
+    // A CSE opportunity: a filtered source self-joined, then unioned with the
+    // recursive (opaque) fragment.
+    let filtered = src(2, 2).filter(vec![MirScalarExpr::column(0).call_is_null()]);
+    let joined = MirRelationExpr::join_scalars(vec![filtered.clone(), filtered], vec![]);
+    let plan = MirRelationExpr::Union {
+        base: Box::new(joined),
+        inputs: vec![rec],
+    };
+    let expected_arity = plan.arity();
+
+    // Before the fix this panics in `Demand::action` with
+    // "assertion failed: expected None found Some(...)".
+    let out = optimize_logical(plan);
+    assert_eq!(out.arity(), expected_arity, "arity must be preserved");
+}

@@ -370,12 +370,19 @@ fn substitute_locals(rel: Rel, subst: &BTreeMap<usize, Rel>) -> Rel {
     rel.with_children(children)
 }
 
-/// The largest local id (binding or `LocalGet`) anywhere in `rel`, for choosing
-/// fresh, non-clashing placeholder ids.
+/// The largest local id anywhere in `rel`, for choosing fresh, non-clashing
+/// placeholder ids.
+///
+/// Like `cse::max_local_id`, this must look inside `Rel::Opaque` leaves: `lower`
+/// bails unsupported nodes (notably `LetRec`) into an opaque `MirRelationExpr`
+/// that can carry its own `LocalId`s, and an opaque leaf has no `Rel` children,
+/// so a `Rel`-only walk would miss them. A placeholder id colliding with such an
+/// id would shadow a genuine recursive reference.
 fn max_local_id(rel: &Rel) -> usize {
     let here = match rel {
         Rel::LocalGet { id, .. } | Rel::Let { id, .. } => *id,
         Rel::LetRec { bindings, .. } => bindings.iter().map(|(id, _)| *id).max().unwrap_or(0),
+        Rel::Opaque(mir) => crate::eqsat::cse::max_mir_local_id(mir),
         _ => 0,
     };
     rel.children()
