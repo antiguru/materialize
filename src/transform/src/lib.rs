@@ -947,8 +947,12 @@ impl Optimizer {
             Box::new(Fixpoint {
                 name: "fixpoint_logical_cleanup_pass_01",
                 limit: 100,
-                transforms: vec![
-                    Box::new(CanonicalizeMfp),
+                transforms: transforms![
+                    // Strangler-fig cutover 1: the eqsat pass canonicalizes MFP at raise,
+                    // so skip this when eqsat is on; it still runs as the safeguard path
+                    // when eqsat is off.
+                    Box::new(CanonicalizeMfp);
+                        if !ctx.features.enable_eqsat_optimizer,
                     // Remove threshold operators which have no effect.
                     Box::new(ThresholdElision),
                     // Projection pushdown may unblock fusing joins and unions.
