@@ -72,11 +72,13 @@ This is where each transform stands today.
 | `ReduceScalars` | lower-time `MirScalarExpr::reduce` on Filter, Map, Join-equivalence, Reduce-key/aggregate, and TopK-limit payloads |
 | `CoalesceCase` | subsumed by lower-time `reduce` (CASE coalescing) |
 | `CaseLiteralTransform` | subsumed by lower-time `reduce` (literal CASE rewriting) |
+| `CanonicalizeMfp` | raise-time MFP coalescing: each maximal Map/Filter/Project run is extracted into `mz_expr::MapFilterProject`, optimized via `MapFilterProject::optimize`, and re-emitted via `CanonicalizeMfp::rebuild_mfp` (the full production trio) |
 
 **Partial** (movement covered, value inference not):
 
 | Transform | Gap |
 | --- | --- |
+| `LiteralLifting` | `MapFilterProject::optimize` (called inside the raise-time MFP coalescing) performs the literal-lifting that `LiteralLifting` does within a single MFP run; cross-operator literal lifting (hoisting constants past joins and reductions) remains out of scope |
 | `EquivalencePropagation` | the `Equivalences` e-class analysis drives scalar-payload canonicalization (reducer substitution) and unsatisfiable-to-empty collapse; redundant equality-predicate drop is deferred because it needs nullability facts unavailable at saturation time (see note below) |
 | `PredicatePushdown` | `push_filter_*` move predicates, but no equivalence-derived predicate synthesis |
 | `fusion::join::Join` | `flatten_join_first` only, first input, no join commutativity in the e-graph |
@@ -85,10 +87,10 @@ This is where each transform stands today.
 
 **Missing**, in two clusters:
 
-* **Scalar layer**: `LiteralLifting`, `LiteralConstraints`, and `CanonicalizeMfp` (there is no MFP node).
+* **Scalar layer**: `LiteralConstraints` and cross-operator literal lifting (the within-MFP literal lifting is now partial via MFP coalescing).
 * **Analysis-propagation**: `Demand` and `ProjectionPushdown` (no column-liveness analysis), `NonNullRequirements`, `RedundantJoin`, `SemijoinIdempotence`, `ReductionPushdown`, `ReduceReduction`, `WillDistinct`. Plus `RelationCSE` (the graph shares internally, but raise emits a tree with no `Let`) and `FlatMapElimination` (`FlatMap` is bailed to opaque).
 
-**Irreducible** (not equality rewrites; eqsat may decide them, but something must still lower): `Typecheck` and `CollectNotices` (validation and diagnostics), the `MonotonicFlag` annotation, the final MFP canonicalization the renderer demands, and `NormalizeLets` hygiene.
+**Irreducible** (not equality rewrites; eqsat may decide them, but something must still lower): `Typecheck` and `CollectNotices` (validation and diagnostics), the `MonotonicFlag` annotation, and `NormalizeLets` hygiene.
 
 ## Roadmap: one saturation in place of the pipeline
 
@@ -108,6 +110,8 @@ Five workstreams supply the capabilities; four deletion phases retire the pipeli
 
 1. **Logical fixpoints.** Land A (equivalences, demand, keys) plus B. eqsat then subsumes Fusion, PredicatePushdown, EquivalencePropagation, Demand/ProjectionPushdown, RedundantJoin, SemijoinIdempotence, the Reduce family, LiteralLifting, and FoldConstants. Delete `fixpoint_logical_01`, `fixpoint_logical_02`, and `fuse_and_collapse`. This is the first real pipeline removal.
 2. **Logical cleanup.** Land C plus E. Delete the `logical_cleanup_pass` clusters (CanonicalizeMfp, RelationCSE, FlatMapElimination, NormalizeLets).
+   Workstream C is complete: raise-time MFP coalescing supplies the `CanonicalizeMfp` capability.
+   The `logical_cleanup_pass` MFP canonicalization can be deleted once SLT parity with the flag on is confirmed.
 3. **Physical.** Land D as a second eqsat placement after equivalences and indexes are known. Delete `fixpoint_physical_01`, `JoinImplementation`, and LiteralConstraints, leaving only irreducible lowering.
 4. **Unify (optional).** Collapse the two placements into one saturation only if index availability can be exposed as an analysis to a single graph; otherwise two placements is the honest steady-state.
 
