@@ -1081,12 +1081,11 @@ impl EGraph {
                     } else {
                         None
                     };
-                    let Some(new_node) = rewrite_escalars(
-                        &node,
-                        reducer,
-                        filter_input_reducer.as_ref().map(|r| r as &_),
-                        &|id| self.arity(id),
-                    ) else {
+                    let Some(new_node) =
+                        rewrite_escalars(&node, reducer, filter_input_reducer, &|id| {
+                            self.arity(id)
+                        })
+                    else {
                         continue;
                     };
                     let new_id = self.add(new_node);
@@ -1549,7 +1548,9 @@ impl EGraph {
     }
 }
 
-/// Apply a scalar-expression reducer to each `EScalar` payload of `node`.
+/// Rewrite the scalar payloads (predicates, map scalars, join equivalences) of
+/// an [`ENode`] by applying equivalence-class reducers, returning the rewritten
+/// node or `None` if nothing changed.
 ///
 /// Returns `Some(new_node)` if any payload changed (at least one `EScalar`
 /// expression was rewritten), `None` if no rewriting occurred. The `lit` hint
@@ -1561,6 +1562,26 @@ impl EGraph {
 /// (predicates), `Map` (scalars), and `Join`/`WcoJoin` (equivalences). All
 /// other e-node variants are returned as `None` (they have no scalar payloads
 /// to rewrite).
+///
+/// # Reducer selection
+///
+/// `reducer` is the reducer derived from the *node's own e-class*. For `Map`
+/// this is correct: the node's output equivalences are a strict superset of the
+/// input's, and the column-range guard in [`apply`] prevents the circular
+/// rewrites that would otherwise be possible.
+///
+/// `filter_input_reducer` is the reducer derived from the *Filter input's
+/// e-class*. Filter predicates must be simplified only by the input's reducer,
+/// never the Filter's own reducer. The Filter's output equivalences include
+/// facts derived directly from the predicates themselves (e.g. `#2 = f()` makes
+/// `f()` equivalent to `#2`). Feeding those back into the predicates is circular
+/// and unsound: it rewrites `#2 = f()` to `#2 = #2`, making the predicate
+/// trivially true and causing the filter to be dropped entirely (this silently
+/// removed security-relevant `WHERE x = current_user` guards).
+///
+/// `Join`/`WcoJoin` have an analogous circularity (their join conditions are
+/// part of their own output equivalences), so those variants return `None`
+/// unconditionally (no scalar rewrite at saturation time).
 ///
 /// # Canonicalization validity invariant
 ///
@@ -1583,29 +1604,6 @@ impl EGraph {
 /// giving a reducer entry `defining_expr -> column(input_arity+pos)`. Applying
 /// that reducer to the Map's own scalar at `pos` would replace the definition
 /// with a forward reference to the column the Map is still constructing.
-/// Rewrite the scalar payloads (predicates, map scalars, join equivalences) of an
-/// [`ENode`] by applying equivalence-class reducers, returning the rewritten node or
-/// `None` if nothing changed.
-///
-/// # Reducer selection
-///
-/// The `reducer` argument is the reducer derived from the *node's own e-class*.
-/// For most nodes (e.g. `Map`) this is correct: the node's output equivalences are a
-/// strict superset of the input's, and the column-range guard in [`apply`] prevents the
-/// circular rewrites that would otherwise be possible.
-///
-/// `filter_input_reducer` is the reducer derived from the *Filter input's e-class*.
-/// Filter predicates must be simplified only by the input's reducer, never the Filter's
-/// own reducer. The Filter's output equivalences include facts derived directly from the
-/// predicates themselves (e.g., `#2 = f()` → `f() ≡ #2`). Feeding those back into the
-/// predicates is circular and unsound: it rewrites `#2 = f()` to `#2 = #2`, making the
-/// predicate trivially true and causing the filter to be dropped entirely.
-///
-/// `Join`/`WcoJoin` have an analogous circularity — their join conditions are part of
-/// their own output equivalences — so those variants return `None` unconditionally (no
-/// scalar rewrite at saturation time).
-// `reducer` is the reducer for the node's own e-class; `filter_input_reducer` is
-// the reducer for the Filter input's e-class (see doc-comment above).
 fn rewrite_escalars(
     node: &ENode,
     reducer: &BTreeMap<mz_expr::MirScalarExpr, mz_expr::MirScalarExpr>,
@@ -1781,6 +1779,48 @@ mod tests {
         assert!(
             rewrite_escalars(&node, &reducer, Some(&reducer), &arity_by_id).is_none(),
             "a node with canonical scalars must not be rewritten"
+        );
+    }
+
+    /// A Filter must be governed by its INPUT's reducer, never the node's own
+    /// reducer. This locks in the fix for the bug where a Filter's own
+    /// equivalences (`predicate` equivalent to `true`) trivialized and dropped
+    /// the predicate, silently removing security-relevant
+    /// `WHERE x = current_user` guards.
+    #[mz_ore::test]
+    fn rewrite_escalars_filter_ignores_own_reducer() {
+        // `own` would rewrite #1 to #0, standing in for a Filter's own
+        // equivalences that trivialize the predicate. With no input reducer the
+        // predicate must be preserved.
+        let mut own = BTreeMap::new();
+        own.insert(MirScalarExpr::column(1), MirScalarExpr::column(0));
+        let node = ENode::Filter {
+            input: 2,
+            predicates: vec![EScalar::plain(MirScalarExpr::column(1))],
+        };
+        assert!(
+            rewrite_escalars(&node, &own, None, &arity_by_id).is_none(),
+            "filter predicates must be governed by the input reducer, not the node's own"
+        );
+    }
+
+    /// `rewrite_escalars` never rewrites `Join`/`WcoJoin` conditions (returns
+    /// `None`): a join's own equivalences would trivialize its equijoin
+    /// condition to a tautology and widen the join to a cross-product.
+    #[mz_ore::test]
+    fn rewrite_escalars_never_rewrites_join() {
+        let mut reducer = BTreeMap::new();
+        reducer.insert(MirScalarExpr::column(1), MirScalarExpr::column(0));
+        let node = ENode::Join {
+            inputs: vec![1, 1],
+            equivalences: vec![vec![
+                EScalar::plain(MirScalarExpr::column(0)),
+                EScalar::plain(MirScalarExpr::column(1)),
+            ]],
+        };
+        assert!(
+            rewrite_escalars(&node, &reducer, Some(&reducer), &arity_by_id).is_none(),
+            "join conditions must never be canonicalized"
         );
     }
 
