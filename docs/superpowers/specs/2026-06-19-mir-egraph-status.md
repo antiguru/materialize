@@ -102,11 +102,17 @@ This is where each transform stands today.
 
 **Irreducible** (not equality rewrites; eqsat may decide them, but something must still lower): `Typecheck` and `CollectNotices` (validation and diagnostics), and the `MonotonicFlag` annotation.
 
-## Parity status (2026-06-20): capabilities built, nothing deleted yet
+## Parity status (2026-06-20): first cutover landed, most passes still intact
 
-Honest assessment after workstreams A through E: eqsat does **not** replace the fixpoint logical/physical optimizer.
-It runs strictly **in addition** to fully intact pipelines (`EqSatTransform` appended after the logical fixpoints; `PhysicalEqSatTransform` inserted before `LiteralConstraints`, default off), and has deleted **zero** passes.
-The green SLT corpus proves **coexistence, not subsumption**: the validation gate must change from "eqsat runs as a harmless extra pass" to "the old passes are removed and SLT is still green" before any parity claim holds.
+Honest assessment after workstreams A through E: eqsat does **not yet** replace the fixpoint logical/physical optimizer, but the **first strangler-fig cutover has landed**.
+`EqSatTransform` is appended after the logical fixpoints; `PhysicalEqSatTransform` is inserted before `LiteralConstraints` (default off).
+**Cutover 1 (done):** the `CanonicalizeMfp` in `logical_cleanup_pass` is now skipped when `enable_eqsat_optimizer` is on (`lib.rs` ~951), because eqsat's raise-time MFP coalescing fully subsumes it.
+This was validated by a differential SLT gate (golden output already eqsat-on, so zero new failures means true subsumption): AoC 125/125, LDBC BI 205/205, arithmetic 206/206, all with the pass removed.
+That gate is the correct standard, and it now reads "the old pass is gone when eqsat is on and SLT is still green," not "eqsat runs as a harmless extra pass."
+
+The remaining passes are still intact. eqsat is appended *after* the logical fixpoints (it consumes their output), so it can only *add* cleanup, not *replace* a fixpoint: cutting over the fixpoints themselves (phase 1) requires moving eqsat earlier or running it on the raw input, a larger restructuring.
+CanonicalizeMfp was cuttable from the current placement only because eqsat's coalesce already produces canonical MFP and the cleanup-pass instance is a later redundancy.
+The physical and fast-path `CanonicalizeMfp` instances remain (they run in phases the logical pass does not cover; the physical eqsat pass, flag off, is their path).
 
 The single biggest blocker to the first deletion is a **missing column-liveness / Demand analysis**.
 Demand is top-down (a column is live if a consumer above needs it), which does not fit a bottom-up e-class analysis (one e-class shared by parents with different liveness cannot carry a single demand fact).
