@@ -114,20 +114,24 @@ The remaining passes are still intact. eqsat is appended *after* the logical fix
 CanonicalizeMfp was cuttable from the current placement only because eqsat's coalesce already produces canonical MFP and the cleanup-pass instance is a later redundancy.
 The physical and fast-path `CanonicalizeMfp` instances remain (they run in phases the logical pass does not cover; the physical eqsat pass, flag off, is their path).
 
-The single biggest blocker to the first deletion is a **missing column-liveness / Demand analysis**.
-Demand is top-down (a column is live if a consumer above needs it), which does not fit a bottom-up e-class analysis (one e-class shared by parents with different liveness cannot carry a single demand fact).
-It gates deleting `Demand`, `ProjectionPushdown`, and `NonNullRequirements`, which is most of deletion phase 1.
-Also fully missing: `RedundantJoin`, `SemijoinIdempotence`, `ReductionPushdown`, `ReduceReduction`, `WillDistinct`, `LiteralConstraints`, `FlatMapElimination`.
+**Column-liveness / Demand (done, 2026-06-20).**
+The Demand keystone is now built via Option B (a design spike rejected a bottom-up e-class analysis as over-approximate: demand is top-down, and one e-class shared by parents with different liveness cannot carry a single demand fact).
+`raise::demand_pushdown` reuses the production `Demand` and `ProjectionPushdown` passes over the raised plan, the same strangler-fig reuse pattern as `coalesce_mfp`.
+It is phase-aware: the logical phase (joins `Unimplemented`) runs `Demand` + full `ProjectionPushdown`; the physical phase (filled `DeltaQuery` joins) runs only `ProjectionPushdown::skip_joins`, omitting `Demand` which would corrupt a committed delta plan.
+The differential SLT gate is green with zero diff (arithmetic 206/206, AoC 125/125, LDBC 205/205), which proves the narrowing is already subsumed by the downstream pipeline and the standalone `Demand`/`ProjectionPushdown` passes become deletable once eqsat moves earlier.
+This unblocks deleting `Demand`, `ProjectionPushdown`, and (with NonNullRequirements) most of deletion phase 1.
+
+Still missing: `RedundantJoin`, `SemijoinIdempotence`, `ReductionPushdown`, `ReduceReduction`, `NonNullRequirements`, `WillDistinct`, `LiteralConstraints`, `FlatMapElimination`.
 The cardinality-free cost model caps join-order quality, but that ceiling is shared with the production `JoinImplementation`, so it is orthogonal to parity (it limits beating the heuristic, not matching it).
 
 Next steps to parity, in order:
 
-* **Phase 1 (delete logical fixpoints):** requires the Demand/liveness mechanism (likely a top-down pass over the extracted plan or demand-as-extraction, not an e-class analysis) plus rules for RedundantJoin, SemijoinIdempotence, the Reduce family, NonNullRequirements, and equivalence-derived predicate synthesis. Gate: full SLT green with `fixpoint_logical_01/02` and `fuse_and_collapse` removed. Highest risk (cost model becomes the sole objective).
+* **Phase 1 (delete logical fixpoints):** the Demand/liveness mechanism is now in place (`raise::demand_pushdown`, Option-B reuse). Still needs RedundantJoin, SemijoinIdempotence, the Reduce family, NonNullRequirements, and equivalence-derived predicate synthesis (rule-vs-reuse decision per transform in progress). Gate: full SLT green with `fixpoint_logical_01/02` and `fuse_and_collapse` removed. Highest risk (cost model becomes the sole objective).
 * **Phase 2 (delete logical cleanup):** C and E already supply CanonicalizeMfp/RelationCSE/NormalizeLets; gated only on validation with those clusters removed. FlatMapElimination must wait for FlatMap de-opaquing. Medium risk (NormalizeLets invariants are load-bearing for rendering).
 * **Phase 3 (delete physical join planning):** PhysicalEqSatTransform must plan all joins (not just WcoJoin), carry implementations through lower/raise, and replicate LiteralConstraints; gated on flag-on SLT parity plus a saturation-time budget on large plans (the ~6.5s physical-pass latency resolved). Highest risk.
 * **Phase 4 (optional, beyond parity):** unify the two placements into one saturation, unlocking index selection as e-matching modulo scalar equivalence. Improvement, not parity.
 
-Bottom line: the effort is one strangler-fig phase short of even its first deletion. The biggest single lever is the Demand/liveness analysis.
+Bottom line: the Demand/liveness keystone (the biggest single lever) is built and validated. The remaining phase-1 work is the four/five missing semantic transforms (RedundantJoin, SemijoinIdempotence, the Reduce family, NonNullRequirements), then moving eqsat earlier to enable the actual fixpoint deletions.
 
 ## Roadmap: one saturation in place of the pipeline
 
@@ -137,7 +141,7 @@ Five workstreams supply the capabilities; four deletion phases retire the pipeli
 
 **Workstreams** (capabilities):
 
-* **(partial) A. E-class analyses.** Re-express Materialize's `analysis::{Equivalences, UniqueKeys, NonNegative, ColumnNames, Arity, Types}` and a column-liveness/demand lattice as egg-style e-class analyses that merge to a fixpoint during saturation. We already carry `non_negative`, keys, nullability, and monotonic. The `Equivalences` analysis is now wired (workstream A): it drives scalar-payload canonicalization via the `reducer()` substitution step and collapses unsatisfiable relations to empty. Demand remains the next high-value addition; it and the demand-driven projection cluster unlock the full analysis-propagation deletion phase.
+* **(partial) A. E-class analyses.** Re-express Materialize's `analysis::{Equivalences, UniqueKeys, NonNegative, ColumnNames, Arity, Types}` and a column-liveness/demand lattice as egg-style e-class analyses that merge to a fixpoint during saturation. We already carry `non_negative`, keys, nullability, and monotonic. The `Equivalences` analysis is now wired (workstream A): it drives scalar-payload canonicalization via the `reducer()` substitution step and collapses unsatisfiable relations to empty. Demand is now acquired via Option-B reuse (`raise::demand_pushdown`) rather than as an e-class analysis, because demand is top-down and does not fit the bottom-up e-class lattice; the demand-driven projection cluster is thereby covered.
 * **(done) B. Scalar canonicalization.** De-opaqued the payloads pragmatically by running `MirScalarExpr::reduce` on payloads at lower time, reusing battle-tested scalar code (the same way the lit-flag is already computed). This buys constant folding, `CoalesceCase`, and `CaseLiteral` without a scalar e-graph. A full scalar e-graph is deferred until a rewrite needs cross-operator scalar saturation.
 * **C. MFP coalescing.** At raise time, fold adjacent Map/Filter/Project into `mz_expr::MapFilterProject`, subsuming `CanonicalizeMfp` and part of `LiteralLifting`.
 * **(done) D. Index-aware cost and join carry-through.** The cost model now consumes `ctx.indexes` and skips the arrangement-build memory term for join inputs already arranged on the join key.
