@@ -123,5 +123,16 @@ fn optimize_inner(
     // nested Project nodes that the downstream pipeline would otherwise clean
     // up (which is why the optimized-plan SLT gate did not surface them).
     raise::coalesce_mfp(&mut raised);
+    // Split any `Reduce` whose aggregates mix `ReductionType`s into one `Reduce`
+    // per type, joined on the group key, by reusing the production
+    // `ReduceReduction` transform. `ReducePlan::create_from` panics during
+    // lowering on a single `Reduce` that mixes types (e.g. Accumulable `sum`
+    // with Hierarchical `min`); the e-graph search has no rule that performs
+    // this split, so without this post-pass a mixed-type `Reduce` extracted by
+    // eqsat would reach lowering and panic. This is the prerequisite for
+    // deleting `fixpoint_logical_02` (where production runs ReduceReduction) and
+    // moving eqsat before the logical fixpoints. Logical-only: it introduces a
+    // join that must stay `Unimplemented`.
+    raise::reduce_reduction(&mut raised, commit_wcoj);
     raised
 }

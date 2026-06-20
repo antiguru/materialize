@@ -32,6 +32,7 @@ use crate::canonicalize_mfp::CanonicalizeMfp;
 use crate::demand::Demand;
 use crate::eqsat::ir::{EScalar, Rel};
 use crate::movement::ProjectionPushdown;
+use crate::reduce_reduction::ReduceReduction;
 
 /// Raise `rel` to a `MirRelationExpr`. Inverse of [`crate::eqsat::lower::lower`].
 ///
@@ -275,6 +276,35 @@ pub(crate) fn demand_pushdown(expr: &mut MirRelationExpr, commit_wcoj: bool) {
         return;
     }
     *expr = work;
+}
+
+/// Split every `Reduce` whose aggregates mix `ReductionType`s into one `Reduce`
+/// per type, joined back together on the group key, by reusing the production
+/// `ReduceReduction` transform.
+///
+/// `ReducePlan::create_from` (the lowering step) panics on a `Reduce` whose
+/// aggregates span more than one reduction type (e.g. an Accumulable `sum`
+/// alongside a Hierarchical `min`), because rendering produces an independent
+/// dataflow path per type and cannot collate two types in a single `Reduce`.
+/// Production performs this split in `ReduceReduction`, which runs inside
+/// `fixpoint_logical_02`. The e-graph search has no equivalent rule, so without
+/// this post-pass a mixed-type `Reduce` extracted by eqsat would reach lowering
+/// and panic. Folding the production transform in here is the prerequisite for
+/// deleting `fixpoint_logical_02` and moving eqsat before the logical fixpoints.
+///
+/// This is logical-only: the transform replaces the mixed `Reduce` with a
+/// `Join` of the per-type reduces, and that join must stay `Unimplemented` until
+/// `JoinImplementation` runs. So it only fires in the logical phase
+/// (`!commit_wcoj`), mirroring how `demand_pushdown` gates `Demand`.
+///
+/// `ReduceReduction::action` is structural (no `TransformCtx`) and infallible,
+/// so it is applied directly, top down, over the whole tree (replicating the
+/// `visit_pre_mut(&mut Self::action)` body of `actually_perform_transform`).
+pub(crate) fn reduce_reduction(expr: &mut MirRelationExpr, commit_wcoj: bool) {
+    if commit_wcoj {
+        return;
+    }
+    expr.visit_pre_mut(&mut ReduceReduction::action);
 }
 
 /// Returns true iff the Map/Filter/Project chain rooted at `expr` has
