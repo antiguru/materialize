@@ -98,16 +98,15 @@ Filter ((#0 = 1) AND (#0 = 2))
 ----
 Constant <empty>
 
-# Case (h): redundant equality predicate dropped via join equivalences.
+# Case (h): equality predicate canonicalized by join equivalences, but retained.
 #
-# The inner join forces #0 = #2 (the first column of each input equal). The
-# filter above the join repeats that same predicate. Since the join's
-# equivalences analysis already places #0 and #2 in the same class, the filter
-# predicate is vacuously true on every row that reaches it, and
-# `drop_equiv_filter` removes it. Phase 2a also canonicalizes the join's own
-# equivalence `#0 = #2` to `#0 = #0` using the reducer derived from it
-# (#2 → #0); both forms are in the same e-class and extraction picks the
-# canonical form.
+# The inner join forces #0 = #2. The canonicalization step rewrites #2 to #0
+# (canonical representative), turning the filter predicate #0 = #2 into #0 = #0
+# and the join equivalence #0 = #2 into #0 = #0 as well. The filter is then
+# pushed into the first join input by push_filter_into_join_first. The filter is
+# NOT dropped: dropping Filter[#a=#b] when the input's equivalences prove #a=#b
+# is unsound for null-preserving sources (the equivalences analysis has no
+# nullability facts), so that step is deferred to the typed/physical phase.
 define
 DefSource name=t1
   - c0: bigint
@@ -122,7 +121,8 @@ Filter (#0 = #2)
     Get t1
 ----
 Join on=(#0 = #0)
-  Get t0
+  Filter (#0 = #0)
+    Get t0
   Get t1
 
 # Case (f): equivalence-canonical scalar rewriting.
