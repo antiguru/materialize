@@ -9,9 +9,9 @@
 //! Greedy, cost-monotone rewriting (apply a rule only if it lowers cost) gets
 //! stuck in local minima: a beneficial rewrite is often reachable only through
 //! a cost-neutral or cost-increasing intermediate step. To avoid that, the
-//! optimizer instead **saturates** an e-graph — it applies *every* rule
+//! optimizer instead **saturates** an e-graph: it applies *every* rule
 //! wherever it matches, regardless of cost, recording the resulting
-//! equivalences compactly — and only at the end extracts the cheapest plan.
+//! equivalences compactly. Only at the end does it extract the cheapest plan.
 //!
 //! Finding all matches of a rule's left-hand side is the bottleneck, and it is
 //! exactly a **conjunctive query** over the e-graph: each operator in the
@@ -654,8 +654,8 @@ fn unify_tuple(
 /// Generic join: enumerate every assignment of query variables to e-classes
 /// that satisfies all atoms. Variables are bound one at a time; for each, the
 /// candidate set is the intersection, over all atoms mentioning it, of the
-/// values it could take given the bindings so far — the worst-case-optimal
-/// join strategy.
+/// values it could take given the bindings so far (the worst-case-optimal
+/// join strategy).
 fn generic_join(
     query: &Query,
     index: &HashMap<Sym, Vec<(Id, ENode)>>,
@@ -716,9 +716,9 @@ fn solve(
 
     // Intersect candidate values for `var` across every atom that mentions it.
     // A variable with no constraining atoms is unconstrained and ranges over
-    // all e-class IDs — this is what allows pure-RelVar LHS patterns (rules
-    // whose entire left-hand side is a single relation metavariable, with the
-    // condition doing all the work) to enumerate candidates.
+    // all e-class IDs. This allows pure-RelVar LHS patterns (rules whose entire
+    // left-hand side is a single relation metavariable, with the condition doing
+    // all the work) to enumerate candidates.
     let mut candidates: Option<HashSet<Id>> = None;
     for atom in &query.atoms {
         if !atom.slots.contains(&var) {
@@ -949,7 +949,7 @@ impl EGraph {
             // (pure-RelVar LHS patterns such as `r => Empty(r) where ...`).
             let all_ids: HashSet<Id> = self.classes.keys().copied().collect();
 
-            // Phase 1: read-only — collect every rewrite to apply.
+            // Phase 1 (read-only): collect every rewrite to apply.
             let analyses = Analyses {
                 nn: self.run_analysis(&NonNeg {
                     locals: locals.nonneg.clone(),
@@ -988,7 +988,7 @@ impl EGraph {
                 }
             }
 
-            // Phase 2: mutate — in two sub-phases.
+            // Phase 2 (mutate): two sub-phases.
             let mut changed = false;
 
             // Phase 2a: equivalence-reducer canonicalization. For each e-class
@@ -1002,12 +1002,13 @@ impl EGraph {
             // still the current canonical IDs (rebuild() at the top of the loop
             // stabilizes them; no mutations have happened yet in this iteration).
             //
-            // Loop-safety: the reducer is idempotent — applying it a second
-            // time to an already-canonical expression yields the same expression
-            // (the representative maps to itself in the BTreeMap). The rewritten
-            // e-node is therefore hash-consed to an existing one after the first
-            // round that produces it, so `self.union` returns `false` and the
-            // saturation loop's `!changed` guard terminates normally.
+            // Loop-safety: the reducer is convergent under repeated application.
+            // One application may not fully canonicalize (the reducer reflects
+            // the previous iteration's equivalences), but full canonicalization
+            // happens over repeated rounds, backstopped by the iteration caps.
+            // After each round, a rewritten e-node hash-consed to an existing
+            // one causes `self.union` to return `false`, and the saturation
+            // loop's `!changed` guard terminates normally.
             for (canon_id, ec_opt) in &analyses.eq {
                 let Some(ec) = ec_opt else {
                     continue;
@@ -1038,7 +1039,7 @@ impl EGraph {
                 }
             }
 
-            // Phase 2b: DSL rule application — instantiate right-hand sides and
+            // Phase 2b (DSL rule application): instantiate right-hand sides and
             // union. Runs after canonicalization so that the next iteration's
             // analyses see both the canonical rewrites and the DSL rewrites.
             //
@@ -1343,8 +1344,8 @@ impl EGraph {
     /// Extract the cheapest plan rooted at `root` under `model`.
     ///
     /// `memory_first` selects the comparator:
-    /// * `true`  — memory-first ordering (default; memory is the scarce resource).
-    /// * `false` — time-first ordering (minimise CPU work, may use more memory).
+    /// * `true`: memory-first ordering (default; memory is the scarce resource).
+    /// * `false`: time-first ordering (minimises CPU work, may use more memory).
     pub fn extract_with(&self, root: Id, model: &CostModel, memory_first: bool) -> Rel {
         let cmp: &dyn Fn(&Cost, &Cost) -> std::cmp::Ordering = if memory_first {
             &|a, b| a.cmp_memory_first(b)
@@ -1629,7 +1630,7 @@ mod tests {
         let mut reducer = BTreeMap::new();
         reducer.insert(MirScalarExpr::column(1), MirScalarExpr::column(0));
 
-        // Node: Filter[#0] — #0 is already canonical, not in reducer.
+        // Node: Filter[#0]. #0 is already canonical, not in reducer.
         let node = ENode::Filter {
             input: 0,
             predicates: vec![EScalar::plain(MirScalarExpr::column(0))],

@@ -647,6 +647,22 @@ impl EquivalenceClasses {
     ///
     /// Informally this means simplifying constraints, removing redundant constraints, and unifying equivalence classes.
     pub fn minimize(&mut self, columns: Option<&[ReprColumnType]>) {
+        self.minimize_bounded(columns, usize::MAX);
+    }
+
+    /// Like [`Self::minimize`], but stops after at most `max_iters` outer iterations.
+    ///
+    /// Stopping early yields a sound under-approximation: all derived equivalences
+    /// came from real node structure; canonicalization and unsatisfiable detection
+    /// are conservative under fewer known equivalences (never incorrect ones).
+    /// Use this when the caller must bound execution time and an under-approximation
+    /// is acceptable (e.g. inside e-graph merge, where Union nodes can force-equate
+    /// arbitrary expressions and the outer fixpoint provides additional iterations).
+    pub(crate) fn minimize_bounded(
+        &mut self,
+        columns: Option<&[ReprColumnType]>,
+        max_iters: usize,
+    ) {
         // Repeatedly, we reduce each of the classes themselves, then unify the classes.
         // This should strictly reduce complexity, and reach a fixed point.
         // Ideally it is *confluent*, arriving at the same fixed point no matter the order of operations.
@@ -682,15 +698,6 @@ impl EquivalenceClasses {
         self.refresh();
 
         // Termination will be detected by comparing to the map of equivalence classes.
-        // The outer loop is expected to converge quickly because each round either
-        // reduces the complexity of existing equivalences or merges classes. In
-        // practice this converges in very few rounds. However, the `expand` step
-        // can add derived equivalences that interact with the expression reducer,
-        // and in pathological cases (arbitrary MirScalarExpr from e-graph Union
-        // nodes) this loop may not converge. Cap it to avoid non-termination;
-        // stopping early yields a sound under-approximation -- fewer known
-        // equivalences, never incorrect ones.
-        let max_minimize_iters: usize = 100;
         let mut previous = Some(self.remap.clone());
         let mut iters = 0usize;
         while let Some(prev) = previous {
@@ -711,10 +718,10 @@ impl EquivalenceClasses {
             iters += 1;
             // Termination detection.
             if prev != self.remap {
-                if iters >= max_minimize_iters {
+                if iters >= max_iters {
                     tracing::debug!(
-                        "EquivalenceClasses::minimize: did not converge after \
-                         {max_minimize_iters} iterations; returning partial result"
+                        "EquivalenceClasses::minimize_bounded: did not converge after \
+                         {iters} iterations; returning partial result"
                     );
                     break;
                 }

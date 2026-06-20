@@ -452,7 +452,11 @@ impl Analysis for Equivalences {
             (None, _) | (_, None) => None,
             (Some(mut a), Some(b)) => {
                 a.classes.extend(b.classes);
-                a.minimize(None);
+                // The e-graph can force-equate arbitrary expressions via Union
+                // nodes, so a single merge's minimize is bounded to prevent
+                // non-termination. Stopping early is a sound under-approximation:
+                // fewer known equivalences, never incorrect ones.
+                a.minimize_bounded(None, 100);
                 Some(a)
             }
         }
