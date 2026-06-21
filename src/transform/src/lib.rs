@@ -959,11 +959,17 @@ impl Optimizer {
                 name: "fixpoint_logical_cleanup_pass_01",
                 limit: 100,
                 transforms: transforms![
-                    // Strangler-fig cutover 1: the eqsat pass canonicalizes MFP at raise,
-                    // so skip this when eqsat is on; it still runs as the safeguard path
-                    // when eqsat is off.
-                    Box::new(CanonicalizeMfp);
-                        if !ctx.features.enable_eqsat_optimizer,
+                    // Runs unconditionally. A prior cutover skipped this when eqsat
+                    // was on, assuming eqsat's raise-time MFP canonicalization
+                    // subsumed it. That assumption is unsound: eqsat does not run on
+                    // every plan (size cap, or plans optimized on a path without the
+                    // pass), and its raise canonicalizes only the MFP runs it produces,
+                    // not a decorrelated join that logical cleanup must collapse. With
+                    // it skipped, such plans kept an un-canonicalized form (e.g. a
+                    // scalar subquery left as a Distinct + self-join instead of a
+                    // per-row Map). Canonicalization is idempotent, so running it after
+                    // eqsat's raise is harmless.
+                    Box::new(CanonicalizeMfp),
                     // Remove threshold operators which have no effect.
                     Box::new(ThresholdElision),
                     // Projection pushdown may unblock fusing joins and unions.
