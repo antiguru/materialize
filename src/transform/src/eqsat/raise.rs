@@ -33,6 +33,7 @@ use crate::dataflow::DataflowMetainfo;
 use crate::demand::Demand;
 use crate::eqsat::ir::{EScalar, Rel};
 use crate::movement::ProjectionPushdown;
+use crate::reduce_reduction::ReduceReduction;
 use crate::typecheck::empty_typechecking_context;
 use crate::{Transform, TransformCtx};
 
@@ -49,9 +50,23 @@ use crate::{Transform, TransformCtx};
 /// implementation via the real delta planner (physical-phase output). When it
 /// is clear, the same node is raised as a plain `Unimplemented` join, which is
 /// the only form valid in the logical optimizer.
+///
+/// `raise`'s output never contains a mixed-reduction `Reduce` (one whose
+/// aggregates span more than one `ReductionType`): such a Reduce is split
+/// internally via `ReduceReduction` before returning, so the result lowers
+/// without the `ReducePlan::create_from` panic regardless of caller or phase.
+/// The split runs unconditionally because `logical_fixpoint_02` (which also
+/// splits) is skipped in the physical phase.
 pub fn raise(rel: &Rel, commit_wcoj: bool) -> MirRelationExpr {
     let mut scope = BTreeMap::new();
-    raise_inner(rel, commit_wcoj, &mut scope)
+    let mut raised = raise_inner(rel, commit_wcoj, &mut scope);
+    // Make the raised plan independently safe to lower. `ReducePlan::create_from`
+    // panics on a single `Reduce` mixing reduction types, and only this split
+    // breaks it apart. It is logical-safe in any phase and a no-op when there is
+    // nothing to split, so it runs in both phases (the physical phase skips
+    // `logical_fixpoint_02`, which would otherwise be the only splitter).
+    split_mixed_reductions(&mut raised);
+    raised
 }
 
 /// Inner recursive raise, carrying `scope`: a map from CSE-bound local ids to
@@ -288,6 +303,36 @@ pub(crate) fn demand_pushdown(expr: &mut MirRelationExpr, commit_wcoj: bool) {
         return;
     }
     *expr = work;
+}
+
+/// Split every mixed-reduction `Reduce` in `expr` into a join of single-type
+/// reduces by running the production `ReduceReduction` transform over the whole
+/// tree.
+///
+/// `ReducePlan::create_from` (lowering) panics on a single `Reduce` mixing
+/// reduction types (e.g. Accumulable `sum` with Hierarchical `min`), and only
+/// `ReduceReduction` splits it. Splitting is semantics-preserving and a no-op on
+/// already-split reduces, so it runs unconditionally in both phases. This makes
+/// `raise`'s output safe to lower regardless of caller or phase, independent of
+/// the phase-gated `logical_fixpoint_02`.
+///
+/// The local `TransformCtx` uses default features and empty oracles, matching
+/// the other reuse post-passes which run their production transforms without a
+/// threaded-through context. The result is adopted only if it preserves arity,
+/// mirroring the `logical_fixpoint_02` arity guard.
+fn split_mixed_reductions(expr: &mut MirRelationExpr) {
+    let features = OptimizerFeatures::default();
+    let typecheck_ctx = empty_typechecking_context();
+    let mut df_meta = DataflowMetainfo::default();
+    let mut ctx = TransformCtx::local(&features, &typecheck_ctx, &mut df_meta, None, None);
+    let mut work = expr.clone();
+    let arity = work.arity();
+    if ReduceReduction.transform(&mut work, &mut ctx).is_err() {
+        return;
+    }
+    if work.arity() == arity {
+        *expr = work;
+    }
 }
 
 /// Run the production `fixpoint_logical_02` transforms (SemijoinIdempotence,
@@ -710,5 +755,86 @@ mod tests {
         Typecheck::new(ctx.clone())
             .transform(&mut checked, &mut transform_ctx)
             .expect("optimized plan must pass strict Typecheck");
+    }
+
+    /// `raise` must never return a `Reduce` whose aggregates mix reduction
+    /// types: `ReducePlan::create_from` (lowering) panics on such a Reduce, and
+    /// only the internal `ReduceReduction` split breaks it apart. The split must
+    /// run in BOTH phases, since the physical phase (`commit_wcoj = true`) skips
+    /// `logical_fixpoint_02`, which would otherwise be the only splitter. Build a
+    /// single `Reduce` mixing an Accumulable `sum` with a Hierarchical `min`,
+    /// lower it, then assert `raise` splits it for both `commit_wcoj` values.
+    #[mz_ore::test]
+    fn raise_splits_mixed_reduction_reduce_in_both_phases() {
+        use mz_compute_types::plan::reduce::{ReductionType, reduction_type};
+        use mz_expr::{AggregateExpr, AggregateFunc};
+
+        // The two functions are genuinely different reduction types, otherwise
+        // there would be nothing to split.
+        assert_eq!(
+            reduction_type(&AggregateFunc::SumInt64),
+            ReductionType::Accumulable
+        );
+        assert_eq!(
+            reduction_type(&AggregateFunc::MinInt64),
+            ReductionType::Hierarchical
+        );
+
+        // Returns true iff `expr` contains a Reduce mixing reduction types.
+        fn has_mixed_reduction_reduce(expr: &MirRelationExpr) -> bool {
+            let mut found = false;
+            expr.visit_pre(|e| {
+                if let MirRelationExpr::Reduce { aggregates, .. } = e {
+                    let mut types = aggregates.iter().map(|a| reduction_type(&a.func));
+                    if let Some(first) = types.next() {
+                        if types.any(|t| t != first) {
+                            found = true;
+                        }
+                    }
+                }
+            });
+            found
+        }
+
+        let sum = AggregateExpr {
+            func: AggregateFunc::SumInt64,
+            expr: MirScalarExpr::column(1),
+            distinct: false,
+        };
+        let min = AggregateExpr {
+            func: AggregateFunc::MinInt64,
+            expr: MirScalarExpr::column(1),
+            distinct: false,
+        };
+        let mixed = MirRelationExpr::Reduce {
+            input: Box::new(base(2)),
+            group_key: vec![MirScalarExpr::column(0)],
+            aggregates: vec![sum, min],
+            monotonic: false,
+            expected_group_size: None,
+        };
+        assert!(
+            has_mixed_reduction_reduce(&mixed),
+            "test input must contain a mixed-reduction Reduce"
+        );
+
+        let rel = lower(&mixed);
+
+        // Both phases must split the mixed Reduce. The physical phase
+        // (`commit_wcoj = true`) is the gap that `logical_fixpoint_02` leaves,
+        // so this is the load-bearing case for the fix.
+        for commit_wcoj in [false, true] {
+            let raised = raise(&rel, commit_wcoj);
+            assert!(
+                !has_mixed_reduction_reduce(&raised),
+                "raise (commit_wcoj={commit_wcoj}) must split the mixed-reduction Reduce; got {raised:?}"
+            );
+            // Arity is preserved across the split: group key plus two aggregates.
+            assert_eq!(
+                raised.arity(),
+                3,
+                "raise (commit_wcoj={commit_wcoj}) must preserve arity; got {raised:?}"
+            );
+        }
     }
 }
