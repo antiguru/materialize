@@ -122,7 +122,6 @@ Explained Query:
       Constant
         - ()
 
-Source materialize.public.t2
 Source materialize.public.pk1
   filter=((case when (#1{f2} = #1{f2}) then null else #1{f2} end < #1{f2}))
 

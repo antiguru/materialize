@@ -1199,7 +1199,6 @@ Explained Query:
               - ()
 
 Source materialize.public.a
-Source materialize.public.c
 
 Target cluster: quickstart
 
