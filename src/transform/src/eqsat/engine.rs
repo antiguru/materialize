@@ -145,9 +145,15 @@ impl Optimizer {
                 let mut eg = EGraph::new();
                 let root = eg.add_rel(&plan);
                 let iterations = eg.saturate(&self.rules, self.max_iters, facts);
-                let mem_plan = eg.extract_with(root, &self.model, true);
+                // Extraction returns `None` when the root has no representative
+                // satisfying the polarity constraints (only malformed input can
+                // reach this). Fall back to the original, un-optimized fragment:
+                // skipping optimization is always a sound no-op.
+                let Some(mem_plan) = eg.extract_with(root, &self.model, true) else {
+                    return (plan.clone(), None, iterations);
+                };
                 let time_plan = eg.extract_with(root, &self.model, false);
-                (mem_plan, Some(time_plan), iterations)
+                (mem_plan, time_plan, iterations)
             }
         }
     }
@@ -182,7 +188,13 @@ impl Optimizer {
                 let mut eg = EGraph::new();
                 let root = eg.add_rel(&plan);
                 let iterations = eg.saturate(&self.rules, self.max_iters, facts);
-                (eg.extract(root, &self.model), iterations)
+                // `None` when no representative satisfies the polarity
+                // constraints; fall back to the un-optimized fragment, a sound
+                // no-op.
+                match eg.extract(root, &self.model) {
+                    Some(best) => (best, iterations),
+                    None => (plan.clone(), iterations),
+                }
             }
         }
     }
@@ -251,6 +263,8 @@ impl Optimizer {
     /// rewrite the surrounding fragment using those facts — e.g. eliding a
     /// `Threshold` wrapped around a provably non-negative recursion.
     fn optimize_around_scopes(&self, plan: Rel, facts: &LocalFacts) -> (Rel, usize) {
+        // Keep the original fragment to fall back on if extraction fails.
+        let original = plan.clone();
         // Replace each maximal scope subtree with a fresh opaque `LocalGet`
         // placeholder (ids chosen above any real bound id, so they cannot clash
         // with genuine recursive references).
@@ -279,8 +293,12 @@ impl Optimizer {
         let mut eg = EGraph::new();
         let root = eg.add_rel(&placeholder_plan);
         iters += eg.saturate(&self.rules, self.max_iters, &ext);
-        let extracted = eg.extract(root, &self.model);
-        (substitute_locals(extracted, &subst), iters)
+        // `None` when no representative satisfies the polarity constraints; fall
+        // back to the original, un-optimized fragment, a sound no-op.
+        match eg.extract(root, &self.model) {
+            Some(extracted) => (substitute_locals(extracted, &subst), iters),
+            None => (original, iters),
+        }
     }
 }
 

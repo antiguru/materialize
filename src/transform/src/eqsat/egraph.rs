@@ -1446,7 +1446,12 @@ impl EGraph {
     /// among its e-nodes whose children have themselves been costed, iterated
     /// to a fixpoint.  (The e-graphs we build are acyclic, so this converges
     /// in at most the depth of the e-graph.)
-    pub fn extract(&self, root: Id, model: &CostModel) -> Rel {
+    ///
+    /// Returns `None` when the root class has no buildable representative under
+    /// the polarity constraints (a non-linear `Reduce`/`TopK` whose input class
+    /// has no non-negative form), so the caller can fall back to the
+    /// un-optimized fragment rather than failing.
+    pub fn extract(&self, root: Id, model: &CostModel) -> Option<Rel> {
         self.extract_with(root, model, true)
     }
 
@@ -1455,7 +1460,10 @@ impl EGraph {
     /// `memory_first` selects the comparator:
     /// * `true`: memory-first ordering (default; memory is the scarce resource).
     /// * `false`: time-first ordering (minimises CPU work, may use more memory).
-    pub fn extract_with(&self, root: Id, model: &CostModel, memory_first: bool) -> Rel {
+    ///
+    /// Returns `None` when the root class cannot be extracted under the polarity
+    /// constraints (see [`Self::extract`]).
+    pub fn extract_with(&self, root: Id, model: &CostModel, memory_first: bool) -> Option<Rel> {
         let cmp: &dyn Fn(&Cost, &Cost) -> std::cmp::Ordering = if memory_first {
             &|a, b| a.cmp_memory_first(b)
         } else {
@@ -1521,10 +1529,10 @@ impl EGraph {
             }
         }
         // The root has no parent, so no polarity demand: extract from `best_any`.
-        best_any
-            .get(&self.find(root))
-            .map(|(_, r)| r.clone())
-            .expect("root class could not be extracted")
+        // `None` when no representative could be built (the root, or some node it
+        // requires, has no form satisfying the polarity constraint); the caller
+        // falls back to the un-optimized fragment, which is always sound.
+        best_any.get(&self.find(root)).map(|(_, r)| r.clone())
     }
 
     /// Rebuild a [`Rel`] from an e-node, substituting each child with its
@@ -2083,7 +2091,9 @@ mod tests {
         });
 
         let model = CostModel::new();
-        let extracted = eg.extract(root, &model);
+        let extracted = eg
+            .extract(root, &model)
+            .expect("well-formed root must extract");
         let Rel::Reduce { input, .. } = extracted else {
             panic!("root must extract to a Reduce");
         };
@@ -2123,7 +2133,9 @@ mod tests {
         let root = eg.find(cheap);
 
         let model = CostModel::new();
-        let extracted = eg.extract(root, &model);
+        let extracted = eg
+            .extract(root, &model)
+            .expect("well-formed root must extract");
         // The cheapest plan is the single filter directly over the Get.
         let Rel::Filter { input, .. } = extracted else {
             panic!("root must extract to a Filter");
@@ -2157,7 +2169,9 @@ mod tests {
         });
 
         let model = CostModel::new();
-        let extracted = eg.extract(root, &model);
+        let extracted = eg
+            .extract(root, &model)
+            .expect("well-formed root must extract");
         let Rel::Reduce { input, .. } = extracted else {
             panic!("root must extract to a Reduce");
         };

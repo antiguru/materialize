@@ -115,9 +115,19 @@ fn max_agg() -> AggregateExpr {
 /// which is incorrect because `reduce(r) != negate(reduce(negate(r)))` for a
 /// non-linear aggregate. This test asserts the extracted plan never does so.
 ///
-/// If this test fails, the polarity-aware extractor (Task 1) has a gap. Do NOT
-/// weaken this test or add a rule guard: the rules are sound only because the
-/// extractor forbids the signed form here.
+/// Scope. This is an end-to-end INVARIANT assertion (defense in depth), not a
+/// true extractor regression gate. The cost model already prefers a non-negated
+/// representative because a `Negate` is an extra node that raises cost, so a
+/// cost-only extractor would also satisfy this assertion even without the
+/// polarity machinery. It therefore cannot, on its own, catch a regression in
+/// the polarity-aware extractor. The genuine regression gate for that extractor
+/// is the `reduce_input_avoids_negate_representative` unit test in
+/// `eqsat::egraph`, which constructs a class where the `Negate`-rooted
+/// representative is CHEAPER than its non-negated equivalent under a reduce, so
+/// only the polarity constraint, not cost, can reject it. Keep this invariant
+/// assertion regardless: it guards the property end-to-end. Do NOT weaken it or
+/// add a rule guard: the rules are sound only because the extractor forbids the
+/// signed form here.
 #[mz_ore::test]
 fn negate_join_soundness_gate_reduce_max() {
     // Sanity: MAX really is a non-linear (Hierarchical) aggregate, otherwise the
@@ -180,6 +190,41 @@ fn negate_join_soundness_gate_topk() {
         !has_negate_under_non_linear(&out),
         "polarity-aware extraction must never place a Negate-rooted \
          representative directly under a non-linear Reduce/TopK; got {out:?}"
+    );
+}
+
+/// GRACEFUL NO-OP. A non-linear `Reduce(MAX)` whose input is irredeemably signed
+/// (a bare `Negate(Get)` with no non-negative equivalent in its e-class) has no
+/// extractable plan: the polarity-aware extractor demands a non-negative input
+/// for the reduce, the input class offers only the `Negate`-rooted form, so the
+/// root class has no representative. Extraction returns `None` and the optimizer
+/// must fall back to the un-optimized input, a sound no-op. This previously
+/// PANICKED with "root class could not be extracted"; that must now be a no-op.
+///
+/// We assert the optimizer does not panic and leaves the `Negate` directly under
+/// the non-linear reduce (it neither dropped the constraint nor rewrote the
+/// fragment), which is exactly the un-optimized input shape.
+#[mz_ore::test]
+fn negate_under_reduce_extraction_is_noop() {
+    let a = src(1, 1);
+    // A non-linear MAX over a directly negated input. Nothing makes this input
+    // non-negative, so the reduce input class has no non-negative form.
+    let input = a.negate().reduce(vec![], vec![max_agg()], None);
+
+    // Precondition: the input really has the unsound-looking shape the extractor
+    // refuses to optimize, so a passing test exercises the fallback.
+    assert!(
+        has_negate_under_non_linear(&input),
+        "input must have a Negate directly under the non-linear reduce"
+    );
+
+    // Must not panic. The optimizer returns the un-optimized fragment.
+    let out = mz_transform::eqsat::optimize_logical(input);
+
+    assert!(
+        has_negate_under_non_linear(&out),
+        "graceful no-op must leave the Negate under the non-linear reduce \
+         (the un-optimized input), never drop the polarity constraint; got {out:?}"
     );
 }
 
