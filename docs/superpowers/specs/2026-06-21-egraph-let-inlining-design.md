@@ -104,3 +104,52 @@ inlining heuristics).
 * The `phase` annotation (commit 0aab159f81) is orthogonal but useful: a future
   inlining/union rule could itself be phase-scoped if it proves
   arrangement-sensitive.
+
+## Spike validation (2026-06-21) and revised plan
+
+A throwaway spike built the ck480 shape (`Let l0 = Filter(#0=123,#1=234)(Get u1)
+in Union[Get l0, Get l0, Get l0]`) and prototyped approach (b): add the
+definition into the body e-graph and `eg.union(getl0_id, def_id)`. Findings:
+
+* **Prerequisite, now DONE:** the spike found `ConstantColumns` was NON-FUNCTIONAL
+  as shipped (its `merge` used intersection, so the `run_analysis` fold from the
+  empty `bottom` annihilated every fact, and an opaque `LocalGet` poisoned any
+  unioned class). Fixed in commit c01f2bea78: `merge` is now a join
+  (`union_const_cols`) with `bottom` as identity; intersection stays only for the
+  `Union` operator arm. This was a real correctness bug and is the load-bearing
+  prerequisite for any consumer of `an.cc`.
+* **Un-trapping works (OBSERVED):** after the union, the `Get l0` class carries
+  `{0:123, 1:234}` (with the fixed merge). The fact is no longer trapped.
+* **No blow-up (OBSERVED):** the ck480 shape went 2 -> 4 e-nodes (definition added
+  once, hash-consed across the 3 uses), saturation stable at 4 (iters=1). Growth
+  is additive in definition size, not multiplicative in use count. `MAX_ENODES`
+  already bounds the pathological case; a size/use budget is sufficient
+  mitigation, not a blocker.
+* **Extraction terminates + SHARES (OBSERVED):** non-recursive union is acyclic;
+  the existing `extract_with` coped, and for the 3-use binding it extracted 3
+  `LocalGet` references (shared, not inlined) which `cse` already names as a Let.
+  CAVEAT: this is because the current cost model treats `LocalGet` as a free leaf,
+  so it ALWAYS shares; for a single-use / tiny binding it would fail to inline
+  when inlining is cheaper. So the inlining half of the payoff needs a
+  sharing-aware extractor; the un-trapping half does not.
+
+### Revised implementation plan (size M; M-L with sharing-aware extraction)
+
+1. **DONE** - fix `ConstantColumns` merge polarity (c01f2bea78).
+2. Union plumbing (S): in `optimize_scope` (engine.rs ~210), for a NON-recursive
+   `Let x = v in body`, add the lowered `v` into the body's e-graph and
+   `union(LocalGet x class, v root)` before saturating, instead of optimizing them
+   in separate fragments. Keep `LetRec` on the opaque path (cycles break
+   extraction). Gate by a definition size/use budget.
+3. A CONSUMER to demonstrate value (the un-trapping is invisible without one): add
+   a `Cond` reading `an.cc` for a class and a const-col rewrite rule (e.g. a
+   redundant-`Filter`/`Map` simplification keyed on a now-reachable constant), with
+   a test showing a plan improvement that was impossible before the union.
+4. (Deferred, M) sharing-aware extraction for cost-driven inline-vs-share - needed
+   for the inlining payoff, not for un-trapping. Composes with the polarity-aware
+   extractor (a child carries both a polarity demand and a share/inline cost).
+
+ck480's FULL collapse remains a further stack on top of this: a const-col
+reconstruction rule that works through the `Negate` (sound now via the
+polarity-aware extractor) plus an n-ary / order-insensitive `union_cancel` (a
+matcher extension). Those are out of scope for the Let-union itself.
