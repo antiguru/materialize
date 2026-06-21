@@ -55,16 +55,15 @@ use crate::{Transform, TransformCtx};
 /// aggregates span more than one `ReductionType`): such a Reduce is split
 /// internally via `ReduceReduction` before returning, so the result lowers
 /// without the `ReducePlan::create_from` panic regardless of caller or phase.
-/// The split runs unconditionally because `logical_fixpoint_02` (which also
-/// splits) is skipped in the physical phase.
+/// The split runs unconditionally here because no post-pass splits afterward.
 pub fn raise(rel: &Rel, commit_wcoj: bool) -> MirRelationExpr {
     let mut scope = BTreeMap::new();
     let mut raised = raise_inner(rel, commit_wcoj, &mut scope);
     // Make the raised plan independently safe to lower. `ReducePlan::create_from`
     // panics on a single `Reduce` mixing reduction types, and only this split
     // breaks it apart. It is logical-safe in any phase and a no-op when there is
-    // nothing to split, so it runs in both phases (the physical phase skips
-    // `logical_fixpoint_02`, which would otherwise be the only splitter).
+    // nothing to split, so it runs in both phases. No post-pass splits afterward,
+    // so this is the sole splitter on the eqsat path.
     split_mixed_reductions(&mut raised);
     raised
 }
@@ -328,50 +327,6 @@ fn split_mixed_reductions(expr: &mut MirRelationExpr) {
     let mut work = expr.clone();
     let arity = work.arity();
     if ReduceReduction.transform(&mut work, &mut ctx).is_err() {
-        return;
-    }
-    if work.arity() == arity {
-        *expr = work;
-    }
-}
-
-/// Run the production `fixpoint_logical_02` transforms (SemijoinIdempotence,
-/// ReductionPushdown, ReduceElision, ReduceReduction, LiteralLifting,
-/// RelationCSE, FuseAndCollapse) over the raised plan, reusing the exact
-/// fixpoint that `logical_optimizer` runs.
-///
-/// The e-graph search has rules for none of these Reduce/Join simplifications,
-/// so without this post-pass the raised plan would diverge from the production
-/// pipeline once eqsat moves before `fixpoint_logical_02`. In particular
-/// `ReduceReduction` is required: `ReducePlan::create_from` (lowering) panics on
-/// a single `Reduce` mixing reduction types (e.g. Accumulable `sum` with
-/// Hierarchical `min`), and only `ReduceReduction` splits it. Folding the whole
-/// fixpoint in here is the prerequisite for deleting `fixpoint_logical_02` from
-/// `logical_optimizer` and moving eqsat before the logical fixpoints.
-///
-/// Logical-only: every included transform assumes logical-phase plans (joins
-/// `Unimplemented`, no arrangements), so it must not run in the WcoJoin-commit
-/// (physical) phase. Mirrors `demand_pushdown` gating.
-///
-/// The local `TransformCtx` uses default features and empty oracles, matching
-/// the other reuse post-passes which run their production transforms without a
-/// threaded-through context. The result is adopted only if it preserves arity,
-/// guarding against an unexpected reshape (the equivalence guard at the
-/// `EqSatTransform` boundary covers the live path; direct callers rely on this).
-pub(crate) fn logical_fixpoint_02(expr: &mut MirRelationExpr, commit_wcoj: bool) {
-    if commit_wcoj {
-        return;
-    }
-    let features = OptimizerFeatures::default();
-    let typecheck_ctx = empty_typechecking_context();
-    let mut df_meta = DataflowMetainfo::default();
-    let mut ctx = TransformCtx::local(&features, &typecheck_ctx, &mut df_meta, None, None);
-    let mut work = expr.clone();
-    let arity = work.arity();
-    if crate::fixpoint_logical_02()
-        .transform(&mut work, &mut ctx)
-        .is_err()
-    {
         return;
     }
     if work.arity() == arity {

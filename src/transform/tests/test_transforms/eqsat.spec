@@ -51,13 +51,13 @@ Filter (#0 = 1)
       Get t0
 ----
 With
-  cte l0 =
+  cte l1 =
     Filter (#0 = 1) AND (#1 = 1)
       Get t0
 Return
   Union
-    Get l0
-    Get l0
+    Get l1
+    Get l1
 
 # Case (c): unsupported node (Reduce) under a Filter is preserved verbatim.
 #
@@ -71,7 +71,8 @@ Filter (#0 = 1)
 ----
 Filter (#0 = 1)
   Distinct project=[#0]
-    Get t0
+    Project (#0)
+      Get t0
 
 # Case (d): filter with a literal-false predicate rewrites to an empty constant.
 #
@@ -196,10 +197,10 @@ Union
     Get t0
 ----
 With
-  cte l0 =
+  cte l1 =
     Filter (#0 = 1)
       Get t0
 Return
   Union
-    Get l0
-    Get l0
+    Get l1
+    Get l1

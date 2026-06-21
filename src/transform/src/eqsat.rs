@@ -148,19 +148,17 @@ fn optimize_inner(
     // nested Project nodes that the downstream pipeline would otherwise clean
     // up (which is why the optimized-plan SLT gate did not surface them).
     raise::coalesce_mfp(&mut raised);
-    // Run the full production `fixpoint_logical_02` (SemijoinIdempotence,
-    // ReductionPushdown, ReduceElision, ReduceReduction, LiteralLifting,
-    // RelationCSE, FuseAndCollapse) over the raised plan. The e-graph search
-    // has no rules for these Reduce/Join simplifications, so without this
-    // post-pass the raised plan diverges from the production pipeline once
-    // eqsat moves before `fixpoint_logical_02`. In particular `ReduceReduction`
-    // is required: `ReducePlan::create_from` panics on a single `Reduce` mixing
-    // reduction types (e.g. Accumulable `sum` with Hierarchical `min`), and
-    // only `ReduceReduction` splits it. Running the full fixpoint here is the
-    // prerequisite for deleting `fixpoint_logical_02` from `logical_optimizer`
-    // and moving eqsat before the logical fixpoints. Logical-only: transforms
-    // include `ReduceReduction` (introduces a join that must stay
-    // `Unimplemented`) and others that assume logical-phase plans.
-    raise::logical_fixpoint_02(&mut raised, commit_wcoj);
+    // We deliberately do NOT re-run the production `fixpoint_logical_02`
+    // (SemijoinIdempotence, ReductionPushdown, ReduceElision, ReduceReduction,
+    // LiteralLifting, RelationCSE, FuseAndCollapse) here. `logical_optimizer`
+    // already runs that fixpoint BEFORE this pass, and the e-graph treats
+    // Reduce/Join nodes as opaque leaves it never disturbs, so a second run is
+    // redundant: it leaves the plan unchanged apart from fusing the occasional
+    // redundant `Project` that `demand_pushdown` introduces above an opaque
+    // Reduce, which the downstream `ProjectionPushdown`/physical passes clean up
+    // regardless. The one effect we must preserve, `ReduceReduction`'s split of
+    // a mixed-reduction `Reduce` (else `ReducePlan::create_from` panics on
+    // lowering), runs unconditionally inside `raise` via `split_mixed_reductions`
+    // in both phases, independent of this fixpoint.
     raised
 }

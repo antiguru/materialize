@@ -691,10 +691,10 @@ pub fn fuse_and_collapse_fixpoint() -> Fixpoint {
 /// Run the `fixpoint_logical_02` transforms (Reduce/Join simplifications) in a
 /// fixpoint.
 ///
-/// Shared between `logical_optimizer` and the eqsat raise-time cleanup
-/// (`eqsat::raise::logical_fixpoint_02`) so both run an identical transform
-/// list. Keeping one definition makes the planned eqsat cutover a one-line
-/// deletion of the `logical_optimizer` call site.
+/// Runs in `logical_optimizer` before the eqsat pass. The eqsat pass does not
+/// re-run it: the e-graph treats Reduce/Join nodes as opaque, so this fixpoint's
+/// output survives saturation unchanged (see `eqsat::optimize_inner`). Kept as a
+/// standalone function so a future cutover can move eqsat ahead of this fixpoint.
 pub fn fixpoint_logical_02() -> Fixpoint {
     Fixpoint {
         name: "fixpoint_logical_02",
