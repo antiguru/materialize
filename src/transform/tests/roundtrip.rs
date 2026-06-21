@@ -507,6 +507,96 @@ fn non_recursive_let_stays_shared_after_union() {
 }
 
 #[mz_ore::test]
+fn impossible_filter_across_let_collapses_via_union() {
+    use mz_expr::{BinaryFunc, LocalId};
+    use mz_repr::Datum;
+    use mz_transform::eqsat::optimize_without_let_union;
+
+    // `Let l0 = Filter[#0 = 5](src) in Union[Filter[#0 = 6](Get l0), Get l0, Get
+    // l0]`. The binding pins column 0 to 5; one body use then filters #0 = 6,
+    // which is unsatisfiable given #0 = 5. The fact #0 = 5 lives on the binding's
+    // definition, trapped behind the multi-use `Get l0`: no MIR post-pass crosses
+    // the Let boundary, and `NormalizeLets` will not inline a multi-use binding.
+    // Only the eqsat Let-union carries the fact onto the `Get l0` class, after
+    // which the body filter becomes `unsatisfiable` and `collapse_unsatisfiable`
+    // replaces that branch with an empty Constant. The union demonstrably crosses
+    // the Let here; no new rule is needed (the existing `Equivalences`-backed
+    // `unsatisfiable` cond fires once the fact reaches the body).
+    //
+    // This test guards the step-2 Let-union fact propagation in isolation: with
+    // the union ON the eqsat optimizer reaches the collapse, with it OFF the fact
+    // stays trapped. NOTE: the full production `logical_optimizer` reaches the
+    // same collapse independently, via its own Let-aware `Equivalences` analysis
+    // that propagates the binding's value facts to each `Get` use site. So on
+    // this shape the eqsat win is dormant relative to production; the value of
+    // the union is the e-graph-native mechanism (facts on the shared class during
+    // saturation), not a plan production could not otherwise reach.
+    fn col_eq(col: usize, val: i64) -> MirScalarExpr {
+        MirScalarExpr::column(col).call_binary(
+            MirScalarExpr::literal_ok(Datum::Int64(val), ReprScalarType::Int64),
+            BinaryFunc::Eq(mz_expr::func::Eq),
+        )
+    }
+
+    let typ = ReprRelationType::new(
+        (0..2)
+            .map(|_| ReprScalarType::Int64.nullable(true))
+            .collect(),
+    );
+    let build = || {
+        let lid = LocalId::new(1);
+        let value = src_with_nullability(1, 2, true).filter(vec![col_eq(0, 5)]);
+        let get_l = || MirRelationExpr::Get {
+            id: Id::Local(lid.clone()),
+            typ: typ.clone(),
+            access_strategy: AccessStrategy::UnknownOrLocal,
+        };
+        // Multi-use body so the post-pass `NormalizeLets` cannot inline the
+        // binding (which would otherwise reach the fact without the union).
+        let body = MirRelationExpr::Union {
+            base: Box::new(get_l().filter(vec![col_eq(0, 6)])),
+            inputs: vec![get_l(), get_l()],
+        };
+        MirRelationExpr::Let {
+            id: lid,
+            value: Box::new(value),
+            body: Box::new(body),
+        }
+    };
+
+    // Counts Filter predicates of the form `#0 = 6` (the impossible body filter).
+    let count_impossible = |e: &MirRelationExpr| {
+        count_nodes(e, |n| {
+            matches!(n, MirRelationExpr::Filter { predicates, .. }
+                if predicates.iter().any(|p| *p == col_eq(0, 6)))
+        })
+    };
+
+    // With the union: the body filter is gone, replaced by an empty Constant.
+    let with_union = optimize(build());
+    assert_eq!(with_union.arity(), 2, "arity must be preserved");
+    assert_eq!(
+        count_impossible(&with_union),
+        0,
+        "the union must un-trap #0 = 5 onto Get l0 so the impossible #0 = 6 filter collapses; got {with_union:?}"
+    );
+    assert!(
+        count_nodes(&with_union, is_empty_constant) >= 1,
+        "the impossible branch must collapse to an empty Constant; got {with_union:?}"
+    );
+
+    // Control: without the union, the fact stays trapped behind the multi-use
+    // `Get l0`, so the impossible filter survives. This proves the win above
+    // requires the Let-union, not some unrelated post-pass.
+    let without_union = optimize_without_let_union(build());
+    assert_eq!(without_union.arity(), 2, "arity must be preserved");
+    assert!(
+        count_impossible(&without_union) >= 1,
+        "without the union the impossible filter must survive (fact trapped behind Get l0); got {without_union:?}"
+    );
+}
+
+#[mz_ore::test]
 fn recursive_cte_with_inner_cse_does_not_panic() {
     use mz_expr::LocalId;
     use mz_transform::eqsat::optimize_logical;

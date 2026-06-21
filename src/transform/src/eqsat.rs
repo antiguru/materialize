@@ -60,7 +60,16 @@ pub fn optimize(expr: MirRelationExpr) -> MirRelationExpr {
     // The offline path is the maximal one: it keeps the FULL rule set (all
     // phases) so tests and compare_real exercise every rule, physical ones
     // included.
-    optimize_inner(expr, true, BTreeMap::new(), default_ruleset())
+    optimize_inner(expr, true, BTreeMap::new(), default_ruleset(), true)
+}
+
+/// Like [`optimize`], but with the non-recursive `Let`-definition union turned
+/// off. This is the control half of the Let-crossing-win test: a fact proven on
+/// a binding definition stays trapped behind the `Get`, so a body rewrite that
+/// needs that fact cannot fire. Not for production use.
+#[doc(hidden)]
+pub fn optimize_without_let_union(expr: MirRelationExpr) -> MirRelationExpr {
+    optimize_inner(expr, true, BTreeMap::new(), default_ruleset(), false)
 }
 
 /// Like [`optimize`], but seeds the cost model with arrangement/index
@@ -81,7 +90,7 @@ pub fn optimize_with_availability(
     // Live physical pass: the cost model sees arrangement / index availability,
     // so arrangement-sensitive rules (`phase physical`) may fire here.
     let rules = default_ruleset().for_phase(dsl::Phase::Physical);
-    optimize_inner(expr, true, available, rules)
+    optimize_inner(expr, true, available, rules, true)
 }
 
 /// Like [`optimize`], but emits worst-case-optimal joins as plain
@@ -92,7 +101,7 @@ pub fn optimize_logical(expr: MirRelationExpr) -> MirRelationExpr {
     // Live logical pass: the cost model cannot see arrangement availability, so
     // arrangement-sensitive rules (`phase physical`) are filtered out here.
     let rules = default_ruleset().for_phase(dsl::Phase::Logical);
-    optimize_inner(expr, false, BTreeMap::new(), rules)
+    optimize_inner(expr, false, BTreeMap::new(), rules, true)
 }
 
 fn optimize_inner(
@@ -100,6 +109,7 @@ fn optimize_inner(
     commit_wcoj: bool,
     available: BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>>,
     rules: dsl::RuleSet,
+    union_let_defs: bool,
 ) -> MirRelationExpr {
     let rel = lower::lower(&expr);
     let model = if available.is_empty() {
@@ -108,6 +118,11 @@ fn optimize_inner(
         cost::CostModel::with_available(available)
     };
     let optimizer = engine::Optimizer::new(rules, model);
+    let optimizer = if union_let_defs {
+        optimizer
+    } else {
+        optimizer.without_let_union()
+    };
     let best = optimizer.optimize(rel).plan;
     // Hoist e-classes referenced more than once into Let bindings, turning the
     // extracted tree back into a DAG with sharing. This subsumes RelationCSE:

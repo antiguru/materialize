@@ -61,6 +61,11 @@ pub struct Optimizer {
     rules: RuleSet,
     model: CostModel,
     max_iters: usize,
+    /// Whether to union a non-recursive `Let` definition into the body's e-graph
+    /// so its analysis facts reach the body's `Get` references. On by default;
+    /// the only reason to disable it is a control that proves a Let-crossing win
+    /// requires the union.
+    union_let_defs: bool,
 }
 
 impl Optimizer {
@@ -69,7 +74,18 @@ impl Optimizer {
             rules,
             model,
             max_iters: 100,
+            union_let_defs: true,
         }
+    }
+
+    /// Disable unioning non-recursive `Let` definitions into the body e-graph.
+    ///
+    /// Used only by the control half of the Let-crossing-win test, to show that
+    /// the win disappears when the union is off (the facts stay trapped behind
+    /// the `Get`). Production always keeps the union on.
+    pub fn without_let_union(mut self) -> Self {
+        self.union_let_defs = false;
+        self
     }
 
     /// Optimize `plan` by saturating an e-graph and extracting the cheapest
@@ -237,7 +253,7 @@ impl Optimizer {
             // `Let`. Recursive `LetRec` bindings stay on the opaque
             // `optimize_node` path: unioning a recursive reference into its own
             // definition would close an e-graph cycle that breaks extraction.
-            let (nb, i) = if recursive {
+            let (nb, i) = if recursive || !self.union_let_defs {
                 self.optimize_node(body.clone(), &facts)
             } else {
                 let (id, value) = &next[0];
