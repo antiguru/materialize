@@ -15,9 +15,9 @@ use std::collections::BTreeMap;
 
 use crate::eqsat::analysis::{LocalFacts, letrec_local_facts};
 use crate::eqsat::cost::{Cost, CostModel};
-use crate::eqsat::dsl::RuleSet;
 use crate::eqsat::egraph::EGraph;
 use crate::eqsat::ir::Rel;
+use crate::eqsat::rules::CompiledRuleSet;
 
 /// Bound on the outer fixpoint that re-analyzes a binding scope after rewriting
 /// it (a rewrite can reveal a stronger recursive invariant that enables another
@@ -58,7 +58,7 @@ pub struct Outcome {
 /// The saturating optimizer: equality saturation + cheapest-plan extraction.
 #[derive(Clone, Debug)]
 pub struct Optimizer {
-    rules: RuleSet,
+    rules: CompiledRuleSet,
     model: CostModel,
     max_iters: usize,
     /// Whether to union a non-recursive `Let` definition into the body's e-graph
@@ -69,7 +69,7 @@ pub struct Optimizer {
 }
 
 impl Optimizer {
-    pub fn new(rules: RuleSet, model: CostModel) -> Self {
+    pub fn new(rules: CompiledRuleSet, model: CostModel) -> Self {
         Optimizer {
             rules,
             model,

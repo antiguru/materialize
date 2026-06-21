@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 fn main() -> std::io::Result<()> {
-    let rules = mz_transform::eqsat::default_ruleset();
+    let rules = mz_transform::eqsat::rules_ast();
     let lean = mz_transform::eqsat::lean::emit_lean(&rules);
 
     let arg = std::env::args().nth(1);

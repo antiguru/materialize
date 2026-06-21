@@ -7,16 +7,16 @@
 //!
 //! A rule's matching and side-condition checking happen on the e-graph (see
 //! [`crate::eqsat::egraph`]); this module supplies the value layer those use: the
-//! [`Payload`] a metavariable binds, and the [`PExpr`] evaluator that builds a
-//! new payload (concatenating, shifting, or remapping columns) when a
-//! right-hand side is instantiated. Column remapping is the real
-//! `MirScalarExpr::permute`, so a remapped predicate is a faithful expression.
+//! [`Payload`] a metavariable binds, and the payload-combining operations
+//! (concatenating, shifting, or remapping columns) the compiled rule matchers
+//! (`crate::eqsat::rules`) call when instantiating a right-hand side. Column
+//! remapping is the real `MirScalarExpr::permute`, so a remapped predicate is a
+//! faithful expression.
 
 use std::collections::BTreeMap;
 
 use mz_expr::{AggregateExpr, Columns};
 
-use crate::eqsat::dsl::*;
 use crate::eqsat::ir::{Col, EScalar};
 
 /// The payload captured by a metavariable. The variant records which operator
@@ -72,48 +72,17 @@ impl Payload {
     }
 }
 
-/// Evaluate a payload expression against a payload environment and the arities
-/// of the bound relation metavariables (needed by `shift`'s index
-/// expressions). Used by the e-graph instantiation in [`crate::eqsat::egraph`].
-pub fn eval_pexpr(
-    e: &PExpr,
-    payloads: &BTreeMap<String, Payload>,
-    arities: &BTreeMap<String, usize>,
-) -> Result<Payload, String> {
-    match e {
-        PExpr::Var(name) => payloads
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("unbound payload metavariable `{name}`")),
-        PExpr::Concat(a, c) => concat_payload(
-            eval_pexpr(a, payloads, arities)?,
-            eval_pexpr(c, payloads, arities)?,
-        ),
-        PExpr::Compose(a, c) => compose_payload(
-            eval_pexpr(a, payloads, arities)?,
-            eval_pexpr(c, payloads, arities)?,
-        ),
-        PExpr::Shift(p, k) => {
-            let k = eval_ixexpr(k, arities)?;
-            shift_payload(eval_pexpr(p, payloads, arities)?, k)
-        }
-        PExpr::Remap(p, outs) => {
-            let outs = eval_pexpr(outs, payloads, arities)?.into_outputs()?;
-            remap_payload(eval_pexpr(p, payloads, arities)?, &outs)
-        }
-        PExpr::ColsOf(p) => cols_of_payload(eval_pexpr(p, payloads, arities)?),
-        PExpr::Iota(n) => {
-            let n = eval_ixexpr(n, arities)?;
-            if n < 0 {
-                return Err("iota of negative length".into());
-            }
-            Ok(Payload::Outputs((0..n as usize).collect()))
-        }
+/// `iota(n)`: the identity projection `[0, 1, …, n-1]`. Builds the leading
+/// "keep all input columns" part of a projection.
+pub(crate) fn iota_payload(n: i64) -> Result<Payload, String> {
+    if n < 0 {
+        return Err("iota of negative length".into());
     }
+    Ok(Payload::Outputs((0..n as usize).collect()))
 }
 
 /// Turn a payload of bare column references into a projection (`Outputs`).
-fn cols_of_payload(p: Payload) -> Result<Payload, String> {
+pub(crate) fn cols_of_payload(p: Payload) -> Result<Payload, String> {
     let scalars = match p {
         Payload::GroupKey(s) | Payload::Predicates(s) | Payload::Scalars(s) => s,
         Payload::Outputs(o) => return Ok(Payload::Outputs(o)),
@@ -127,20 +96,6 @@ fn cols_of_payload(p: Payload) -> Result<Payload, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Payload::Outputs(cols))
-}
-
-/// Evaluate an index expression to an integer using the bound arities.
-pub fn eval_ixexpr(e: &IxExpr, arities: &BTreeMap<String, usize>) -> Result<i64, String> {
-    Ok(match e {
-        IxExpr::Lit(n) => *n,
-        IxExpr::Arity(rel) => *arities
-            .get(rel)
-            .ok_or_else(|| format!("arity of unbound relation `{rel}`"))?
-            as i64,
-        IxExpr::Add(a, b) => eval_ixexpr(a, arities)? + eval_ixexpr(b, arities)?,
-        IxExpr::Sub(a, b) => eval_ixexpr(a, arities)? - eval_ixexpr(b, arities)?,
-        IxExpr::Neg(a) => -eval_ixexpr(a, arities)?,
-    })
 }
 
 /// Apply a column-index function to an aggregate (rewriting the columns of its
@@ -204,19 +159,19 @@ fn map_payload_cols(p: Payload, mut f: impl FnMut(Col) -> i64) -> Result<Payload
 }
 
 /// Shift every column index in `p` by `k`.
-fn shift_payload(p: Payload, k: i64) -> Result<Payload, String> {
+pub(crate) fn shift_payload(p: Payload, k: i64) -> Result<Payload, String> {
     map_payload_cols(p, |c| c as i64 + k)
 }
 
 /// Remap every column index `c` of `p` to `outs[c]` (inverting a projection).
-fn remap_payload(p: Payload, outs: &[usize]) -> Result<Payload, String> {
+pub(crate) fn remap_payload(p: Payload, outs: &[usize]) -> Result<Payload, String> {
     map_payload_cols(p, |c| match outs.get(c) {
         Some(&nc) => nc as i64,
         None => -1, // out of range ⇒ surfaced as an error by the callers
     })
 }
 
-fn concat_payload(a: Payload, c: Payload) -> Result<Payload, String> {
+pub(crate) fn concat_payload(a: Payload, c: Payload) -> Result<Payload, String> {
     use Payload::*;
     Ok(match (a, c) {
         (Predicates(mut x), Predicates(y)) => {
@@ -241,7 +196,7 @@ fn concat_payload(a: Payload, c: Payload) -> Result<Payload, String> {
 
 /// `compose(outer, inner)`: the projection that first applies `inner` then
 /// `outer`, i.e. `result[i] = inner[outer[i]]`.
-fn compose_payload(outer: Payload, inner: Payload) -> Result<Payload, String> {
+pub(crate) fn compose_payload(outer: Payload, inner: Payload) -> Result<Payload, String> {
     match (outer, inner) {
         (Payload::Outputs(o), Payload::Outputs(i)) => {
             let mut out = Vec::with_capacity(o.len());
@@ -301,8 +256,6 @@ mod tests {
     use super::*;
     use mz_expr::MirScalarExpr;
 
-    use crate::eqsat::dsl::{IxExpr, PExpr};
-
     /// A predicate payload of bare column references `#c` (one scalar per
     /// column), enough to exercise the per-scalar column remapping.
     fn pred(cols: &[Col]) -> Payload {
@@ -316,14 +269,7 @@ mod tests {
     #[mz_ore::test]
     fn shift_rewrites_columns() {
         // p reads #2,#3 ; shifting by -arity(a) with arity(a)=2 yields #0,#1.
-        let mut payloads = BTreeMap::new();
-        payloads.insert("p".to_string(), pred(&[2, 3]));
-        let arities = BTreeMap::from([("a".to_string(), 2usize)]);
-        let e = PExpr::Shift(
-            Box::new(PExpr::Var("p".into())),
-            IxExpr::Neg(Box::new(IxExpr::Arity("a".into()))),
-        );
-        let out = eval_pexpr(&e, &payloads, &arities).unwrap();
+        let out = shift_payload(pred(&[2, 3]), -2).unwrap();
         let scalars = out.into_predicates().unwrap();
         assert_eq!(scalars[0].is_col(), Some(0));
         assert_eq!(scalars[1].is_col(), Some(1));
@@ -333,15 +279,7 @@ mod tests {
     fn remap_inverts_a_projection() {
         // p reads projected positions #0,#1 ; project outputs = [5, 7] ; so the
         // underlying columns are #5,#7.
-        let mut payloads = BTreeMap::new();
-        payloads.insert("p".to_string(), pred(&[0, 1]));
-        payloads.insert("o".to_string(), Payload::Outputs(vec![5, 7]));
-        let arities = BTreeMap::new();
-        let e = PExpr::Remap(
-            Box::new(PExpr::Var("p".into())),
-            Box::new(PExpr::Var("o".into())),
-        );
-        let out = eval_pexpr(&e, &payloads, &arities).unwrap();
+        let out = remap_payload(pred(&[0, 1]), &[5, 7]).unwrap();
         let scalars = out.into_predicates().unwrap();
         assert_eq!(scalars[0].is_col(), Some(5));
         assert_eq!(scalars[1].is_col(), Some(7));

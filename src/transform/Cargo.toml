@@ -9,6 +9,9 @@ publish = false
 [lints]
 workspace = true
 
+[build-dependencies]
+chumsky = { workspace = true }
+
 [dependencies]
 differential-dataflow.workspace = true
 enum-kinds.workspace = true

@@ -30,8 +30,8 @@ pub mod ir;
 pub mod lean;
 pub mod lower;
 pub mod matcher;
-pub mod parser;
 pub mod raise;
+pub mod rules;
 pub mod transform;
 
 pub use transform::{EqSatTransform, PhysicalEqSatTransform};
@@ -40,12 +40,15 @@ use mz_expr::{MirRelationExpr, MirScalarExpr};
 use mz_repr::GlobalId;
 use std::collections::BTreeMap;
 
-/// The built-in rule file, embedded at compile time.
-pub const RULES_SRC: &str = include_str!("eqsat/rules/relational.rewrite");
+/// The built-in rule set, compiled from `eqsat/rules/relational.rewrite` at
+/// build time (see [`rules`]).
+pub fn default_ruleset() -> rules::CompiledRuleSet {
+    rules::all()
+}
 
-/// Parse the built-in rule set, panicking on a malformed embedded file.
-pub fn default_ruleset() -> dsl::RuleSet {
-    parser::parse_ruleset(RULES_SRC).expect("built-in rules must parse")
+/// The built-in rules as AST literals, for the Lean emitter (`gen-lean`).
+pub fn rules_ast() -> dsl::RuleSet {
+    rules::rules_ast()
 }
 
 /// Optimize `expr` by equality saturation over the supported relational subset,
@@ -108,7 +111,7 @@ fn optimize_inner(
     expr: MirRelationExpr,
     commit_wcoj: bool,
     available: BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>>,
-    rules: dsl::RuleSet,
+    rules: rules::CompiledRuleSet,
     union_let_defs: bool,
 ) -> MirRelationExpr {
     let rel = lower::lower(&expr);
