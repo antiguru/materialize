@@ -509,11 +509,33 @@ fn col_eq_literal(pred: &EScalar) -> Option<(usize, EScalar)> {
 
 /// Intersect two constant-column maps on `(column, value)`: keep a column only
 /// where both maps agree it is constant and agree on the value. This is the
-/// sound combination both for [`Analysis::merge`] (two forms of the same
-/// relation) and for a `Union` (a column is constant only if every branch
-/// agrees).
+/// sound combination for a `Union` (a column is constant only if every branch
+/// agrees on the same value).
 fn intersect_const_cols(a: ConstCols, b: &ConstCols) -> ConstCols {
     a.into_iter().filter(|(k, v)| b.get(k) == Some(v)).collect()
+}
+
+/// Join two constant-column maps proven of the SAME relation (two e-node forms
+/// of one e-class): keep every column EITHER form proves constant. This moves
+/// toward more precision, matching the other e-class analyses (`NonNeg`'s `||`,
+/// `Keys`' set union), and makes the empty map a left/right identity so the
+/// `run_analysis` fold from `bottom` does not annihilate facts. A value conflict
+/// means the two forms disagree on a column they both pin, so the relation is
+/// contradictory hence empty: drop that column (any value is then vacuously
+/// true, and dropping is the safe choice).
+fn union_const_cols(mut a: ConstCols, b: &ConstCols) -> ConstCols {
+    for (k, v) in b {
+        match a.get(k) {
+            None => {
+                a.insert(*k, v.clone());
+            }
+            Some(existing) if existing == v => {}
+            Some(_) => {
+                a.remove(k);
+            }
+        }
+    }
+    a
 }
 
 impl Analysis for ConstantColumns {
@@ -658,11 +680,15 @@ impl Analysis for ConstantColumns {
     }
 
     fn merge(&self, a: ConstCols, b: ConstCols) -> ConstCols {
-        // The two e-nodes denote the same relation, so a column constant in one
-        // form is constant in the relation; but if the forms disagree on the
-        // value, that is a contradiction we must not trust. Keep only agreeing
-        // facts. The map shrinks under merge, so the fixpoint terminates.
-        intersect_const_cols(a, &b)
+        // The two e-nodes denote the same relation, so a column proven constant
+        // in EITHER form is constant in the relation: join both forms' facts.
+        // This is a meet toward more precision (like the other analyses), and
+        // crucially makes `bottom` the identity so the fold from `bottom` in
+        // `run_analysis` preserves facts rather than annihilating them. A value
+        // conflict means an empty relation, so that column is dropped. The map
+        // grows monotonically and is bounded by the relation's arity, so the
+        // fixpoint terminates.
+        union_const_cols(a, &b)
     }
 }
 
@@ -1443,10 +1469,11 @@ mod tests {
         assert_eq!(result.get(&1), None);
     }
 
-    /// `merge` intersects on (column, value): agreeing facts survive,
-    /// disagreeing ones drop.
+    /// `merge` joins two forms of the same relation: a column proven constant in
+    /// EITHER form survives, a value conflict drops the column, and the empty map
+    /// is the identity (so folding from `bottom` does not annihilate facts).
     #[mz_ore::test]
-    fn constant_columns_merge_intersects() {
+    fn constant_columns_merge_unions() {
         let analysis = cc();
         let lit2 = EScalar::plain(MirScalarExpr::literal_ok(
             Datum::Int64(2),
@@ -1460,9 +1487,25 @@ mod tests {
         b.insert(1, lit2);
         b.insert(2, lit1());
         let merged = analysis.merge(a, b);
-        // Column 0 agrees; 1 disagrees (dropped); 2 is in only one map (dropped).
+        // Column 0 agrees (kept); 1 disagrees (dropped); 2 is in only one form
+        // (kept: a fact proven by either form holds of the relation).
         assert_eq!(merged.get(&0), Some(&lit1()));
         assert_eq!(merged.get(&1), None);
-        assert_eq!(merged.get(&2), None);
+        assert_eq!(merged.get(&2), Some(&lit1()));
+    }
+
+    /// Regression guard for the `run_analysis` fold `d = merge(bottom, make(n))`:
+    /// `bottom` (the empty map) must be the identity for `merge`, otherwise every
+    /// class collapses to empty and the analysis produces no facts. An opaque
+    /// `LocalGet` contributing the empty map must likewise not poison a class it
+    /// is unioned into.
+    #[mz_ore::test]
+    fn constant_columns_merge_bottom_is_identity() {
+        let analysis = cc();
+        let mut x = ConstCols::new();
+        x.insert(0, lit1());
+        x.insert(5, lit1());
+        assert_eq!(analysis.merge(ConstCols::new(), x.clone()), x);
+        assert_eq!(analysis.merge(x.clone(), ConstCols::new()), x);
     }
 }
