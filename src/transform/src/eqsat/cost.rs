@@ -23,9 +23,16 @@
 //!
 //! * [`Rel::Reduce`] arranges its input by the group key — one term at
 //!   `size_degree(input)`.
-//! * [`Rel::Join`] materialises the intermediates of the chosen join order —
-//!   one term per pairwise intermediate, via [`CostModel::binary_join_terms`]
-//!   (so a triangle binary-join contributes a term at degree 2.0).
+//! * [`Rel::Join`] persistently arranges its per-input collections and the
+//!   intermediates of the chosen join order; the final whole-join output is
+//!   streamed to the parent, not arranged, so it carries no memory term. The
+//!   terms are one per input at `size_degree(input_i)` (with the same
+//!   index-availability suppression WcoJoin uses) plus every intermediate
+//!   degree from [`CostModel::binary_join_terms`] except the last (the
+//!   transient final output). So a triangle binary-join contributes
+//!   [2.0, 1.0, 1.0, 1.0] (the genuine intermediate at 2.0 plus the three
+//!   input arrangements), and a 2-way binary join contributes [1.0, 1.0]
+//!   (just the two input arrangements), matching WcoJoin for the 2-way case.
 //! * [`Rel::WcoJoin`] arranges every input for the leapfrog/generic join —
 //!   one term per input at `size_degree(input_i)` (so a triangle WcoJoin
 //!   contributes [1.0, 1.0, 1.0]).
@@ -40,10 +47,11 @@
 //!
 //! ## WcoJoin vs binary-Join on the triangle
 //!
-//! Binary join: TIME max term = 2.0, MEMORY max term = 2.0.
-//! WcoJoin:     TIME max term = 1.5, MEMORY max term = 1.0.
+//! Binary join: TIME max term = 2.0, MEMORY = [2.0, 1.0, 1.0, 1.0].
+//! WcoJoin:     TIME max term = 1.5, MEMORY = [1.0, 1.0, 1.0].
 //!
-//! WcoJoin dominates on **both** axes.
+//! WcoJoin dominates on **both** axes: its memory has a smaller leading term
+//! (1.0 vs 2.0), and its time is lower (1.5 vs 2.0).
 
 use crate::eqsat::ir::{EScalar, Rel};
 use mz_expr::{Columns, Id, MirRelationExpr, MirScalarExpr};
@@ -327,17 +335,35 @@ impl CostModel {
             Rel::Reduce { input, .. } | Rel::TopK { input, .. } => {
                 out.push(self.size_degree(input))
             }
-            // Binary join materialises intermediate results; each intermediate
-            // is arranged.  binary_join_terms returns one degree per pairwise
-            // step, mirroring what collect_work does for the time axis.
-            // The terms come from the time-optimal left-deep order, so this
-            // charges that order's memory, assuming the engine evaluates a join
-            // with one order on both axes rather than choosing a memory-optimal
-            // order independently.
+            // Binary join persistently arranges its per-input collections and
+            // its intermediate results; the final whole-join output is streamed
+            // to the parent, not arranged here, so it carries no memory term.
+            // Charge one term per input at size_degree (with the same
+            // index-availability suppression WcoJoin uses, so the two join forms
+            // are comparable), plus every intermediate degree from
+            // binary_join_terms except the last. The terms come from the
+            // time-optimal left-deep order, so this charges that order's memory,
+            // assuming the engine evaluates a join with one order on both axes
+            // rather than choosing a memory-optimal order independently. The
+            // last term of binary_join_terms is the AGM degree of the full join
+            // (the final output), which is transient, so it is dropped.
             Rel::Join {
                 inputs,
                 equivalences,
-            } => out.extend(self.binary_join_terms(inputs, equivalences)),
+            } => {
+                let mut offset = 0usize;
+                for input in inputs.iter() {
+                    if !self.input_already_arranged(input, offset, equivalences) {
+                        out.push(self.size_degree(input));
+                    }
+                    offset += input.arity();
+                }
+                let mut terms = self.binary_join_terms(inputs, equivalences);
+                // Drop the final-join output degree (the last term); it is
+                // streamed to the parent, not persistently arranged.
+                terms.pop();
+                out.extend(terms);
+            }
             // WcoJoin (leapfrog/generic join) arranges every input.
             // An input whose join key is already covered by an available index
             // is not charged the arrangement-build memory term: the arrangement
@@ -993,8 +1019,12 @@ mod tests {
         let cb = model.cost(&binary);
         let cw = model.cost(&wcoj);
 
-        // WcoJoin memory: one term per input at degree 1.0 each.
-        // Binary join memory: intermediate at degree 2.0.
+        // WcoJoin memory: one term per input at degree 1.0 each, [1.0, 1.0, 1.0].
+        // Binary join memory: the genuine intermediate at degree 2.0 plus the
+        // three input arrangements, [2.0, 1.0, 1.0, 1.0]. The final-join output
+        // is streamed, not arranged, so it carries no memory term.
+        assert_eq!(cw.memory, vec![1.0, 1.0, 1.0], "wcoj memory");
+        assert_eq!(cb.memory, vec![2.0, 1.0, 1.0, 1.0], "binary memory");
         assert!(
             cw.memory.first().copied().unwrap_or(0.0) < cb.memory.first().copied().unwrap_or(0.0),
             "WcoJoin memory max={:?} must be < binary memory max={:?}",
@@ -1128,6 +1158,65 @@ mod tests {
         };
         let cost = model.cost(&wcoj);
         cost.memory
+    }
+
+    #[mz_ore::test]
+    fn binary_join_charges_persistent_arrangements_not_output() {
+        // A binary join's memory is its per-input arrangements plus the genuine
+        // intermediates of the chosen order, NOT the streamed final output.
+        let model = CostModel::new();
+        let eq = |a: usize, b: usize| vec![col(a), col(b)];
+        let inputs = vec![get("R", 2), get("S", 2), get("T", 2)];
+        let equivalences = vec![eq(0, 4), eq(1, 2), eq(3, 5)];
+        let binary = Rel::Join {
+            inputs,
+            equivalences,
+        };
+        let cb = model.cost(&binary);
+        // [2.0, 1.0, 1.0, 1.0]: the genuine intermediate at 2.0 plus the three
+        // input arrangements at 1.0. The final-join output (1.5 for the
+        // triangle) is dropped because it is streamed, not arranged.
+        assert_eq!(
+            cb.memory,
+            vec![2.0, 1.0, 1.0, 1.0],
+            "binary triangle memory must be the intermediate plus input arrangements, not the final output"
+        );
+    }
+
+    #[mz_ore::test]
+    fn two_way_join_ties_wcojoin_on_memory() {
+        // The core of fix B: a 2-way binary join's memory now charges only its
+        // two input arrangements [1.0, 1.0], matching WcoJoin exactly, so the
+        // two join forms reach parity. Before the fix, binary charged the
+        // transient N^2 output [2.0] and spuriously lost to WcoJoin.
+        let model = CostModel::new();
+        // R(#0,#1) S(#2,#3) with #1=#2: a single edge, a plain 2-way join.
+        let inputs = vec![get("R", 2), get("S", 2)];
+        let equivalences = vec![vec![col(1), col(2)]];
+        let binary = Rel::Join {
+            inputs: inputs.clone(),
+            equivalences: equivalences.clone(),
+        };
+        let wcoj = Rel::WcoJoin {
+            inputs,
+            equivalences,
+        };
+        let cb = model.cost(&binary);
+        let cw = model.cost(&wcoj);
+        assert_eq!(
+            cb.memory,
+            vec![1.0, 1.0],
+            "2-way binary memory must be the two input arrangements"
+        );
+        assert_eq!(
+            cw.memory, cb.memory,
+            "2-way binary and WcoJoin must tie on memory"
+        );
+        assert_eq!(
+            cb.cmp_memory_first(&cw),
+            std::cmp::Ordering::Equal,
+            "2-way binary join must tie WcoJoin under memory-first ordering"
+        );
     }
 
     #[mz_ore::test]
