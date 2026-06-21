@@ -322,6 +322,11 @@ impl Parser {
                 self.expect(&Tok::RParen)?;
                 Ok(Cond::Unsatisfiable { rel })
             }
+            "join_is_cyclic" => {
+                self.expect(&Tok::LParen)?;
+                self.expect(&Tok::RParen)?;
+                Ok(Cond::JoinIsCyclic)
+            }
             "all_true" | "any_false" | "all_columns" | "no_false" => {
                 self.expect(&Tok::LParen)?;
                 let payload = self.ident()?;

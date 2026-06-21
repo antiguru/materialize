@@ -579,9 +579,17 @@ struct Hypergraph {
 impl Hypergraph {
     fn build(inputs: &[Rel], equivalences: &[Vec<EScalar>]) -> Self {
         let arities: Vec<usize> = inputs.iter().map(Rel::arity).collect();
-        let mut offsets = Vec::with_capacity(inputs.len());
+        Self::from_arities(&arities, equivalences)
+    }
+
+    /// Build the dual hypergraph from per-input arities and the join's
+    /// equivalence classes. Vertices are inputs, edges are equivalence classes,
+    /// and each edge holds the set of inputs whose columns it touches. Inputs
+    /// occupy contiguous output-column ranges in `arities` order.
+    fn from_arities(arities: &[usize], equivalences: &[Vec<EScalar>]) -> Self {
+        let mut offsets = Vec::with_capacity(arities.len());
         let mut acc = 0usize;
-        for a in &arities {
+        for a in arities {
             offsets.push(acc);
             acc += a;
         }
@@ -603,10 +611,83 @@ impl Hypergraph {
             }
         }
         Hypergraph {
-            n_inputs: inputs.len(),
-            arities,
+            n_inputs: arities.len(),
+            arities: arities.to_vec(),
             classes,
         }
+    }
+
+    /// Whether the join is cyclic, i.e. not alpha-acyclic, decided by GYO
+    /// (Graham-Yu-Ozsoyoglu) reduction over the dual hypergraph. A worst-case
+    /// optimal join asymptotically beats a binary join tree exactly when the
+    /// join is cyclic; acyclic joins are handled optimally by a binary tree
+    /// (Yannakakis), so this is the structural gate for creating a `WcoJoin`.
+    ///
+    /// GYO repeatedly removes "ears" until no edge can be removed:
+    ///   * an isolated vertex (a vertex in at most one edge) is dropped, and
+    ///   * an edge whose vertices are all contained in some other edge is
+    ///     dropped.
+    /// The hypergraph is alpha-acyclic iff this reduces it to no edges.
+    fn is_cyclic(&self) -> bool {
+        // Edges as the sets of inputs (vertices) they touch. Self-equality
+        // classes touching a single input cannot create a cycle.
+        let mut edges: Vec<BTreeSet<usize>> = self
+            .classes
+            .iter()
+            .filter(|e| e.len() >= 2)
+            .cloned()
+            .collect();
+
+        loop {
+            // Step 1: drop isolated vertices. A vertex appearing in at most one
+            // edge can be removed from that edge without affecting acyclicity.
+            let mut vertex_count: BTreeMap<usize, usize> = BTreeMap::new();
+            for e in &edges {
+                for &v in e {
+                    *vertex_count.entry(v).or_insert(0) += 1;
+                }
+            }
+            let mut changed = false;
+            for e in &mut edges {
+                let isolated: Vec<usize> = e
+                    .iter()
+                    .copied()
+                    .filter(|v| vertex_count.get(v).copied().unwrap_or(0) <= 1)
+                    .collect();
+                for v in isolated {
+                    e.remove(&v);
+                    changed = true;
+                }
+            }
+            // Drop edges that became empty or singletons after vertex removal.
+            let before = edges.len();
+            edges.retain(|e| e.len() >= 2);
+            if edges.len() != before {
+                changed = true;
+            }
+
+            // Step 2: drop an ear, an edge contained in another edge.
+            let mut remove_idx = None;
+            'outer: for (i, ei) in edges.iter().enumerate() {
+                for (j, ej) in edges.iter().enumerate() {
+                    if i != j && ei.is_subset(ej) {
+                        remove_idx = Some(i);
+                        break 'outer;
+                    }
+                }
+            }
+            if let Some(i) = remove_idx {
+                edges.remove(i);
+                changed = true;
+            }
+
+            if !changed {
+                break;
+            }
+        }
+
+        // Leftover edges mean GYO got stuck: the join is cyclic.
+        !edges.is_empty()
     }
 
     /// AGM-bound degree for the sub-join over the inputs selected in `subset`,
@@ -652,6 +733,15 @@ impl Hypergraph {
         let weights: Vec<f64> = edges.iter().map(|&i| degs[i]).collect();
         solve_cover_lp(edges.len(), &rows, &weights)
     }
+}
+
+/// Whether the join over `arities` inputs constrained by `equivalences` is
+/// cyclic (not alpha-acyclic), via GYO reduction over the join's dual
+/// hypergraph. Cyclic joins are the only ones a worst-case-optimal join can
+/// beat asymptotically, so this is the structural gate for raising a `Join` to
+/// a `WcoJoin`. Cheap: joins have few inputs and edges.
+pub(crate) fn join_is_cyclic(arities: &[usize], equivalences: &[Vec<EScalar>]) -> bool {
+    Hypergraph::from_arities(arities, equivalences).is_cyclic()
 }
 
 /// Solve `min Σ wᵢ xᵢ s.t. (each row) Σ_{i∈row} xᵢ ≥ 1, x ≥ 0` exactly, by
@@ -833,6 +923,36 @@ mod tests {
         assert!((cw.time[0] - 1.5).abs() < 1e-6, "wcoj time={:?}", cw.time);
         assert!((cj.time[0] - 2.0).abs() < 1e-6, "join time={:?}", cj.time);
         assert!(cw.lt(&cj));
+    }
+
+    #[mz_ore::test]
+    fn join_is_cyclic_classifies_shapes() {
+        let eq = |a: usize, b: usize| vec![col(a), col(b)];
+
+        // Triangle R(#0,#1) S(#2,#3) T(#4,#5): a:#0=#4 b:#1=#2 c:#3=#5.
+        // Three edges each touching two of three inputs, no ear -> cyclic.
+        assert!(join_is_cyclic(&[2, 2, 2], &[eq(0, 4), eq(1, 2), eq(3, 5)]));
+
+        // Chain R-S-T: b:#1=#2 c:#3=#4. A path, GYO reduces it -> acyclic.
+        assert!(!join_is_cyclic(&[2, 2, 2], &[eq(1, 2), eq(3, 4)]));
+
+        // Plain 2-way join on one equivalence: a single edge -> acyclic.
+        assert!(!join_is_cyclic(&[2, 2], &[eq(1, 2)]));
+
+        // A 4-cycle R-S-T-U-R: cyclic.
+        // R(#0,#1) S(#2,#3) T(#4,#5) U(#6,#7).
+        // #1=#2 (R,S), #3=#4 (S,T), #5=#6 (T,U), #7=#0 (U,R). No ear -> cyclic.
+        assert!(join_is_cyclic(
+            &[2, 2, 2, 2],
+            &[eq(1, 2), eq(3, 4), eq(5, 6), eq(7, 0)]
+        ));
+
+        // A star: a center input shares one attribute with each leaf. Acyclic.
+        // C(#0) L1(#1) L2(#2) L3(#3): #0=#1, #0=#2, #0=#3.
+        assert!(!join_is_cyclic(
+            &[1, 1, 1, 1],
+            &[eq(0, 1), eq(0, 2), eq(0, 3)]
+        ));
     }
 
     #[mz_ore::test]

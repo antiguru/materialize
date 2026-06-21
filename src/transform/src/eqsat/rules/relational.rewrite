@@ -287,9 +287,17 @@ rule map_columns_to_projection {
 # triejoin) multiway join. Semantically identical, but its cost is the AGM
 # bound rather than the worst-case-quadratic intermediate of a binary plan, so
 # extraction picks it exactly when the join is "cyclic enough" to benefit.
+#
+# Gated to cyclic joins: a worst-case-optimal join only beats a binary join tree
+# asymptotically when the join is cyclic. Acyclic joins are handled optimally by
+# a binary tree (Yannakakis), so creating a WcoJoin there would only let the
+# AGM-bound cost model regress them to a delta plan. The guard decides cyclicity
+# structurally (GYO over the join's equivalence hypergraph), so it works at
+# saturation time without the cost model.
 rule join_to_wcoj {
     doc "Join(rs) = WcoJoin(rs)  (same multiset, worst-case-optimal evaluation)"
     Join[e](rs...) => WcoJoin[e](rs...)
+    where join_is_cyclic()
 }
 
 # --- Empty propagation: collapse operators applied to a zero-row input ------

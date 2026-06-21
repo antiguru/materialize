@@ -68,6 +68,42 @@ fn triangle() -> MirRelationExpr {
     )
 }
 
+/// Build a plain 2-way join: R(a,b) ⋈ S(b,c) on R.b = S.b.
+///
+/// Column layout: R=#0,#1  S=#2,#3
+/// Equivalence:   b: #1=#2
+///
+/// One equivalence touching two inputs is a single hyperedge: trivially
+/// acyclic, so `join_to_wcoj` must not fire.
+fn two_way() -> MirRelationExpr {
+    let r = src(11, 2); // cols 0..1
+    let s = src(12, 2); // cols 2..3
+    MirRelationExpr::join_scalars(
+        vec![r, s],
+        vec![vec![MirScalarExpr::column(1), MirScalarExpr::column(2)]], // b = b
+    )
+}
+
+/// Build an acyclic 3-way chain join: R(a,b) ⋈ S(b,c) ⋈ T(c,d).
+///
+/// Column layout: R=#0,#1  S=#2,#3  T=#4,#5
+/// Equivalences:  b: #1=#2,  c: #3=#4
+///
+/// The dual hypergraph is a path R-S-T (edge {R,S}, edge {S,T}); GYO reduces it
+/// to nothing, so it is acyclic and `join_to_wcoj` must not fire.
+fn chain() -> MirRelationExpr {
+    let r = src(13, 2); // cols 0..1
+    let s = src(14, 2); // cols 2..3
+    let t = src(15, 2); // cols 4..5
+    MirRelationExpr::join_scalars(
+        vec![r, s, t],
+        vec![
+            vec![MirScalarExpr::column(1), MirScalarExpr::column(2)], // b = b
+            vec![MirScalarExpr::column(3), MirScalarExpr::column(4)], // c = c
+        ],
+    )
+}
+
 /// Run `JoinImplementation` on a triangle and return the implementation variant
 /// chosen for the top-level join. Returns `None` if the plan is not a join.
 fn join_impl_choice(eager_delta: bool) -> Option<JoinImplementation> {
@@ -331,5 +367,59 @@ fn egraph_picks_wcoj_for_triangle() {
         best_cost.time.first().copied().unwrap_or(0.0) < 1.6,
         "WcoJoin dominant time degree must be ~1.5 (AGM); got time={:?}",
         best_cost.time
+    );
+}
+
+/// Whether any node in `rel` (the extracted, cheapest plan) is a `WcoJoin`.
+fn rel_has_wcoj(rel: &Rel) -> bool {
+    matches!(rel, Rel::WcoJoin { .. }) || rel.children().iter().any(|c| rel_has_wcoj(c))
+}
+
+/// Lower, saturate, extract, and report whether the cheapest extracted plan
+/// contains any `WcoJoin`. For an acyclic join the guard prevents `join_to_wcoj`
+/// from firing, so no WcoJoin is created and none can be extracted.
+fn extracted_plan_has_wcoj(plan: MirRelationExpr) -> bool {
+    let rel = lower(&plan);
+    let model = CostModel::new();
+    let outcome = Optimizer::new(default_ruleset(), model).optimize(rel);
+    rel_has_wcoj(&outcome.plan)
+}
+
+#[mz_ore::test]
+fn acyclic_two_way_join_gets_no_wcoj() {
+    // Parity guarantee: a plain 2-way join is acyclic, so `join_to_wcoj` must
+    // not create a WcoJoin and the join must not raise to a DeltaQuery. Before
+    // the cyclicity guard this regressed to DeltaQuery (WcoJoin created for all
+    // joins, AGM cost model then preferred it). This is the regression gate.
+    assert!(
+        !extracted_plan_has_wcoj(two_way()),
+        "no WcoJoin must be created for an acyclic 2-way join"
+    );
+    let out = mz_transform::eqsat::optimize(two_way());
+    assert!(
+        !matches!(
+            first_join_impl(&out),
+            Some(JoinImplementation::DeltaQuery(_))
+        ),
+        "acyclic 2-way join must not raise to DeltaQuery, got {out:?}"
+    );
+}
+
+#[mz_ore::test]
+fn acyclic_chain_join_gets_no_wcoj() {
+    // Parity guarantee: an acyclic 3-way chain (R-S-T path) must not create a
+    // WcoJoin nor raise to a DeltaQuery. Same regression gate as the 2-way case
+    // for the multi-input acyclic shape.
+    assert!(
+        !extracted_plan_has_wcoj(chain()),
+        "no WcoJoin must be created for an acyclic 3-way chain join"
+    );
+    let out = mz_transform::eqsat::optimize(chain());
+    assert!(
+        !matches!(
+            first_join_impl(&out),
+            Some(JoinImplementation::DeltaQuery(_))
+        ),
+        "acyclic chain join must not raise to DeltaQuery, got {out:?}"
     );
 }

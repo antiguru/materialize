@@ -1263,6 +1263,26 @@ impl EGraph {
                 // on the new fact: Some(ec) where ec itself is contradictory.
                 matches!(an.eq.get(&self.find(id)), Some(Some(ec)) if ec.unsatisfiable())
             }
+            Cond::JoinIsCyclic => {
+                // The rule's root must be the `Join` under test. Find a `Join`
+                // e-node in the root e-class and decide cyclicity from its
+                // inputs and equivalences. Arities come from the inputs' own
+                // e-classes.
+                let rep = self.find(b.root);
+                self.classes.get(&rep).is_some_and(|ns| {
+                    ns.iter().any(|n| match n {
+                        ENode::Join {
+                            inputs,
+                            equivalences,
+                        } => {
+                            let arities: Vec<usize> =
+                                inputs.iter().map(|&c| self.arity(c)).collect();
+                            crate::eqsat::cost::join_is_cyclic(&arities, equivalences)
+                        }
+                        _ => false,
+                    })
+                })
+            }
         })
     }
 

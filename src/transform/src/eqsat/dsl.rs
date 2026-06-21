@@ -234,6 +234,13 @@ pub enum Cond {
     /// filter). Any relation with contradictory equivalences is empty, so it
     /// can be replaced by `Empty(rel)`.
     Unsatisfiable { rel: String },
+    /// `join_is_cyclic()`: the matched root node is a `Join` whose constraint
+    /// hypergraph is cyclic (not alpha-acyclic), decided by GYO reduction over
+    /// its inputs and equivalences. Gates `join_to_wcoj` so a worst-case-optimal
+    /// join is created only for cyclic joins, where it can beat a binary join
+    /// tree. Reads the root e-class directly, so the rule's left-hand side root
+    /// must be the `Join` being tested.
+    JoinIsCyclic,
 }
 
 /// The eqsat pass a rule is active in.
