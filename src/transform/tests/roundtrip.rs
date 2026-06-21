@@ -419,13 +419,14 @@ fn topk_over_empty_collapses() {
 }
 
 #[mz_ore::test]
-fn negate_join_no_longer_cancels() {
-    // Union(join(a, b), join(negate(a), b)): the `factor_negate_join` rule that
-    // rewrote `join(negate(a), b)` into `negate(join(a, b))` was removed because
-    // it is UNSOUND when a non-linear aggregate (MAX, MIN, ANY, ALL) sits above
-    // the join. Without that rule, `union_cancel` does not fire here, and the
-    // plan is returned structurally unchanged (modulo safe rewrites like
-    // threshold-elision). Arity must still be preserved.
+fn negate_join_cancels() {
+    // Union(join(a, b), join(negate(a), b)): `factor_negate_join` rewrites
+    // `join(negate(a), b)` into `negate(join(a, b))`, turning the union into
+    // `Union(x, negate(x))`, on which `union_cancel` fires. The plan collapses to
+    // an empty constant. This rewrite is sound because the polarity-aware
+    // extractor (see eqsat::egraph demand-parameterized extraction) never places
+    // a Negate-rooted representative directly under a non-linear Reduce/TopK, so
+    // merging the two join forms into one e-class cannot corrupt such an input.
     let a = src(1, 2);
     let b = src(2, 2);
     let lhs = MirRelationExpr::join(vec![a.clone(), b.clone()], vec![]);
@@ -436,7 +437,10 @@ fn negate_join_no_longer_cancels() {
     };
     let out = optimize(r);
     assert_eq!(out.arity(), 4, "arity preserved");
-    // NOT asserting is_empty_constant: the plan no longer collapses.
+    assert!(
+        is_empty_constant(&out),
+        "factor_negate_join + union_cancel must collapse the union; got {out:?}"
+    );
 }
 
 #[mz_ore::test]

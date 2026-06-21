@@ -108,33 +108,28 @@ rule distribute_negate_union {
     Negate (Union(a, b)) => Union(Negate a, Negate b)
 }
 
-# NOTE: Both negate-join rewrite directions are UNSOUND in general.
+# Negate commutes with the *first* join input. Both directions merge
+# `join(negate(a), rest)` and `negate(join(a, rest))` into the same e-class. They
+# operate on the FIRST join input only: the e-graph has no join commutativity, and
+# the first input occupies the leading columns 0..arity(a) of the join output, so
+# moving the Negate across it needs no reindexing.
 #
-# The "pull-out" direction — `join(negate(a), rest) => negate(join(a, rest))` — merges
-# `join(negate(a), rest)` and `negate(join(a, rest))` into the same e-class. When a Reduce
-# with a non-linear aggregate (MAX, MIN, ANY, ALL) sits above the join, the extractor may
-# pick `negate(join(a, rest))` as the Reduce input, producing
-# `Reduce_MAX(negate(join(a, rest)))`, which is incorrect because
-# `reduce(r) != negate(reduce(negate(r)))` for non-linear aggregates.
+# Sound to merge ONLY because the polarity-aware extractor forbids a Negate-rooted
+# representative directly as the input of a non-linear Reduce/TopK; the soundness
+# lives in the extractor (see eqsat::egraph demand-parameterized extraction), not a
+# rule guard.
 #
-# The "push-in" direction — `negate(join(a, rest)) => join(negate(a), rest)` — has the
-# same problem. E-graph merging is bidirectional: once the two e-nodes are in the same
-# class (regardless of which rule fired), the extractor may pick either form as the child
-# of a Reduce. The difference between the two directions is only which node triggers the
-# merge; the resulting class equivalence and the extractor's freedom are the same.
-#
-# Both rules are therefore omitted. The cost is that `union_cancel` no longer fires on
-# `Union(join(negate(a), rest), join(a, rest))` and that a
-# `Negate(Join(...))` in the plan stays in that form rather than being pushed inside
-# the join. Correctness takes precedence.
-#
-# Do NOT re-add these with a `where non_negative(...)` (or similar) precondition. A
-# precondition constrains when a rule FIRES, but the unsoundness is realized by the
-# EXTRACTOR, which has no non-negativity precondition and may pick any representative
-# of a class as a Reduce/TopK/Distinct input. Polarity-sensitive operators are
-# protected only by never letting a wrong-polarity (signed) form enter their input
-# class. Restoring these rules safely needs a polarity-aware extractor (forbid a
-# Negate-rooted representative directly under a non-linear reduce), not a rule guard.
+# These rules unlock `union_cancel` on `Union(join(negate(a), rest), join(a, rest))`:
+# factoring the first arm into `negate(join(a, rest))` lets `Union(x, Negate x) =>
+# Empty` fire.
+rule distribute_negate_join {
+    doc "negate(join(a, rest)) = join(negate(a), rest)"
+    Negate (Join[e](a, rest...)) => Join[e](Negate a, rest...)
+}
+rule factor_negate_join {
+    doc "join(negate(a), rest) = negate(join(a, rest))"
+    Join[e](Negate a, rest...) => Negate (Join[e](a, rest...))
+}
 
 # Push a filter that only reads the *first* join input's columns onto that
 # input (a slice of predicate_pushdown). The first input occupies columns
