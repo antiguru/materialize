@@ -241,6 +241,37 @@ impl ENode {
     }
 }
 
+/// The polarity demand an operator imposes on a child during extraction.
+///
+/// Extraction is parameterized by this demand so a multiplicity-signed
+/// (`Negate`-rooted) representative is never placed directly under an operator
+/// that is unsound over signed multiplicities (a non-linear reduce or a TopK).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Demand {
+    /// No sign constraint: the cheapest representative wins.
+    Any,
+    /// The representative's output multiplicities must be non-negative.
+    Nonneg,
+}
+
+/// The polarity demand a reduce imposes on its input.
+///
+/// A reduce with at least one aggregate is non-linear and requires a `Nonneg`
+/// input, because `reduce(r) != negate(reduce(negate(r)))` for a non-linear
+/// aggregate (MIN/MAX/ANY/ALL). A reduce with no aggregates is a distinct, which
+/// is polarity-insensitive and takes `Any`.
+///
+/// This is conservative: it demands `Nonneg` for ANY aggregate. Future work can
+/// refine this to allow `Any` when every aggregate is linear, via
+/// `aggregate_is_input` from `crate::analysis::equivalences`.
+fn reduce_input_demand(node: &ENode) -> Demand {
+    match node {
+        ENode::Reduce { aggregates, .. } if aggregates.is_empty() => Demand::Any,
+        ENode::Reduce { .. } => Demand::Nonneg,
+        _ => Demand::Any,
+    }
+}
+
 /// The e-graph.
 #[derive(Default)]
 pub struct EGraph {
@@ -1439,31 +1470,48 @@ impl EGraph {
         // turns the dominant `O(classes^2)` re-evaluation into one cost per
         // distinct plan, and preserves the result exactly.
         let mut cost_cache: BTreeMap<Rel, Cost> = BTreeMap::new();
-        let mut best: HashMap<Id, (Cost, Rel)> = HashMap::new();
+        // Two best-of-class maps, one per polarity demand. `best_any` is the
+        // cheapest representative with no sign constraint; `best_nonneg` is the
+        // cheapest representative whose output multiplicities are non-negative.
+        // Both are filled in the same fixpoint so each class can serve whichever
+        // demand its parent imposes. The soundness rule (see `build_rel`) pulls a
+        // non-linear reduce or TopK input from `best_nonneg`, never `best_any`.
+        let mut best_any: HashMap<Id, (Cost, Rel)> = HashMap::new();
+        let mut best_nonneg: HashMap<Id, (Cost, Rel)> = HashMap::new();
         for _ in 0..(self.classes.len() + 1) {
             let mut changed = false;
             for (&id, nodes) in &self.classes {
                 for node in nodes {
-                    if let Some(rel) = self.build_rel(node, &best) {
-                        let c = match cost_cache.get(&rel) {
-                            Some(c) => c.clone(),
-                            None => {
-                                let c = model.cost(&rel);
-                                cost_cache.insert(rel.clone(), c.clone());
-                                c
+                    // Attempt to build each node under both demands. A node may
+                    // satisfy `Any` but not `Nonneg` (e.g. a `Negate`, or any
+                    // node whose nonneg-required child has no nonneg form yet).
+                    for demand in [Demand::Any, Demand::Nonneg] {
+                        if let Some(rel) = self.build_rel(node, demand, &best_any, &best_nonneg) {
+                            let c = match cost_cache.get(&rel) {
+                                Some(c) => c.clone(),
+                                None => {
+                                    let c = model.cost(&rel);
+                                    cost_cache.insert(rel.clone(), c.clone());
+                                    c
+                                }
+                            };
+                            let best = match demand {
+                                Demand::Any => &mut best_any,
+                                Demand::Nonneg => &mut best_nonneg,
+                            };
+                            // Break cost ties on the plan itself, so extraction
+                            // is deterministic despite randomized hash-map order.
+                            let better = match best.get(&id) {
+                                None => true,
+                                Some((bc, br)) => {
+                                    cmp(&c, bc) == std::cmp::Ordering::Less
+                                        || (c == *bc && rel < *br)
+                                }
+                            };
+                            if better {
+                                best.insert(id, (c, rel));
+                                changed = true;
                             }
-                        };
-                        // Break cost ties on the plan itself, so extraction is
-                        // deterministic despite randomized hash-map order.
-                        let better = match best.get(&id) {
-                            None => true,
-                            Some((bc, br)) => {
-                                cmp(&c, bc) == std::cmp::Ordering::Less || (c == *bc && rel < *br)
-                            }
-                        };
-                        if better {
-                            best.insert(id, (c, rel));
-                            changed = true;
                         }
                     }
                 }
@@ -1472,16 +1520,47 @@ impl EGraph {
                 break;
             }
         }
-        best.get(&self.find(root))
+        // The root has no parent, so no polarity demand: extract from `best_any`.
+        best_any
+            .get(&self.find(root))
             .map(|(_, r)| r.clone())
             .expect("root class could not be extracted")
     }
 
     /// Rebuild a [`Rel`] from an e-node, substituting each child with its
-    /// currently-best extracted plan. Returns `None` if a child is not yet
-    /// costed.
-    fn build_rel(&self, node: &ENode, best: &HashMap<Id, (Cost, Rel)>) -> Option<Rel> {
-        let get = |id: Id| best.get(&self.find(id)).map(|(_, r)| r.clone());
+    /// currently-best extracted plan for the demand that child imposes. Returns
+    /// `None` if the chosen child map lacks a child yet, or if `demand` is
+    /// `Nonneg` and `node` is a `Negate` (the one node that cannot be made
+    /// non-negative).
+    ///
+    /// `best_any` and `best_nonneg` are the per-class cheapest representatives
+    /// without and with a non-negative-multiplicity guarantee, respectively. Each
+    /// child is pulled from `best_nonneg` when its computed demand is `Nonneg`,
+    /// from `best_any` otherwise.
+    fn build_rel(
+        &self,
+        node: &ENode,
+        demand: Demand,
+        best_any: &HashMap<Id, (Cost, Rel)>,
+        best_nonneg: &HashMap<Id, (Cost, Rel)>,
+    ) -> Option<Rel> {
+        // Only `Negate` cannot satisfy a `Nonneg` demand; every other node is
+        // either sign-preserving (and so relies on its children's nonneg forms,
+        // enforced by the per-child demands below) or a barrier whose output is
+        // non-negative regardless of input (`Reduce`/`TopK`/`Threshold`).
+        if demand == Demand::Nonneg && matches!(node, ENode::Negate { .. }) {
+            return None;
+        }
+        // Pull a child under its own demand: `best_nonneg` for `Nonneg`,
+        // `best_any` otherwise. Returns `None` until that map has costed the
+        // child.
+        let get = |id: Id, child_demand: Demand| {
+            let best = match child_demand {
+                Demand::Any => best_any,
+                Demand::Nonneg => best_nonneg,
+            };
+            best.get(&self.find(id)).map(|(_, r)| r.clone())
+        };
         Some(match node {
             ENode::Constant { card, arity } => Rel::Constant {
                 card: *card,
@@ -1497,18 +1576,26 @@ impl EGraph {
                 arity: *arity,
                 get: get.clone(),
             },
+            // Project/Map/Filter are sign-preserving: propagate the parent demand
+            // to the input.
             ENode::Project { input, outputs } => Rel::Project {
-                input: Box::new(get(*input)?),
+                input: Box::new(get(*input, demand)?),
                 outputs: outputs.clone(),
             },
             ENode::Map { input, scalars } => Rel::Map {
-                input: Box::new(get(*input)?),
+                input: Box::new(get(*input, demand)?),
                 scalars: scalars.clone(),
             },
             ENode::Filter { input, predicates } => Rel::Filter {
-                input: Box::new(get(*input)?),
+                input: Box::new(get(*input, demand)?),
                 predicates: predicates.clone(),
             },
+            // A reduce is a barrier (its output is non-negative regardless of
+            // input), so it satisfies a `Nonneg` parent on its own. Its input
+            // demand comes from the soundness rule, not the parent: a non-linear
+            // reduce (>=1 aggregate) requires a `Nonneg` input, because
+            // `reduce(r) != negate(reduce(negate(r)))` for non-linear aggregates.
+            // A distinct (no aggregates) is polarity-insensitive and takes `Any`.
             ENode::Reduce {
                 input,
                 group_key,
@@ -1516,38 +1603,55 @@ impl EGraph {
                 monotonic,
                 expected_group_size,
             } => Rel::Reduce {
-                input: Box::new(get(*input)?),
+                input: Box::new(get(*input, reduce_input_demand(node))?),
                 group_key: group_key.clone(),
                 aggregates: aggregates.clone(),
                 monotonic: *monotonic,
                 expected_group_size: *expected_group_size,
             },
+            // A TopK is a barrier and always requires a `Nonneg` input (its
+            // per-group ordering is meaningless over signed multiplicities).
             ENode::TopK { input, shape } => Rel::TopK {
-                input: Box::new(get(*input)?),
+                input: Box::new(get(*input, Demand::Nonneg)?),
                 shape: shape.clone(),
             },
+            // A negate flips the sign, so its input takes `Any`. A `Nonneg`
+            // demand on a negate itself was already rejected above.
             ENode::Negate { input } => Rel::Negate {
-                input: Box::new(get(*input)?),
+                input: Box::new(get(*input, Demand::Any)?),
             },
+            // A threshold is a barrier: its output is non-negative regardless of
+            // input, so the input takes `Any`.
             ENode::Threshold { input } => Rel::Threshold {
-                input: Box::new(get(*input)?),
+                input: Box::new(get(*input, Demand::Any)?),
             },
+            // Join/WcoJoin/Union are sign-preserving in every input: propagate
+            // the parent demand to all of them.
             ENode::Join {
                 inputs,
                 equivalences,
             } => Rel::Join {
-                inputs: inputs.iter().map(|i| get(*i)).collect::<Option<_>>()?,
+                inputs: inputs
+                    .iter()
+                    .map(|i| get(*i, demand))
+                    .collect::<Option<_>>()?,
                 equivalences: equivalences.clone(),
             },
             ENode::WcoJoin {
                 inputs,
                 equivalences,
             } => Rel::WcoJoin {
-                inputs: inputs.iter().map(|i| get(*i)).collect::<Option<_>>()?,
+                inputs: inputs
+                    .iter()
+                    .map(|i| get(*i, demand))
+                    .collect::<Option<_>>()?,
                 equivalences: equivalences.clone(),
             },
             ENode::Union { inputs } => {
-                let mut rels = inputs.iter().map(|i| get(*i)).collect::<Option<Vec<_>>>()?;
+                let mut rels = inputs
+                    .iter()
+                    .map(|i| get(*i, demand))
+                    .collect::<Option<Vec<_>>>()?;
                 let base = Box::new(rels.remove(0));
                 Rel::Union { base, inputs: rels }
             }
@@ -1922,5 +2026,147 @@ mod tests {
             panic!("expected rewritten Map node; the rewrite is in range and must be accepted");
         };
         assert_eq!(scalars[0].expr, MirScalarExpr::column(0));
+    }
+
+    use crate::eqsat::cost::CostModel;
+    use crate::eqsat::ir::Rel;
+
+    /// A `MAX` aggregate over column 0 (a non-linear aggregate).
+    fn max_aggregate() -> mz_expr::AggregateExpr {
+        mz_expr::AggregateExpr {
+            func: mz_expr::AggregateFunc::MaxInt64,
+            expr: MirScalarExpr::column(0),
+            distinct: false,
+        }
+    }
+
+    /// A reduce input class that holds BOTH a cheap `Negate`-rooted plan and a
+    /// costlier non-negative plan must be extracted as the non-negative plan when
+    /// it feeds a non-linear reduce. Picking the cheaper `Negate` form would be
+    /// unsound: `reduce(r) != negate(reduce(negate(r)))` for a `MAX` aggregate.
+    ///
+    /// Before the polarity-aware extractor this test fails: a single best-of-class
+    /// map picks the cheaper `Negate(Get)` (2 nodes, fewer time terms) over
+    /// `Filter(Filter(Get))` (3 nodes), placing a `Negate` directly under the
+    /// reduce.
+    #[mz_ore::test]
+    fn reduce_input_avoids_negate_representative() {
+        let mut eg = EGraph::new();
+        // Base relation `a`.
+        let a = eg.add(ENode::Get {
+            name: "a".to_string(),
+            arity: 1,
+        });
+        // Cheap, sign-negative representative: Negate(a). 2 nodes.
+        let neg = eg.add(ENode::Negate { input: a });
+        // Costlier non-negative representative: Filter(Filter(a)). 3 nodes, more
+        // time terms, so strictly costlier than the negate form.
+        let f1 = eg.add(ENode::Filter {
+            input: a,
+            predicates: vec![EScalar::plain(MirScalarExpr::column(0))],
+        });
+        let pos = eg.add(ENode::Filter {
+            input: f1,
+            predicates: vec![EScalar::plain(MirScalarExpr::column(0))],
+        });
+        // Merge the two representatives into one class `c`.
+        eg.union(neg, pos);
+        eg.rebuild();
+        let c = eg.find(neg);
+        // A reduce with a MAX aggregate over `c`.
+        let root = eg.add(ENode::Reduce {
+            input: c,
+            group_key: vec![],
+            aggregates: vec![max_aggregate()],
+            monotonic: false,
+            expected_group_size: None,
+        });
+
+        let model = CostModel::new();
+        let extracted = eg.extract(root, &model);
+        let Rel::Reduce { input, .. } = extracted else {
+            panic!("root must extract to a Reduce");
+        };
+        assert!(
+            !matches!(*input, Rel::Negate { .. }),
+            "the non-linear reduce must not have a Negate directly as its input; got {input:?}"
+        );
+    }
+
+    /// A negate-free graph extracts identically to a direct cost-minimizing
+    /// extraction: the polarity machinery must not perturb the common path. Here
+    /// the class holds two plans and the cheaper one (fewer nodes) is picked, as
+    /// before.
+    #[mz_ore::test]
+    fn negate_free_graph_extracts_cheapest() {
+        let mut eg = EGraph::new();
+        let a = eg.add(ENode::Get {
+            name: "a".to_string(),
+            arity: 1,
+        });
+        // Cheap plan: a single filter.
+        let cheap = eg.add(ENode::Filter {
+            input: a,
+            predicates: vec![EScalar::plain(MirScalarExpr::column(0))],
+        });
+        // Costlier plan: two stacked filters.
+        let mid = eg.add(ENode::Filter {
+            input: a,
+            predicates: vec![EScalar::plain(MirScalarExpr::column(0))],
+        });
+        let costly = eg.add(ENode::Filter {
+            input: mid,
+            predicates: vec![EScalar::plain(MirScalarExpr::column(0))],
+        });
+        eg.union(cheap, costly);
+        eg.rebuild();
+        let root = eg.find(cheap);
+
+        let model = CostModel::new();
+        let extracted = eg.extract(root, &model);
+        // The cheapest plan is the single filter directly over the Get.
+        let Rel::Filter { input, .. } = extracted else {
+            panic!("root must extract to a Filter");
+        };
+        assert!(
+            matches!(*input, Rel::Get { .. }),
+            "negate-free extraction must pick the single-filter plan; got {input:?}"
+        );
+    }
+
+    /// A reduce whose input class has only non-negative representatives extracts
+    /// that input unchanged: the nonneg demand is satisfied by the ordinary best
+    /// plan.
+    #[mz_ore::test]
+    fn reduce_input_only_nonneg_extracts_unchanged() {
+        let mut eg = EGraph::new();
+        let a = eg.add(ENode::Get {
+            name: "a".to_string(),
+            arity: 1,
+        });
+        let pos = eg.add(ENode::Filter {
+            input: a,
+            predicates: vec![EScalar::plain(MirScalarExpr::column(0))],
+        });
+        let root = eg.add(ENode::Reduce {
+            input: pos,
+            group_key: vec![],
+            aggregates: vec![max_aggregate()],
+            monotonic: false,
+            expected_group_size: None,
+        });
+
+        let model = CostModel::new();
+        let extracted = eg.extract(root, &model);
+        let Rel::Reduce { input, .. } = extracted else {
+            panic!("root must extract to a Reduce");
+        };
+        let Rel::Filter { input: inner, .. } = *input else {
+            panic!("reduce input must be the Filter, unchanged");
+        };
+        assert!(
+            matches!(*inner, Rel::Get { .. }),
+            "the nonneg input must extract as Filter(Get), unchanged; got {inner:?}"
+        );
     }
 }
