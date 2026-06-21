@@ -141,7 +141,7 @@ impl Optimizer {
         }
     }
 
-    /// Like [`optimize_node`] but also returns the time-first alternative
+    /// Like `optimize_node` but also returns the time-first alternative
     /// extracted from the same saturated e-graph (for Let-free fragments only;
     /// scoped fragments return `None` for the alternative).
     ///

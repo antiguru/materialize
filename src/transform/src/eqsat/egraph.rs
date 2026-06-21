@@ -1477,7 +1477,7 @@ impl EGraph {
     /// Run a lattice-valued [`Analysis`] to a fixpoint, one fact per e-class.
     ///
     /// Iteration stops when no value changes (true fixpoint) or when
-    /// [`MAX_ANALYSIS_ITERS`] rounds have elapsed. Early termination yields a
+    /// `MAX_ANALYSIS_ITERS` rounds have elapsed. Early termination yields a
     /// sound under-approximation: all derived facts are individually sound, and
     /// both consumers (canonicalization and `unsatisfiable`) are correct with
     /// fewer known facts than a full fixpoint.
@@ -1869,7 +1869,7 @@ impl EGraph {
 ///
 /// `reducer` is the reducer derived from the *node's own e-class*. For `Map`
 /// this is correct: the node's output equivalences are a strict superset of the
-/// input's, and the column-range guard in [`apply`] prevents the circular
+/// input's, and the column-range guard in `apply` prevents the circular
 /// rewrites that would otherwise be possible.
 ///
 /// `filter_input_reducer` is the reducer derived from the *Filter input's

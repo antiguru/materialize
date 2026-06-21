@@ -147,7 +147,7 @@ pub enum Rel {
         col_types: Option<Vec<ReprColumnType>>,
     },
     /// A reference to a named base collection. Cardinality comes from the
-    /// [`crate::eqsat::cost::Stats`] oracle.
+    /// `crate::eqsat::cost::Stats` oracle.
     Get { name: String, arity: usize },
     /// Retain only `outputs` columns, in that order.
     Project { input: Box<Rel>, outputs: Vec<Col> },

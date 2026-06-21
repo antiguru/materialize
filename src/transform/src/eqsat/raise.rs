@@ -14,7 +14,7 @@
 //! This is the structural inverse of [`crate::eqsat::lower::lower`]. The
 //! round-trip is semantics-preserving, scalar-canonicalizing, and
 //! MFP-canonicalizing rather than byte-identical: lower reduces every scalar
-//! payload, and the post-raise [`coalesce_mfp`] pass coalesces each maximal
+//! payload, and the post-raise `coalesce_mfp` pass coalesces each maximal
 //! Map/Filter/Project run into canonical Map-then-Filter-then-Project form
 //! (reusing the production `CanonicalizeMfp` machinery). Together,
 //! `raise(lower(x))` returns `x` with scalars in `MirScalarExpr::reduce`
@@ -44,7 +44,7 @@ use crate::{Transform, TransformCtx};
 /// original node carried at lower time, preserving their exact type.
 /// CSE-introduced `LocalGet { get: None }` nodes are raised to
 /// `MirRelationExpr::Get { Id::Local, .. }` using the type of the bound value,
-/// which is threaded via `scope` in [`raise_inner`].
+/// which is threaded via `scope` in `raise_inner`.
 ///
 /// When `commit_wcoj` is set, a [`Rel::WcoJoin`] is committed to a `DeltaQuery`
 /// implementation via the real delta planner (physical-phase output). When it
@@ -752,7 +752,7 @@ mod tests {
         let mut df_meta = crate::dataflow::DataflowMetainfo::default();
         let mut transform_ctx = TransformCtx::local(&features, &ctx, &mut df_meta, None, None);
         let mut checked = optimized;
-        Typecheck::new(ctx.clone())
+        Typecheck::new(std::sync::Arc::clone(&ctx))
             .transform(&mut checked, &mut transform_ctx)
             .expect("optimized plan must pass strict Typecheck");
     }

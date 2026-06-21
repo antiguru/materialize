@@ -28,7 +28,7 @@
 //!   streamed to the parent, not arranged, so it carries no memory term. The
 //!   terms are one per input at `size_degree(input_i)` (with the same
 //!   index-availability suppression WcoJoin uses) plus every intermediate
-//!   degree from [`CostModel::binary_join_terms`] except the last (the
+//!   degree from `CostModel::binary_join_terms` except the last (the
 //!   transient final output). So a triangle binary-join contributes
 //!   [2.0, 1.0, 1.0, 1.0] (the genuine intermediate at 2.0 plus the three
 //!   input arrangements), and a 2-way binary join contributes [1.0, 1.0]
