@@ -226,7 +226,23 @@ impl Optimizer {
                 changed |= v != *value;
                 next.push((*id, v));
             }
-            let (nb, i) = self.optimize_node(body.clone(), &facts);
+            // For a non-recursive `Let x = v in body`, optimize the body in an
+            // e-graph that also contains the optimized definition `v`, with the
+            // `Get x` (`LocalGet`) class unioned to `v`'s root. The union makes
+            // `v`'s e-class analysis facts (e.g. constant columns) reach the
+            // body's `Get x` via congruence, un-trapping them across the binding
+            // boundary so an analysis-gated rule can fire on the reference. The
+            // body still extracts to `LocalGet x` references (shared, not
+            // inlined), so the reassembled scope below stays a correct, sharing
+            // `Let`. Recursive `LetRec` bindings stay on the opaque
+            // `optimize_node` path: unioning a recursive reference into its own
+            // definition would close an e-graph cycle that breaks extraction.
+            let (nb, i) = if recursive {
+                self.optimize_node(body.clone(), &facts)
+            } else {
+                let (id, value) = &next[0];
+                self.optimize_body_with_let_union(body.clone(), *id, value, &facts)
+            };
             total += i;
             changed |= nb != body;
 
@@ -251,6 +267,62 @@ impl Optimizer {
             }
         };
         (result, total)
+    }
+
+    /// Optimize the body of a non-recursive `Let id = value in body`, unioning
+    /// `value` into the body's e-graph so its e-class analysis facts reach the
+    /// body's `Get id` (`LocalGet`) references via congruence.
+    ///
+    /// `value` is the already-optimized definition; the union is purely for fact
+    /// propagation, the binding's emitted definition is `value` unchanged (the
+    /// caller reassembles `Let id = value in <returned body>`). The body extracts
+    /// to `LocalGet id` references, which the cost model keeps shared rather than
+    /// inlining the definition (a `LocalGet` is a free leaf, cheaper than any
+    /// re-materialized definition), so the result stays a correct sharing `Let`.
+    ///
+    /// When the body is not a single Let-free fragment (it nests further scopes),
+    /// the union has no single body e-graph to attach to, so we fall back to the
+    /// ordinary opaque path. This keeps the change localized to the common shape;
+    /// nested-scope bodies are an optional refinement, not a correctness gap.
+    fn optimize_body_with_let_union(
+        &self,
+        body: Rel,
+        id: usize,
+        value: &Rel,
+        facts: &LocalFacts,
+    ) -> (Rel, usize) {
+        let body = normalize_push_into_scopes(body);
+        // The union only makes sense for a body that is itself a saturable
+        // Let-free fragment with a `Get id` reference. A body that is or contains
+        // a binding scope has no single e-graph to union into; defer to the
+        // opaque path, which is unchanged and always sound.
+        if contains_scope(&body) {
+            return self.optimize_node(body, facts);
+        }
+        let Some(local) = find_local_get(&body, id) else {
+            // The body does not reference the binding: nothing to un-trap, so the
+            // ordinary fragment path is equivalent.
+            return self.optimize_node(body, facts);
+        };
+
+        let mut eg = EGraph::new();
+        let root = eg.add_rel(&body);
+        // The `LocalGet id` class as it appears in the body. Re-adding the exact
+        // node (same arity and `get`) hash-conses to the existing class.
+        let get_class = eg.add_rel(&local);
+        // The optimized definition's root, added to the same e-graph.
+        let value_class = eg.add_rel(value);
+        // Equate the reference with the definition: they denote the same
+        // relation, so every fact proven of `value` now holds of `Get id`.
+        eg.union(get_class, value_class);
+        eg.rebuild();
+        let iterations = eg.saturate(&self.rules, self.max_iters, facts);
+        // `None` when no representative satisfies the polarity constraints; fall
+        // back to the un-optimized body, a sound no-op.
+        match eg.extract(root, &self.model) {
+            Some(best) => (best, iterations),
+            None => (body, iterations),
+        }
     }
 
     /// Optimize a fragment that sits *above* one or more binding scopes (option
@@ -407,6 +479,21 @@ fn max_local_id(rel: &Rel) -> usize {
         .iter()
         .map(|c| max_local_id(c))
         .fold(here, usize::max)
+}
+
+/// Find a `LocalGet` of `id` anywhere in `rel`, returning a clone of it (so the
+/// caller can re-add the exact node, with its arity and `get`, to hit the body's
+/// existing `Get id` e-class when unioning). Returns `None` if `rel` does not
+/// reference `id`.
+fn find_local_get(rel: &Rel, id: usize) -> Option<Rel> {
+    if let Rel::LocalGet { id: gid, .. } = rel {
+        if *gid == id {
+            return Some(rel.clone());
+        }
+    }
+    rel.children()
+        .into_iter()
+        .find_map(|c| find_local_get(c, id))
 }
 
 /// Whether `rel` is, or contains anywhere, a binding scope (`Let`/`LetRec`).

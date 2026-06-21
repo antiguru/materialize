@@ -461,6 +461,52 @@ fn union_cancel_under_filter_and_map_terminates() {
 }
 
 #[mz_ore::test]
+fn non_recursive_let_stays_shared_after_union() {
+    use mz_expr::LocalId;
+
+    // A non-recursive `Let l = Filter[#0 is null](src) in Union[Get l, Get l,
+    // Get l]`. Step 2 unions the binding definition into the body's e-graph to
+    // un-trap its facts onto the `Get l` references. The reassembled plan must
+    // stay a correct, sharing `Let`: arity preserved, the binding referenced (not
+    // inlined into three copies of the Filter). We assert there is at most one
+    // Filter in the output (the binding's single definition), proving the body
+    // did not inline the multi-use binding.
+    let lid = LocalId::new(1);
+    let typ = ReprRelationType::new(
+        (0..2)
+            .map(|_| ReprScalarType::Int64.nullable(true))
+            .collect(),
+    );
+    let value =
+        src_with_nullability(1, 2, true).filter(vec![MirScalarExpr::column(0).call_is_null()]);
+    let get_l = || MirRelationExpr::Get {
+        id: Id::Local(lid.clone()),
+        typ: typ.clone(),
+        access_strategy: AccessStrategy::UnknownOrLocal,
+    };
+    let body = MirRelationExpr::Union {
+        base: Box::new(get_l()),
+        inputs: vec![get_l(), get_l()],
+    };
+    let plan = MirRelationExpr::Let {
+        id: lid,
+        value: Box::new(value),
+        body: Box::new(body),
+    };
+    let expected_arity = plan.arity();
+
+    let out = optimize(plan);
+    assert_eq!(out.arity(), expected_arity, "arity must be preserved");
+    // The binding's single Filter must not be duplicated into the three union
+    // branches: the optimizer must keep the binding shared rather than inline it.
+    let filters = count_nodes(&out, |e| matches!(e, MirRelationExpr::Filter { .. }));
+    assert!(
+        filters <= 1,
+        "the multi-use binding must stay shared (<=1 Filter), not inlined; got {filters} in {out:?}"
+    );
+}
+
+#[mz_ore::test]
 fn recursive_cte_with_inner_cse_does_not_panic() {
     use mz_expr::LocalId;
     use mz_transform::eqsat::optimize_logical;

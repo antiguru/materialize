@@ -2183,4 +2183,110 @@ mod tests {
             "the nonneg input must extract as Filter(Get), unchanged; got {inner:?}"
         );
     }
+
+    use crate::eqsat::analysis::{ConstCols, ConstantColumns, LocalFacts};
+    use mz_repr::{Datum, ReprScalarType};
+
+    /// The ck480 shape `Let l0 = Filter[#0=123, #1=234](Get u1) in Union[Get l0,
+    /// Get l0, Get l0]`, returned as `(definition, body)` `Rel`s. The body's
+    /// references are opaque `LocalGet { id: 0 }` (no `get`, matching the engine's
+    /// scope placeholders). The definition pins output columns 0 and 1 to the
+    /// literals 123 and 234.
+    fn ck480_def_and_body() -> (Rel, Rel) {
+        fn col_eq(col: usize, val: i64) -> EScalar {
+            EScalar::plain(MirScalarExpr::column(col).call_binary(
+                MirScalarExpr::literal_ok(Datum::Int64(val), ReprScalarType::Int64),
+                mz_expr::BinaryFunc::Eq(mz_expr::func::Eq),
+            ))
+        }
+        let def = Rel::Filter {
+            input: Box::new(Rel::Get {
+                name: "u1".to_string(),
+                arity: 3,
+            }),
+            predicates: vec![col_eq(0, 123), col_eq(1, 234)],
+        };
+        let get_l0 = || Rel::LocalGet {
+            id: 0,
+            arity: 3,
+            get: None,
+        };
+        let body = Rel::Union {
+            base: Box::new(get_l0()),
+            inputs: vec![get_l0(), get_l0()],
+        };
+        (def, body)
+    }
+
+    /// The constant 123 as a stored `EScalar`, for asserting analysis output.
+    fn lit_i64(val: i64) -> EScalar {
+        EScalar::plain(MirScalarExpr::literal_ok(
+            Datum::Int64(val),
+            ReprScalarType::Int64,
+        ))
+    }
+
+    /// Unioning the non-recursive `Let` definition into the body e-graph un-traps
+    /// the definition's constant-column facts onto the body's `Get l0` class.
+    ///
+    /// This is the point of the Let-union step: on the pre-step-2 separate-fragment
+    /// path the body's `Get l0` is an opaque `LocalGet` that proves no constant, so
+    /// the fact `{0: 123, 1: 234}` is unreachable across the binding boundary. After
+    /// adding the definition into the body's e-graph and unioning the `Get l0` class
+    /// with the definition root, the fact reaches the `Get l0` class via congruence.
+    #[mz_ore::test]
+    fn let_union_untraps_constant_columns() {
+        let (def, body) = ck480_def_and_body();
+        let cc = ConstantColumns {
+            locals: BTreeMap::new(),
+        };
+        let no_facts = LocalFacts::default();
+
+        // Locate the body's `Get l0` class.
+        let get_l0 = Rel::LocalGet {
+            id: 0,
+            arity: 3,
+            get: None,
+        };
+
+        // Baseline (today's separate-fragment path): the body alone, `Get l0`
+        // opaque. The fact must NOT be present.
+        let mut baseline = EGraph::new();
+        let _root = baseline.add_rel(&body);
+        let get_class = baseline.add_rel(&get_l0);
+        baseline.rebuild();
+        baseline.saturate(&crate::eqsat::default_ruleset(), 100, &no_facts);
+        let baseline_cc = baseline.run_analysis(&cc);
+        let baseline_fact = baseline_cc
+            .get(&baseline.find(get_class))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            baseline_fact.is_empty(),
+            "separate-fragment baseline must NOT carry the constant fact on Get l0; \
+             got {baseline_fact:?}"
+        );
+
+        // Prototype (step 2): body + definition in ONE e-graph, `Get l0` unioned
+        // with the definition root. The fact MUST reach the `Get l0` class.
+        let mut unioned = EGraph::new();
+        let _root = unioned.add_rel(&body);
+        let get_class = unioned.add_rel(&get_l0);
+        let def_class = unioned.add_rel(&def);
+        unioned.union(get_class, def_class);
+        unioned.rebuild();
+        unioned.saturate(&crate::eqsat::default_ruleset(), 100, &no_facts);
+        let unioned_cc = unioned.run_analysis(&cc);
+        let fact = unioned_cc
+            .get(&unioned.find(get_class))
+            .cloned()
+            .unwrap_or_default();
+        let mut expected = ConstCols::new();
+        expected.insert(0, lit_i64(123));
+        expected.insert(1, lit_i64(234));
+        assert_eq!(
+            fact, expected,
+            "after the union, Get l0 must carry {{0: 123, 1: 234}}; got {fact:?}"
+        );
+    }
 }
