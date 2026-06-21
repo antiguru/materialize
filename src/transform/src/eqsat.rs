@@ -57,7 +57,10 @@ pub fn default_ruleset() -> dsl::RuleSet {
 /// so it is only valid after `JoinImplementation`. The live logical-phase
 /// transform uses [`optimize_logical`] instead.
 pub fn optimize(expr: MirRelationExpr) -> MirRelationExpr {
-    optimize_inner(expr, true, BTreeMap::new())
+    // The offline path is the maximal one: it keeps the FULL rule set (all
+    // phases) so tests and compare_real exercise every rule, physical ones
+    // included.
+    optimize_inner(expr, true, BTreeMap::new(), default_ruleset())
 }
 
 /// Like [`optimize`], but seeds the cost model with arrangement/index
@@ -75,7 +78,10 @@ pub fn optimize_with_availability(
     expr: MirRelationExpr,
     available: BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>>,
 ) -> MirRelationExpr {
-    optimize_inner(expr, true, available)
+    // Live physical pass: the cost model sees arrangement / index availability,
+    // so arrangement-sensitive rules (`phase physical`) may fire here.
+    let rules = default_ruleset().for_phase(dsl::Phase::Physical);
+    optimize_inner(expr, true, available, rules)
 }
 
 /// Like [`optimize`], but emits worst-case-optimal joins as plain
@@ -83,13 +89,17 @@ pub fn optimize_with_availability(
 /// carries only logical-phase structure (no arranged inputs, no filled
 /// implementations), so it is valid where the logical optimizer runs.
 pub fn optimize_logical(expr: MirRelationExpr) -> MirRelationExpr {
-    optimize_inner(expr, false, BTreeMap::new())
+    // Live logical pass: the cost model cannot see arrangement availability, so
+    // arrangement-sensitive rules (`phase physical`) are filtered out here.
+    let rules = default_ruleset().for_phase(dsl::Phase::Logical);
+    optimize_inner(expr, false, BTreeMap::new(), rules)
 }
 
 fn optimize_inner(
     expr: MirRelationExpr,
     commit_wcoj: bool,
     available: BTreeMap<GlobalId, Vec<Vec<MirScalarExpr>>>,
+    rules: dsl::RuleSet,
 ) -> MirRelationExpr {
     let rel = lower::lower(&expr);
     let model = if available.is_empty() {
@@ -97,7 +107,7 @@ fn optimize_inner(
     } else {
         cost::CostModel::with_available(available)
     };
-    let optimizer = engine::Optimizer::new(default_ruleset(), model);
+    let optimizer = engine::Optimizer::new(rules, model);
     let best = optimizer.optimize(rel).plan;
     // Hoist e-classes referenced more than once into Let bindings, turning the
     // extracted tree back into a DAG with sharing. This subsumes RelationCSE:

@@ -122,12 +122,20 @@ rule distribute_negate_union {
 # These rules unlock `union_cancel` on `Union(join(negate(a), rest), join(a, rest))`:
 # factoring the first arm into `negate(join(a, rest))` lets `Union(x, Negate x) =>
 # Empty` fire.
+#
+# Both rules are arrangement-sensitive: pushing a Negate into a join can break
+# arrangement reuse, a cost the logical model cannot see. They run only in the
+# physical pass, where the cost model sees arrangement / index availability and
+# can judge whether the rewrite pays off. Soundness still relies on the
+# polarity-aware extractor, not on the phase.
 rule distribute_negate_join {
     doc "negate(join(a, rest)) = join(negate(a), rest)"
+    phase physical
     Negate (Join[e](a, rest...)) => Join[e](Negate a, rest...)
 }
 rule factor_negate_join {
     doc "join(negate(a), rest) = negate(join(a, rest))"
+    phase physical
     Join[e](Negate a, rest...) => Negate (Join[e](a, rest...))
 }
 

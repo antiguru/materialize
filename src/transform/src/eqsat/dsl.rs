@@ -236,11 +236,25 @@ pub enum Cond {
     Unsatisfiable { rel: String },
 }
 
+/// The eqsat pass a rule is active in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Phase {
+    /// Runs in both the logical and physical eqsat passes (the default).
+    #[default]
+    Both,
+    /// Runs only in the logical pass.
+    Logical,
+    /// Runs only in the physical pass (where the cost model has arrangement /
+    /// index availability and can judge arrangement-sensitive rewrites).
+    Physical,
+}
+
 /// One rewrite rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
     pub name: String,
     pub doc: Option<String>,
+    pub phase: Phase,
     pub lhs: Pat,
     pub rhs: Tmpl,
     pub conds: Vec<Cond>,
@@ -256,5 +270,17 @@ impl RuleSet {
     /// Returns the name of every rule in this set, in order.
     pub fn rule_names(&self) -> Vec<&str> {
         self.rules.iter().map(|r| r.name.as_str()).collect()
+    }
+
+    /// The rules active in `phase`: those declared for that phase or for `Both`.
+    pub fn for_phase(&self, phase: Phase) -> RuleSet {
+        RuleSet {
+            rules: self
+                .rules
+                .iter()
+                .filter(|r| r.phase == Phase::Both || r.phase == phase)
+                .cloned()
+                .collect(),
+        }
     }
 }

@@ -8,7 +8,7 @@
 //! Grammar (EBNF-ish):
 //! ```text
 //! ruleset  := rule*
-//! rule     := "rule" ident "{" ("doc" string)? pat "=>" tmpl ("where" cond)* "}"
+//! rule     := "rule" ident "{" ("doc" string)? ("phase" ("logical"|"physical"|"both"))? pat "=>" tmpl ("where" cond)* "}"
 //! pat      := relvar | op_pat
 //! op_pat   := "Filter"    "[" ident "]" child
 //!           | "Map"       "[" ident "]" child
@@ -221,6 +221,21 @@ impl Parser {
             }
         }
 
+        let mut phase = Phase::Both;
+        if matches!(self.peek(), Some(Tok::Ident(s)) if s == "phase") {
+            self.bump()?;
+            match self.bump()? {
+                Tok::Ident(s) if s == "logical" => phase = Phase::Logical,
+                Tok::Ident(s) if s == "physical" => phase = Phase::Physical,
+                Tok::Ident(s) if s == "both" => phase = Phase::Both,
+                other => {
+                    return Err(format!(
+                        "expected logical|physical|both after `phase`, got {other:?}"
+                    ));
+                }
+            }
+        }
+
         let lhs = self.parse_pat()?;
         self.expect(&Tok::Arrow)?;
         let rhs = self.parse_tmpl()?;
@@ -235,6 +250,7 @@ impl Parser {
         Ok(Rule {
             name,
             doc,
+            phase,
             lhs,
             rhs,
             conds,
@@ -710,5 +726,28 @@ mod tests {
         let rs = parse_ruleset(src).unwrap();
         assert_eq!(rs.rules.len(), 2);
         assert_eq!(rs.rules[1].conds.len(), 1);
+    }
+
+    #[mz_ore::test]
+    fn parses_phase_annotation() {
+        let src = r#"
+            rule physical_only {
+                doc "physical-phase rule"
+                phase physical
+                Negate (Join[e](a, rest...)) => Join[e](Negate a, rest...)
+            }
+            rule unannotated {
+                Filter[p] (Filter[q] r) => Filter[concat(q, p)] r
+            }
+        "#;
+        let rs = parse_ruleset(src).unwrap();
+        assert_eq!(rs.rules.len(), 2);
+        assert_eq!(rs.rules[0].phase, Phase::Physical);
+        // An unannotated rule defaults to `Both`.
+        assert_eq!(rs.rules[1].phase, Phase::Both);
+        // The phase filter keeps `Both` rules and drops off-phase ones.
+        assert_eq!(rs.for_phase(Phase::Logical).rules.len(), 1);
+        assert_eq!(rs.for_phase(Phase::Logical).rules[0].name, "unannotated");
+        assert_eq!(rs.for_phase(Phase::Physical).rules.len(), 2);
     }
 }

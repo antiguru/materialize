@@ -14,6 +14,12 @@
 //! would make it fail. The second test proves the win the rules unlock: pulling
 //! the negate out of a join lets `union_cancel` collapse
 //! `Union(join(a, rest), join(negate(a), rest))` to empty.
+//!
+//! The negate-join rules are annotated `phase physical`, so they no longer fire
+//! in the live logical pass (where pushing a Negate into a join breaks
+//! arrangement reuse). These tests therefore drive the offline `optimize` entry
+//! point, which runs the full rule set across all phases, to keep exercising
+//! the rules.
 
 use mz_compute_types::plan::reduce::{ReductionType, reduction_type};
 use mz_expr::{AccessStrategy, AggregateExpr, AggregateFunc, Id, MirRelationExpr, MirScalarExpr};
@@ -147,7 +153,7 @@ fn negate_join_soundness_gate_reduce_max() {
     let negated_join = cross_join(a.negate(), rest);
     let input = reduce.union(negated_join);
 
-    let out = mz_transform::eqsat::optimize_logical(input);
+    let out = mz_transform::eqsat::optimize(input);
 
     assert!(
         !has_negate_under_non_linear(&out),
@@ -184,7 +190,7 @@ fn negate_join_soundness_gate_topk() {
     let negated_join = cross_join(a.negate(), rest);
     let input = topk.union(negated_join);
 
-    let out = mz_transform::eqsat::optimize_logical(input);
+    let out = mz_transform::eqsat::optimize(input);
 
     assert!(
         !has_negate_under_non_linear(&out),
@@ -219,7 +225,7 @@ fn negate_under_reduce_extraction_is_noop() {
     );
 
     // Must not panic. The optimizer returns the un-optimized fragment.
-    let out = mz_transform::eqsat::optimize_logical(input);
+    let out = mz_transform::eqsat::optimize(input);
 
     assert!(
         has_negate_under_non_linear(&out),
@@ -250,7 +256,7 @@ fn negate_join_unlocks_union_cancel() {
     // yet), so a passing test really exercises the collapse.
     assert_eq!(count_unions(&input), 1, "input is a single Union");
 
-    let out = mz_transform::eqsat::optimize_logical(input);
+    let out = mz_transform::eqsat::optimize(input);
 
     assert!(
         collapses_to_empty(&out),
