@@ -419,31 +419,6 @@ fn topk_over_empty_collapses() {
 }
 
 #[mz_ore::test]
-fn negate_join_cancels() {
-    // Union(join(a, b), join(negate(a), b)): `factor_negate_join` rewrites
-    // `join(negate(a), b)` into `negate(join(a, b))`, turning the union into
-    // `Union(x, negate(x))`, on which `union_cancel` fires. The plan collapses to
-    // an empty constant. This rewrite is sound because the polarity-aware
-    // extractor (see eqsat::egraph demand-parameterized extraction) never places
-    // a Negate-rooted representative directly under a non-linear Reduce/TopK, so
-    // merging the two join forms into one e-class cannot corrupt such an input.
-    let a = src(1, 2);
-    let b = src(2, 2);
-    let lhs = MirRelationExpr::join(vec![a.clone(), b.clone()], vec![]);
-    let rhs = MirRelationExpr::join(vec![a.negate(), b.clone()], vec![]);
-    let r = MirRelationExpr::Union {
-        base: Box::new(lhs),
-        inputs: vec![rhs],
-    };
-    let out = optimize(r);
-    assert_eq!(out.arity(), 4, "arity preserved");
-    assert!(
-        is_empty_constant(&out),
-        "factor_negate_join + union_cancel must collapse the union; got {out:?}"
-    );
-}
-
-#[mz_ore::test]
 fn union_cancel_under_filter_and_map_terminates() {
     // Regression: Union(a, Negate(a)) wrapped in Filter+Map must not hang.
     // Before the merge_filters `not_rel_empty(r)` guard, the union_cancel +

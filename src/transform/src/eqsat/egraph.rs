@@ -246,6 +246,14 @@ impl ENode {
 /// Extraction is parameterized by this demand so a multiplicity-signed
 /// (`Negate`-rooted) representative is never placed directly under an operator
 /// that is unsound over signed multiplicities (a non-linear reduce or a TopK).
+///
+/// No rule in the current set repositions a `Negate` into a new structural
+/// position, so today no extraction can place a `Negate`-rooted representative
+/// where this demand would forbid it. The machinery is kept as the soundness
+/// foundation for a future negate-repositioning rule: such a rule may merge a
+/// `Negate`-rooted form into an arbitrary class only because this demand
+/// guarantees the extractor will not then route that form under a non-linear
+/// operator. It is the prerequisite, not dead code.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Demand {
     /// No sign constraint: the cheapest representative wins.
