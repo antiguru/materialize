@@ -29,7 +29,8 @@ use mz_expr::{AggregateExpr, Columns, MirRelationExpr};
 
 use crate::analysis::equivalences::{EquivalenceClasses, ExpressionReducer};
 use crate::eqsat::analysis::{
-    Analysis, Equivalences, KeySet, Keys, LocalFacts, Monotonic, NonNeg, is_superkey,
+    Analysis, ConstCols, ConstantColumns, Equivalences, KeySet, Keys, LocalFacts, Monotonic,
+    NonNeg, is_superkey,
 };
 use crate::eqsat::cost::{Cost, CostModel};
 use crate::eqsat::dsl::*;
@@ -919,6 +920,9 @@ struct Analyses {
     keys: HashMap<Id, KeySet>,
     mono: HashMap<Id, bool>,
     eq: HashMap<Id, Option<EquivalenceClasses>>,
+    // Consumed by Cond::ScalarEquiv (Task 2); unread for now.
+    #[allow(dead_code)]
+    cc: HashMap<Id, ConstCols>,
 }
 
 impl EGraph {
@@ -1001,6 +1005,9 @@ impl EGraph {
                     locals: locals.monotonic.clone(),
                 }),
                 eq,
+                cc: self.run_analysis(&ConstantColumns {
+                    locals: locals.constant_columns.clone(),
+                }),
             };
             let mut pending: Vec<(usize, EBindings)> = Vec::new();
             for (qi, (ri, query)) in queries.iter().enumerate() {
