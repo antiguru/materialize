@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use mz_expr::{AggregateExpr, ColumnOrder, Columns, MirRelationExpr, MirScalarExpr};
+use mz_repr::ReprColumnType;
 
 /// A column index, 0-based, just like MIR's `#n`.
 pub type Col = usize;
@@ -132,8 +133,19 @@ pub enum Rel {
     /// A literal collection of `card` rows over `arity` columns.
     ///
     /// We do not track the actual row data (irrelevant to relational rewrites),
-    /// only the cardinality and arity.
-    Constant { card: u64, arity: usize },
+    /// only the cardinality and arity. `col_types`, when present, carries the
+    /// real column types of the relation this node stands in for. Saturation
+    /// rules (`empty_false_filter`, `union_cancel`) synthesize an `Empty(r)` as a
+    /// `Constant { card: 0, .. }`, replacing a relation `r` that is gone by raise
+    /// time. Capturing `r`'s column types here lets raise emit an empty relation
+    /// of the correct type rather than defaulting every column. `None` marks a
+    /// node with no captured types (engine unit tests build these directly); raise
+    /// then falls back to an arity-only placeholder type.
+    Constant {
+        card: u64,
+        arity: usize,
+        col_types: Option<Vec<ReprColumnType>>,
+    },
     /// A reference to a named base collection. Cardinality comes from the
     /// [`crate::eqsat::cost::Stats`] oracle.
     Get { name: String, arity: usize },
@@ -270,8 +282,16 @@ impl Rel {
     /// Replace the children of this node with `new`, preserving order. The
     /// length of `new` must match [`Rel::children`].
     pub fn with_children(&self, mut new: Vec<Rel>) -> Rel {
-        let mut take =
-            |i: usize| std::mem::replace(&mut new[i], Rel::Constant { card: 0, arity: 0 });
+        let mut take = |i: usize| {
+            std::mem::replace(
+                &mut new[i],
+                Rel::Constant {
+                    card: 0,
+                    arity: 0,
+                    col_types: None,
+                },
+            )
+        };
         match self {
             Rel::Constant { .. } | Rel::Get { .. } | Rel::Opaque(_) => {
                 assert!(new.is_empty());
@@ -373,7 +393,7 @@ impl Rel {
                 .join(", ")
         };
         match self {
-            Rel::Constant { card, arity } => {
+            Rel::Constant { card, arity, .. } => {
                 writeln!(f, "{pad}Constant rows={card} arity={arity}")?;
             }
             Rel::Get { name, arity } => writeln!(f, "{pad}Get {name} arity={arity}")?,

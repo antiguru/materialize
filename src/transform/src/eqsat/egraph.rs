@@ -25,7 +25,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use mz_expr::{AggregateExpr, Columns, MirRelationExpr};
+use mz_expr::{AggregateExpr, Columns, MirRelationExpr, MirScalarExpr};
+use mz_repr::ReprColumnType;
 
 use crate::analysis::equivalences::{EquivalenceClasses, ExpressionReducer};
 use crate::eqsat::analysis::{
@@ -98,6 +99,12 @@ pub enum ENode {
     Constant {
         card: u64,
         arity: usize,
+        /// The real column types of the relation this node stands in for, when
+        /// known. Saturation rules synthesize an `Empty(r)` as a
+        /// `Constant { card: 0, .. }`; capturing `r`'s column types here lets
+        /// raise emit an empty relation of the correct type. `None` marks a node
+        /// with no captured types (raise falls back to an arity-only placeholder).
+        col_types: Option<Vec<ReprColumnType>>,
     },
     Get {
         name: String,
@@ -327,9 +334,14 @@ impl EGraph {
     /// Add an entire [`Rel`], returning the e-class of its root.
     pub fn add_rel(&mut self, rel: &Rel) -> Id {
         let node = match rel {
-            Rel::Constant { card, arity } => ENode::Constant {
+            Rel::Constant {
+                card,
+                arity,
+                col_types,
+            } => ENode::Constant {
                 card: *card,
                 arity: *arity,
+                col_types: col_types.clone(),
             },
             Rel::Get { name, arity } => ENode::Get {
                 name: name.clone(),
@@ -523,6 +535,131 @@ impl EGraph {
         }
         visiting.remove(&id);
         result
+    }
+
+    /// The column types of a class, structurally derived over the e-graph, or
+    /// `None` when no e-node of the class yields a derivation.
+    ///
+    /// Mirrors [`mz_expr::MirRelationExpr::try_col_with_input_cols`] over the
+    /// e-graph rather than over a single MIR tree. The typed leaves are
+    /// `Opaque` (the carried `MirRelationExpr`) and `LocalGet` with a stored
+    /// `Get` node; operators derive their types from their inputs the same way
+    /// MIR does. Used at synthesis time to capture the real column types of the
+    /// relation an `Empty(r)` replaces.
+    ///
+    /// Like [`Self::arity_guarded`], a class can be cyclic; the visited guard
+    /// breaks cycles and another e-node of the class may still pin the types.
+    /// Returns `None` (rather than defaulting) for any case it cannot derive, so
+    /// callers can fall back deliberately.
+    fn column_types(&self, id: Id) -> Option<Vec<ReprColumnType>> {
+        self.column_types_guarded(id, &mut HashSet::new())
+    }
+
+    fn column_types_guarded(
+        &self,
+        id: Id,
+        visiting: &mut HashSet<Id>,
+    ) -> Option<Vec<ReprColumnType>> {
+        let id = self.find(id);
+        if !visiting.insert(id) {
+            // Reached `id` again on this path: this derivation is cyclic and
+            // can't pin the types. Another e-node of the class may still.
+            return None;
+        }
+        let mut result = None;
+        if let Some(nodes) = self.classes.get(&id) {
+            for node in nodes {
+                let t = self.node_column_types(node, visiting);
+                if t.is_some() {
+                    result = t;
+                    break;
+                }
+            }
+        }
+        visiting.remove(&id);
+        result
+    }
+
+    /// Derive the column types of a single e-node, recursing into inputs through
+    /// [`Self::column_types_guarded`]. Returns `None` for any operator or leaf
+    /// whose types cannot be derived (e.g. a child class with no acyclic
+    /// derivation, or a nested `Constant` with no captured types).
+    fn node_column_types(
+        &self,
+        node: &ENode,
+        visiting: &mut HashSet<Id>,
+    ) -> Option<Vec<ReprColumnType>> {
+        match node {
+            // A synthesized empty carries its types directly; an empty without
+            // captured types cannot pin them.
+            ENode::Constant { col_types, .. } => col_types.clone(),
+            // Test-only base relation; its types are not modeled.
+            ENode::Get { .. } => None,
+            // Typed leaves: read the column types off the carried MIR node.
+            ENode::Opaque(m) => Some(m.typ().column_types),
+            ENode::LocalGet { get, .. } => get.as_ref().map(|g| g.typ().column_types),
+            ENode::Project { input, outputs } => {
+                let input = self.column_types_guarded(*input, visiting)?;
+                outputs.iter().map(|&i| input.get(i).cloned()).collect()
+            }
+            ENode::Map { input, scalars } => {
+                let mut result = self.column_types_guarded(*input, visiting)?;
+                for scalar in scalars {
+                    let t = MirScalarExpr::typ(&scalar.expr, &result);
+                    result.push(t);
+                }
+                Some(result)
+            }
+            // Filter/TopK/Negate/Threshold pass their input types through. Filter
+            // can strengthen nullability, but a weaker (still-nullable) type is
+            // sound for an empty relation, so the plain passthrough suffices.
+            ENode::Filter { input, .. }
+            | ENode::TopK { input, .. }
+            | ENode::Negate { input }
+            | ENode::Threshold { input } => self.column_types_guarded(*input, visiting),
+            ENode::Reduce {
+                input,
+                group_key,
+                aggregates,
+                ..
+            } => {
+                let input = self.column_types_guarded(*input, visiting)?;
+                let mut result: Vec<ReprColumnType> = group_key
+                    .iter()
+                    .map(|e| MirScalarExpr::typ(&e.expr, &input))
+                    .collect();
+                result.extend(aggregates.iter().map(|agg| agg.typ(&input)));
+                Some(result)
+            }
+            // Join/WcoJoin concatenate input types. The nullability tightening MIR
+            // applies across equivalence classes is omitted: a weaker type is
+            // sound for an empty relation.
+            ENode::Join { inputs, .. } | ENode::WcoJoin { inputs, .. } => {
+                let mut result = Vec::new();
+                for i in inputs {
+                    result.extend(self.column_types_guarded(*i, visiting)?);
+                }
+                Some(result)
+            }
+            // Union takes the least upper bound of its inputs' column types,
+            // mirroring MIR. Any input that fails to derive, or a width or union
+            // mismatch, yields `None`.
+            ENode::Union { inputs } => {
+                let mut iter = inputs.iter();
+                let first = iter.next()?;
+                let mut result = self.column_types_guarded(*first, visiting)?;
+                for i in iter {
+                    let other = self.column_types_guarded(*i, visiting)?;
+                    if other.len() != result.len() {
+                        return None;
+                    }
+                    for (base, col) in result.iter_mut().zip(other.iter()) {
+                        *base = base.union(col).ok()?;
+                    }
+                }
+                Some(result)
+            }
+        }
     }
 
     /// A snapshot of the relational view: every e-node grouped by its operator
@@ -1373,7 +1510,20 @@ impl EGraph {
                 let arity = *arities
                     .get(name)
                     .ok_or_else(|| format!("Empty of unbound relation `{name}`"))?;
-                ENode::Constant { card: 0, arity }
+                // The relation `r` being replaced is gone by raise time, so
+                // capture its real column types here, structurally derived over
+                // the e-graph. Without this, raise would default every column to
+                // a placeholder type and a non-Int64 collapsed branch would emit
+                // a wrong-typed plan. Derivation can fail (a cyclic class or an
+                // operator whose type cannot be derived); on `None`, raise falls
+                // back to the arity-only placeholder, which stays sound at the
+                // boundary type guard.
+                let col_types = b.rels.get(name).and_then(|&id| self.column_types(id));
+                ENode::Constant {
+                    card: 0,
+                    arity,
+                    col_types,
+                }
             }
             Tmpl::Filter { preds, input } => ENode::Filter {
                 predicates: eval_pexpr(preds, &b.payloads, arities)?.into_predicates()?,
@@ -1598,9 +1748,14 @@ impl EGraph {
             best.get(&self.find(id)).map(|(_, r)| r.clone())
         };
         Some(match node {
-            ENode::Constant { card, arity } => Rel::Constant {
+            ENode::Constant {
+                card,
+                arity,
+                col_types,
+            } => Rel::Constant {
                 card: *card,
                 arity: *arity,
+                col_types: col_types.clone(),
             },
             ENode::Get { name, arity } => Rel::Get {
                 name: name.clone(),

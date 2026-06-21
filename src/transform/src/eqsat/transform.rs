@@ -45,12 +45,11 @@ impl Transform for EqSatTransform {
         if plan_size > MAX_PLAN_SIZE {
             return Ok(());
         }
-        // Hard arity guard at the live boundary: the pass is equivalence
-        // preserving and must never change arity. Optimize a clone, and adopt
-        // the result only if its arity matches. On any mismatch, leave the
-        // input untouched (a no-op is always sound) and log loudly;
-        // `soft_panic_or_log!` panics in debug/test builds to surface the bug
-        // and logs in release rather than emitting a malformed plan.
+        // Hard equivalence guard at the live boundary: the pass is equivalence
+        // and type preserving, so it must never change arity or any column's
+        // scalar type. Optimize a clone, and adopt it only if both match (see
+        // `adopt_if_type_preserving`). On any mismatch, leave the input
+        // untouched (a no-op is always sound) and log loudly.
         let input_arity = relation.arity();
         // The pass runs in the logical optimizer, so its output must carry only
         // `Unimplemented` joins: the immediately following ProjectionPushdown
@@ -61,16 +60,53 @@ impl Transform for EqSatTransform {
         // delta commitment (the experiment's offline payoff) is exercised by the
         // direct `optimize` callers in tests, not here.
         let optimized = crate::eqsat::optimize_logical(relation.clone());
-        if optimized.arity() == input_arity {
-            *relation = optimized;
-        } else {
-            mz_ore::soft_panic_or_log!(
-                "eqsat optimize changed arity ({} -> {}); leaving the plan unchanged",
-                input_arity,
-                optimized.arity(),
-            );
-        }
+        adopt_if_type_preserving(relation, optimized, input_arity, "eqsat optimize");
         Ok(())
+    }
+}
+
+/// Adopt `optimized` into `relation` only if it preserves the input's arity and
+/// per-column scalar types. On any mismatch, leave `relation` untouched (a no-op
+/// is always sound) and log loudly.
+///
+/// The pass is equivalence and type preserving, so its output must agree with
+/// the input on arity and on each column's representation scalar type. It may
+/// legitimately change nullability (a `Filter` strengthens columns to non-null,
+/// a `Union` takes the least upper bound), so nullability is not compared. This
+/// guard is the live boundary's last line of defense: a synthesized `Empty`
+/// whose column types could not be derived at synthesis time falls back to a
+/// placeholder type, and this check rejects such a plan rather than emitting a
+/// wrong-typed one. `soft_panic_or_log!` panics in debug/test builds to surface
+/// the bug and logs in release.
+fn adopt_if_type_preserving(
+    relation: &mut MirRelationExpr,
+    optimized: MirRelationExpr,
+    input_arity: usize,
+    what: &str,
+) {
+    let output_arity = optimized.arity();
+    if output_arity != input_arity {
+        mz_ore::soft_panic_or_log!(
+            "{what} changed arity ({} -> {}); leaving the plan unchanged",
+            input_arity,
+            output_arity,
+        );
+        return;
+    }
+    let input_types = relation.typ().column_types;
+    let output_types = optimized.typ().column_types;
+    let scalar_types_match = input_types
+        .iter()
+        .zip(output_types.iter())
+        .all(|(a, b)| a.scalar_type == b.scalar_type);
+    if scalar_types_match {
+        *relation = optimized;
+    } else {
+        mz_ore::soft_panic_or_log!(
+            "{what} changed column types ({:?} -> {:?}); leaving the plan unchanged",
+            input_types,
+            output_types,
+        );
     }
 }
 
@@ -102,8 +138,9 @@ impl Transform for PhysicalEqSatTransform {
         if plan_size > MAX_PLAN_SIZE {
             return Ok(());
         }
-        // Hard arity guard: optimize a clone, adopt only if arity is preserved.
-        // On any mismatch, leave the input untouched and log loudly.
+        // Hard equivalence guard: optimize a clone, adopt only if arity and
+        // column scalar types are preserved (see `adopt_if_type_preserving`). On
+        // any mismatch, leave the input untouched and log loudly.
         let input_arity = relation.arity();
         // Build index availability from ctx.indexes so the cost model does not
         // charge the arrangement-build memory term for join inputs that are
@@ -114,15 +151,7 @@ impl Transform for PhysicalEqSatTransform {
         // (commit_wcoj=true) so the e-graph's WcoJoin choice is lowered to a
         // live DeltaQuery with an index-aware cost model.
         let optimized = crate::eqsat::optimize_with_availability(relation.clone(), available);
-        if optimized.arity() == input_arity {
-            *relation = optimized;
-        } else {
-            mz_ore::soft_panic_or_log!(
-                "eqsat physical optimize changed arity ({} -> {}); leaving the plan unchanged",
-                input_arity,
-                optimized.arity(),
-            );
-        }
+        adopt_if_type_preserving(relation, optimized, input_arity, "eqsat physical optimize");
         Ok(())
     }
 }

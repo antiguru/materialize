@@ -128,12 +128,22 @@ fn raise_inner(
                 body: Box::new(mir_body),
             }
         }
-        Rel::Constant { arity, .. } => {
+        Rel::Constant {
+            arity, col_types, ..
+        } => {
             // Saturation rules (`empty_false_filter`, `union_cancel`) synthesize
             // `Empty(r)` nodes that the engine encodes as `Constant { card: 0,
             // arity }`. Extraction can pick such a node as cheapest; raise it to
-            // an empty relation of the correct arity.
-            MirRelationExpr::constant(vec![], repr_type_of_arity(*arity))
+            // an empty relation. When the synthesizing rule captured the real
+            // column types of the replaced relation, use them so the emitted
+            // empty carries the correct type and survives the final strict
+            // typecheck. Without captured types (engine unit tests build these
+            // directly), fall back to an arity-only placeholder.
+            let typ = match col_types {
+                Some(col_types) => ReprRelationType::new(col_types.clone()),
+                None => repr_type_of_arity(*arity),
+            };
+            MirRelationExpr::constant(vec![], typ)
         }
         Rel::Reduce {
             input,
@@ -512,7 +522,11 @@ mod tests {
         // using the bound value's type rather than panicking.
         use crate::eqsat::ir::Rel;
 
-        let value_rel = Rel::Constant { card: 0, arity: 2 };
+        let value_rel = Rel::Constant {
+            card: 0,
+            arity: 2,
+            col_types: None,
+        };
         let cse_let = Rel::Let {
             id: 1,
             value: Box::new(value_rel),
@@ -553,7 +567,11 @@ mod tests {
         //   in Map-then-Filter-then-Project order.
         use crate::eqsat::ir::{EScalar, Rel};
 
-        let base_rel = Rel::Constant { card: 0, arity: 2 };
+        let base_rel = Rel::Constant {
+            card: 0,
+            arity: 2,
+            col_types: None,
+        };
         // filter(p2 = is_null(#0), base) -- boolean predicate, non-trivial
         let p2 = EScalar::plain(MirScalarExpr::column(0).call_is_null());
         let after_inner_filter = Rel::Filter {
@@ -621,5 +639,76 @@ mod tests {
             map_count <= 1,
             "expected at most 1 Map in MFP run after coalescing, got {map_count}"
         );
+    }
+
+    /// A non-`Int64` branch that collapses to `Empty` via `union_cancel` must
+    /// raise an empty relation carrying the branch's REAL column type, not the
+    /// `Int64?` arity-only placeholder, and the result must survive a strict
+    /// Typecheck. Regression for the soundness hole where a synthesized `Empty`
+    /// lost column types and a non-`Int64` collapsed branch emitted a
+    /// wrong-typed plan that typechecked anyway.
+    #[mz_ore::test]
+    fn empty_from_union_cancel_keeps_real_column_type() {
+        use mz_expr::{AccessStrategy, Id};
+        use mz_repr::GlobalId;
+
+        use crate::eqsat::optimize;
+        use crate::typecheck::{Typecheck, empty_typechecking_context};
+        use crate::{Transform, TransformCtx};
+        use mz_repr::optimize::OptimizerFeatures;
+
+        // A global relation with a single non-nullable `text` column. A global
+        // Get bails to an opaque leaf carrying this typed node, so the
+        // structural type derivation can read the real column type off it.
+        let col = ReprScalarType::String.nullable(false);
+        let typ = ReprRelationType::new(vec![col.clone()]);
+        let get = MirRelationExpr::Get {
+            id: Id::Global(GlobalId::Transient(1)),
+            typ,
+            access_strategy: AccessStrategy::UnknownOrLocal,
+        };
+        // Union(g, Negate(g)) cancels to Empty(g) via `union_cancel`. The Empty
+        // must carry g's `text` column type.
+        let plan = MirRelationExpr::Union {
+            base: Box::new(get.clone()),
+            inputs: vec![get.negate()],
+        };
+
+        let optimized = optimize(plan);
+
+        // Find the synthesized empty constant and assert its column type is the
+        // real `text`, not the `Int64?` placeholder.
+        let mut found_empty = false;
+        optimized.visit_pre(|e| {
+            if let MirRelationExpr::Constant {
+                rows: Ok(rows),
+                typ,
+            } = e
+            {
+                if rows.is_empty() {
+                    found_empty = true;
+                    assert_eq!(
+                        typ.column_types,
+                        vec![col.clone()],
+                        "synthesized Empty must carry the real text column type, got {:?}",
+                        typ.column_types
+                    );
+                }
+            }
+        });
+        assert!(
+            found_empty,
+            "expected union_cancel to collapse the plan to an empty constant; got {optimized:?}"
+        );
+
+        // The optimized plan must survive a strict Typecheck.
+        let ctx = empty_typechecking_context();
+        let features = OptimizerFeatures::default();
+        let mut df_meta = crate::dataflow::DataflowMetainfo::default();
+        let mut transform_ctx = TransformCtx::local(&features, &ctx, &mut df_meta, None, None);
+        let mut checked = optimized;
+        Typecheck::new(ctx.clone())
+            .transform(&mut checked, &mut transform_ctx)
+            .expect("optimized plan must pass strict Typecheck");
     }
 }
