@@ -51,6 +51,8 @@ relations:
       type: uint8
     - name: count
       type: bigint
+  - name: mz_arrangement_sharing_raw
+    kind: raw
 - name: mz_arrangement_sizes
   description: 'The `mz_arrangement_sizes` view describes the size of each [arrangement](/get-started/arrangements/#arrangements) in the system.
 
@@ -96,6 +98,24 @@ relations:
       type: bigint
     - name: allocations
       type: bigint
+  - name: mz_arrangement_records_raw
+    kind: raw
+  - name: mz_arrangement_batcher_allocations_raw
+    kind: raw
+  - name: mz_arrangement_batcher_capacity_raw
+    kind: raw
+  - name: mz_arrangement_batcher_records_raw
+    kind: raw
+  - name: mz_arrangement_batcher_size_raw
+    kind: raw
+  - name: mz_arrangement_batches_raw
+    kind: raw
+  - name: mz_arrangement_heap_allocations_raw
+    kind: raw
+  - name: mz_arrangement_heap_capacity_raw
+    kind: raw
+  - name: mz_arrangement_heap_size_raw
+    kind: raw
 - name: mz_compute_error_counts
   description: 'The `mz_compute_error_counts` view describes the counts of errors in objects exported by [dataflows](/get-started/arrangements/#dataflows) in the system.
 
@@ -119,6 +139,8 @@ relations:
       type: uint8
     - name: count
       type: bigint
+  - name: mz_compute_error_counts_raw
+    kind: raw
 - name: mz_compute_exports
   description: The `mz_compute_exports` view describes the objects exported by [dataflows](/get-started/arrangements/#dataflows) in the system.
   columns:
@@ -213,6 +235,8 @@ relations:
       type: uint8
     - name: count
       type: bigint
+  - name: mz_compute_operator_durations_histogram_raw
+    kind: raw
 - name: mz_dataflows
   description: The `mz_dataflows` view describes the [dataflows](/get-started/arrangements/#dataflows) in the system.
   columns:
@@ -591,6 +615,14 @@ relations:
       type: bigint
     - name: batch_received
       type: bigint
+  - name: mz_message_batch_counts_received_raw
+    kind: raw
+  - name: mz_message_batch_counts_sent_raw
+    kind: raw
+  - name: mz_message_counts_received_raw
+    kind: raw
+  - name: mz_message_counts_sent_raw
+    kind: raw
 - name: mz_peek_durations_histogram
   description: The `mz_peek_durations_histogram` view describes a histogram of the duration in nanoseconds of read queries ("peeks") in the [dataflow](/get-started/arrangements/#dataflows) layer.
   columns:
@@ -616,6 +648,8 @@ relations:
       type: uint8
     - name: count
       type: bigint
+  - name: mz_peek_durations_histogram_raw
+    kind: raw
 - name: mz_records_per_dataflow
   description: The `mz_records_per_dataflow` view describes the number of records in each [dataflow](/get-started/arrangements/#dataflows).
   columns:
@@ -731,6 +765,8 @@ relations:
       type: uint8
     - name: elapsed_ns
       type: bigint
+  - name: mz_scheduling_elapsed_raw
+    kind: raw
 - name: mz_scheduling_parks_histogram
   description: The `mz_scheduling_parks_histogram` view describes a histogram of [dataflow](/get-started/arrangements/#dataflows) worker park events. A park event occurs when a worker has no outstanding work.
   columns:
@@ -756,3 +792,5 @@ relations:
       type: uint8
     - name: count
       type: bigint
+  - name: mz_scheduling_parks_histogram_raw
+    kind: raw
