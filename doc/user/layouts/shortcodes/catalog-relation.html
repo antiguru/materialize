@@ -6,7 +6,8 @@
 
      Looks up the relation in .Site.Data.<schema>.relations and renders its
      description, base column table, and each variant. Non-raw variants render
-     their own full column list; raw variants show only a description. Type
+     their own heading, description, and full column list; raw variants are
+     grouped into a single "Raw relations" section with a shared warning. Type
      links come from .Site.Data.catalog_types. */}}
 {{- $schema := .Get "schema" -}}
 {{- $name := .Get "name" -}}
@@ -19,12 +20,24 @@
 {{- with $rel -}}
 {{ .description | $.Page.RenderString }}
 {{ template "catalog-relation-table" (dict "columns" .columns "types" $types "Page" $.Page) }}
+{{- $raws := slice -}}
 {{- range .variants -}}
+{{- if eq .kind "raw" -}}
+{{- $raws = $raws | append . -}}
+{{- else -}}
 <h4><code>{{ .name }}</code></h4>
 {{ .description | $.Page.RenderString }}
-{{- if ne .kind "raw" -}}
 {{ template "catalog-relation-variant-table" (dict "columns" .columns "types" $types "Page" $.Page) }}
 {{- end -}}
+{{- end -}}
+{{- if $raws -}}
+<h4>Raw relations</h4>
+<p>These relations expose raw differential dataflow data, where the number of rows and their diffs carry the meaning. They back the relation above and are not intended to be queried directly.</p>
+<ul>
+{{- range $raws }}
+<li><code>{{ .name }}</code></li>
+{{- end }}
+</ul>
 {{- end -}}
 {{- end -}}
 
