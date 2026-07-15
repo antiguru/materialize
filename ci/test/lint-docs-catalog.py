@@ -149,11 +149,14 @@ def emit_from_yaml(schema: str, object_name: str, objects: list, schemas: set) -
             # Existence only: no column table to check, the relation is recorded
             # above so the completeness query still covers it.
             continue
-        # per_worker (and any future non-raw variant): base columns plus the
-        # variant's extra columns, checked columns-and-types only. Ordered by
-        # name because the catalog column position of worker_id is not fixed.
-        columns = list(relation["columns"]) + list(variant.get("columns", []))
-        columns.sort(key=lambda c: c["name"])
+        # per_worker (and any future non-raw variant): the variant's own full
+        # column list, checked columns-and-types only. A variant is not
+        # merely the base columns plus extras: an aggregating global view can
+        # change column types (e.g. a `count` that is `numeric` in the global
+        # view is `bigint` per worker), so the variant carries its own
+        # complete list. Ordered by name because catalog column position for
+        # a variant is not guaranteed to match the base relation's.
+        columns = sorted(variant.get("columns", []), key=lambda c: c["name"])
         print("query TT")
         print(
             f"SELECT name, type FROM objects WHERE schema = '{schema}' AND object = '{variant['name']}' ORDER BY name"

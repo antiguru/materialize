@@ -19,13 +19,19 @@ relations:
   variants:
   - name: mz_active_peeks_per_worker
     kind: per_worker
-    description: 'The same data as `mz_active_peeks`, but split by Timely Dataflow worker.
-
-      '
+    description: |
+      The same data as `mz_active_peeks`, but reported per Timely Dataflow worker.
     columns:
+    - name: id
+      type: uuid
     - name: worker_id
       type: uint8
-      meaning: The ID of the Timely Dataflow worker.
+    - name: object_id
+      type: text
+    - name: type
+      type: text
+    - name: time
+      type: mz_timestamp
 - name: mz_arrangement_sharing
   description: The `mz_arrangement_sharing` view describes how many times each [arrangement](/get-started/arrangements/#arrangements) in the system is used.
   columns:

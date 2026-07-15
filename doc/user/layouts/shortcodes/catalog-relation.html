@@ -5,9 +5,9 @@
        name   - relation name (e.g. "mz_active_peeks")
 
      Looks up the relation in .Site.Data.<schema>.relations and renders its
-     description, base column table, and each variant. per_worker variants show
-     the base columns plus their own extra columns; raw variants show only a
-     warning. Type links come from .Site.Data.catalog_types. */}}
+     description, base column table, and each variant. Non-raw variants render
+     their own full column list; raw variants show only a description. Type
+     links come from .Site.Data.catalog_types. */}}
 {{- $schema := .Get "schema" -}}
 {{- $name := .Get "name" -}}
 {{- $types := .Site.Data.catalog_types -}}
@@ -23,7 +23,7 @@
 <h4><code>{{ .name }}</code></h4>
 {{ .description | $.Page.RenderString }}
 {{- if ne .kind "raw" -}}
-{{ template "catalog-relation-table" (dict "columns" (append (index $rel "columns") .columns) "types" $types "Page" $.Page) }}
+{{ template "catalog-relation-variant-table" (dict "columns" .columns "types" $types "Page" $.Page) }}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -37,6 +37,20 @@
 <td><code>{{ .name }}</code></td>
 <td>{{- $u := index $.types .type -}}{{- if $u -}}{{ printf "[`%s`](%s)" .type $u | $.Page.RenderString }}{{- else -}}{{ printf "`%s`" .type | $.Page.RenderString }}{{- end -}}</td>
 <td>{{ .meaning | $.Page.RenderString }}</td>
+</tr>
+{{- end }}
+</tbody>
+</table>
+{{- end -}}
+
+{{- define "catalog-relation-variant-table" -}}
+<table>
+<thead><tr><th>Field</th><th>Type</th></tr></thead>
+<tbody>
+{{- range .columns }}
+<tr>
+<td><code>{{ .name }}</code></td>
+<td>{{- $u := index $.types .type -}}{{- if $u -}}{{ printf "[`%s`](%s)" .type $u | $.Page.RenderString }}{{- else -}}{{ printf "`%s`" .type | $.Page.RenderString }}{{- end -}}</td>
 </tr>
 {{- end }}
 </tbody>
