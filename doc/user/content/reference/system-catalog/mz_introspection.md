@@ -40,29 +40,15 @@ Per-worker relations expose the same data as their global counterparts, but have
 <!-- RELATION_SPEC mz_introspection.mz_arrangement_sharing FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_arrangement_sharing" >}}
 
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_arrangement_sharing_raw -->
-
 ## `mz_arrangement_sizes`
 
 <!-- RELATION_SPEC mz_introspection.mz_arrangement_sizes FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_arrangement_sizes" >}}
 
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_arrangement_records_raw -->
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_arrangement_batcher_allocations_raw -->
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_arrangement_batcher_capacity_raw -->
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_arrangement_batcher_records_raw -->
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_arrangement_batcher_size_raw -->
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_arrangement_batches_raw -->
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_arrangement_heap_allocations_raw -->
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_arrangement_heap_capacity_raw -->
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_arrangement_heap_size_raw -->
-
 ## `mz_compute_error_counts`
 
 <!-- RELATION_SPEC mz_introspection.mz_compute_error_counts FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_compute_error_counts" >}}
-
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_compute_error_counts_raw -->
 
 ## `mz_compute_exports`
 
@@ -83,8 +69,6 @@ Per-worker relations expose the same data as their global counterparts, but have
 
 <!-- RELATION_SPEC mz_introspection.mz_compute_operator_durations_histogram FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_compute_operator_durations_histogram" >}}
-
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_compute_operator_durations_histogram_raw -->
 
 ## `mz_cluster_prometheus_metrics`
 
@@ -170,17 +154,10 @@ See [Which part of my query runs slowly or uses a lot of memory?](/transform-dat
 <!-- RELATION_SPEC mz_introspection.mz_message_counts FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_message_counts" >}}
 
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_message_batch_counts_received_raw -->
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_message_batch_counts_sent_raw -->
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_message_counts_received_raw -->
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_message_counts_sent_raw -->
-
 ## `mz_peek_durations_histogram`
 
 <!-- RELATION_SPEC mz_introspection.mz_peek_durations_histogram FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_peek_durations_histogram" >}}
-
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_peek_durations_histogram_raw -->
 
 ## `mz_records_per_dataflow`
 
@@ -197,14 +174,10 @@ See [Which part of my query runs slowly or uses a lot of memory?](/transform-dat
 <!-- RELATION_SPEC mz_introspection.mz_scheduling_elapsed FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_scheduling_elapsed" >}}
 
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_scheduling_elapsed_raw -->
-
 ## `mz_scheduling_parks_histogram`
 
 <!-- RELATION_SPEC mz_introspection.mz_scheduling_parks_histogram FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_scheduling_parks_histogram" >}}
-
-<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_scheduling_parks_histogram_raw -->
 
 [`bigint`]: /sql/types/bigint
 [`bigint list`]: /sql/types/list
