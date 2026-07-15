@@ -19,13 +19,18 @@ relations:
   variants:
   - name: mz_active_peeks_per_worker
     kind: per_worker
-    description: 'The same data as `mz_active_peeks`, but split by Timely Dataflow worker.
-
-      '
+    description: The per-worker data underlying `mz_active_peeks`.
     columns:
+    - name: id
+      type: uuid
     - name: worker_id
       type: uint8
-      meaning: The ID of the Timely Dataflow worker.
+    - name: object_id
+      type: text
+    - name: type
+      type: text
+    - name: time
+      type: mz_timestamp
 - name: mz_arrangement_sharing
   description: The `mz_arrangement_sharing` view describes how many times each [arrangement](/get-started/arrangements/#arrangements) in the system is used.
   columns:
@@ -35,6 +40,17 @@ relations:
   - name: count
     type: bigint
     meaning: The number of operators that share the arrangement.
+  variants:
+  - name: mz_arrangement_sharing_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_arrangement_sharing`.
+    columns:
+    - name: operator_id
+      type: uint8
+    - name: worker_id
+      type: uint8
+    - name: count
+      type: bigint
 - name: mz_arrangement_sizes
   description: 'The `mz_arrangement_sizes` view describes the size of each [arrangement](/get-started/arrangements/#arrangements) in the system.
 
@@ -61,6 +77,25 @@ relations:
   - name: allocations
     type: bigint
     meaning: The number of separate memory allocations backing the arrangement.
+  variants:
+  - name: mz_arrangement_sizes_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_arrangement_sizes`.
+    columns:
+    - name: operator_id
+      type: uint8
+    - name: worker_id
+      type: uint8
+    - name: records
+      type: bigint
+    - name: batches
+      type: bigint
+    - name: size
+      type: bigint
+    - name: capacity
+      type: bigint
+    - name: allocations
+      type: bigint
 - name: mz_compute_error_counts
   description: 'The `mz_compute_error_counts` view describes the counts of errors in objects exported by [dataflows](/get-started/arrangements/#dataflows) in the system.
 
@@ -73,6 +108,17 @@ relations:
   - name: count
     type: numeric
     meaning: The count of errors present in this dataflow export.
+  variants:
+  - name: mz_compute_error_counts_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_compute_error_counts`.
+    columns:
+    - name: export_id
+      type: text
+    - name: worker_id
+      type: uint8
+    - name: count
+      type: bigint
 - name: mz_compute_exports
   description: The `mz_compute_exports` view describes the objects exported by [dataflows](/get-started/arrangements/#dataflows) in the system.
   columns:
@@ -82,6 +128,17 @@ relations:
   - name: dataflow_id
     type: uint8
     meaning: The ID of the dataflow. Corresponds to [`mz_dataflows.id`](#mz_dataflows).
+  variants:
+  - name: mz_compute_exports_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_compute_exports`.
+    columns:
+    - name: export_id
+      type: text
+    - name: worker_id
+      type: uint8
+    - name: dataflow_id
+      type: uint8
 - name: mz_compute_frontiers
   description: 'The `mz_compute_frontiers` view describes the frontier of each [dataflow](/get-started/arrangements/#dataflows) export in the system.
 
@@ -93,6 +150,17 @@ relations:
   - name: time
     type: mz_timestamp
     meaning: The next timestamp at which the dataflow output may change.
+  variants:
+  - name: mz_compute_frontiers_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_compute_frontiers`.
+    columns:
+    - name: export_id
+      type: text
+    - name: worker_id
+      type: uint8
+    - name: time
+      type: mz_timestamp
 - name: mz_compute_import_frontiers
   description: 'The `mz_compute_import_frontiers` view describes the frontiers of each [dataflow](/get-started/arrangements/#dataflows) import in the system.
 
@@ -107,6 +175,19 @@ relations:
   - name: time
     type: mz_timestamp
     meaning: The next timestamp at which the dataflow input may change.
+  variants:
+  - name: mz_compute_import_frontiers_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_compute_import_frontiers`.
+    columns:
+    - name: export_id
+      type: text
+    - name: import_id
+      type: text
+    - name: worker_id
+      type: uint8
+    - name: time
+      type: mz_timestamp
 - name: mz_compute_operator_durations_histogram
   description: The `mz_compute_operator_durations_histogram` view describes a histogram of the duration in nanoseconds of each invocation for each [dataflow](/get-started/arrangements/#dataflows) operator.
   columns:
@@ -119,6 +200,19 @@ relations:
   - name: count
     type: numeric
     meaning: The (noncumulative) count of invocations in the bucket.
+  variants:
+  - name: mz_compute_operator_durations_histogram_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_compute_operator_durations_histogram`.
+    columns:
+    - name: id
+      type: uint8
+    - name: worker_id
+      type: uint8
+    - name: duration_ns
+      type: uint8
+    - name: count
+      type: bigint
 - name: mz_dataflows
   description: The `mz_dataflows` view describes the [dataflows](/get-started/arrangements/#dataflows) in the system.
   columns:
@@ -128,6 +222,17 @@ relations:
   - name: name
     type: text
     meaning: The internal name of the dataflow.
+  variants:
+  - name: mz_dataflows_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_dataflows`.
+    columns:
+    - name: id
+      type: uint8
+    - name: worker_id
+      type: uint8
+    - name: name
+      type: text
 - name: mz_dataflow_addresses
   description: The `mz_dataflow_addresses` view describes how the [dataflow](/get-started/arrangements/#dataflows) channels and operators in the system are nested into scopes.
   columns:
@@ -137,6 +242,17 @@ relations:
   - name: address
     type: bigint list
     meaning: A list of scope-local indexes indicating the path from the root to this channel or operator.
+  variants:
+  - name: mz_dataflow_addresses_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_dataflow_addresses`.
+    columns:
+    - name: id
+      type: uint8
+    - name: worker_id
+      type: uint8
+    - name: address
+      type: list
 - name: mz_dataflow_arrangement_sizes
   description: 'The `mz_dataflow_arrangement_sizes` view describes the size of arrangements per
 
@@ -186,6 +302,25 @@ relations:
   - name: type
     type: text
     meaning: The container type of the channel.
+  variants:
+  - name: mz_dataflow_channels_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_dataflow_channels`.
+    columns:
+    - name: id
+      type: uint8
+    - name: worker_id
+      type: uint8
+    - name: from_index
+      type: uint8
+    - name: from_port
+      type: uint8
+    - name: to_index
+      type: uint8
+    - name: to_port
+      type: uint8
+    - name: type
+      type: text
 - name: mz_dataflow_channel_operators
   description: The `mz_dataflow_channel_operators` view associates [dataflow](/get-started/arrangements/#dataflows) channels with the operators that are their endpoints.
   columns:
@@ -207,6 +342,25 @@ relations:
   - name: type
     type: text
     meaning: The container type of the channel.
+  variants:
+  - name: mz_dataflow_channel_operators_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_dataflow_channel_operators`.
+    columns:
+    - name: id
+      type: uint8
+    - name: worker_id
+      type: uint8
+    - name: from_operator_id
+      type: uint8
+    - name: from_operator_address
+      type: list
+    - name: to_operator_id
+      type: uint8
+    - name: to_operator_address
+      type: list
+    - name: type
+      type: text
 - name: mz_dataflow_global_ids
   description: The `mz_dataflow_global_ids` view associates [dataflow](/get-started/arrangements/#dataflows) ids with global ids (ids of the form `u8` or `t5`).
   columns:
@@ -216,6 +370,17 @@ relations:
   - name: global_id
     type: text
     meaning: A global ID associated with that dataflow.
+  variants:
+  - name: mz_compute_dataflow_global_ids_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_dataflow_global_ids`.
+    columns:
+    - name: id
+      type: uint8
+    - name: worker_id
+      type: uint8
+    - name: global_id
+      type: text
 - name: mz_dataflow_operators
   description: The `mz_dataflow_operators` view describes the [dataflow](/get-started/arrangements/#dataflows) operators in the system.
   columns:
@@ -225,6 +390,17 @@ relations:
   - name: name
     type: text
     meaning: The internal name of the operator.
+  variants:
+  - name: mz_dataflow_operators_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_dataflow_operators`.
+    columns:
+    - name: id
+      type: uint8
+    - name: worker_id
+      type: uint8
+    - name: name
+      type: text
 - name: mz_dataflow_operator_dataflows
   description: The `mz_dataflow_operator_dataflows` view describes the [dataflow](/get-started/arrangements/#dataflows) to which each operator belongs.
   columns:
@@ -240,6 +416,21 @@ relations:
   - name: dataflow_name
     type: text
     meaning: The internal name of the dataflow hosting the operator.
+  variants:
+  - name: mz_dataflow_operator_dataflows_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_dataflow_operator_dataflows`.
+    columns:
+    - name: id
+      type: uint8
+    - name: name
+      type: text
+    - name: worker_id
+      type: uint8
+    - name: dataflow_id
+      type: uint8
+    - name: dataflow_name
+      type: text
 - name: mz_dataflow_operator_parents
   description: The `mz_dataflow_operator_parents` view describes how [dataflow](/get-started/arrangements/#dataflows) operators are nested into scopes, by relating operators to their parent operators.
   columns:
@@ -249,6 +440,17 @@ relations:
   - name: parent_id
     type: uint8
     meaning: The ID of the operator's parent operator. Corresponds to [`mz_dataflow_operators.id`](#mz_dataflow_operators).
+  variants:
+  - name: mz_dataflow_operator_parents_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_dataflow_operator_parents`.
+    columns:
+    - name: id
+      type: uint8
+    - name: parent_id
+      type: uint8
+    - name: worker_id
+      type: uint8
 - name: mz_expected_group_size_advice
   description: 'The `mz_expected_group_size_advice` view provides advice on opportunities to set [query hints](/sql/select/#query-hints).
 
@@ -329,6 +531,27 @@ relations:
   - name: operator_id_end
     type: uint8
     meaning: The first dataflow operator ID _after_ this LIR operator (exclusive).
+  variants:
+  - name: mz_compute_lir_mapping_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_lir_mapping`.
+    columns:
+    - name: global_id
+      type: text
+    - name: lir_id
+      type: uint8
+    - name: worker_id
+      type: uint8
+    - name: operator
+      type: text
+    - name: parent_lir_id
+      type: uint8
+    - name: nesting
+      type: uint2
+    - name: operator_id_start
+      type: uint8
+    - name: operator_id_end
+      type: uint8
 - name: mz_message_counts
   description: 'The `mz_message_counts` view describes the messages and message batches sent and received over the [dataflow](/get-started/arrangements/#dataflows) channels in the system.
 
@@ -349,6 +572,25 @@ relations:
   - name: batch_received
     type: numeric
     meaning: The number of batches received.
+  variants:
+  - name: mz_message_counts_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_message_counts`.
+    columns:
+    - name: channel_id
+      type: uint8
+    - name: from_worker_id
+      type: uint8
+    - name: to_worker_id
+      type: uint8
+    - name: sent
+      type: bigint
+    - name: received
+      type: bigint
+    - name: batch_sent
+      type: bigint
+    - name: batch_received
+      type: bigint
 - name: mz_peek_durations_histogram
   description: The `mz_peek_durations_histogram` view describes a histogram of the duration in nanoseconds of read queries ("peeks") in the [dataflow](/get-started/arrangements/#dataflows) layer.
   columns:
@@ -361,6 +603,19 @@ relations:
   - name: count
     type: numeric
     meaning: The (noncumulative) count of peeks in this bucket.
+  variants:
+  - name: mz_peek_durations_histogram_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_peek_durations_histogram`.
+    columns:
+    - name: worker_id
+      type: uint8
+    - name: type
+      type: text
+    - name: duration_ns
+      type: uint8
+    - name: count
+      type: bigint
 - name: mz_records_per_dataflow
   description: The `mz_records_per_dataflow` view describes the number of records in each [dataflow](/get-started/arrangements/#dataflows).
   columns:
@@ -385,6 +640,27 @@ relations:
   - name: allocations
     type: bigint
     meaning: The number of separate memory allocations backing the arrangements.
+  variants:
+  - name: mz_records_per_dataflow_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_records_per_dataflow`.
+    columns:
+    - name: id
+      type: uint8
+    - name: name
+      type: text
+    - name: worker_id
+      type: uint8
+    - name: records
+      type: bigint
+    - name: batches
+      type: bigint
+    - name: size
+      type: bigint
+    - name: capacity
+      type: bigint
+    - name: allocations
+      type: bigint
 - name: mz_records_per_dataflow_operator
   description: The `mz_records_per_dataflow_operator` view describes the number of records in each [dataflow](/get-started/arrangements/#dataflows) operator in the system.
   columns:
@@ -412,6 +688,29 @@ relations:
   - name: allocations
     type: bigint
     meaning: The number of separate memory allocations backing the arrangement.
+  variants:
+  - name: mz_records_per_dataflow_operator_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_records_per_dataflow_operator`.
+    columns:
+    - name: id
+      type: uint8
+    - name: name
+      type: text
+    - name: worker_id
+      type: uint8
+    - name: dataflow_id
+      type: uint8
+    - name: records
+      type: bigint
+    - name: batches
+      type: bigint
+    - name: size
+      type: bigint
+    - name: capacity
+      type: bigint
+    - name: allocations
+      type: bigint
 - name: mz_scheduling_elapsed
   description: The `mz_scheduling_elapsed` view describes the total amount of time spent in each [dataflow](/get-started/arrangements/#dataflows) operator.
   columns:
@@ -421,6 +720,17 @@ relations:
   - name: elapsed_ns
     type: numeric
     meaning: The total elapsed time spent in the operator in nanoseconds.
+  variants:
+  - name: mz_scheduling_elapsed_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_scheduling_elapsed`.
+    columns:
+    - name: id
+      type: uint8
+    - name: worker_id
+      type: uint8
+    - name: elapsed_ns
+      type: bigint
 - name: mz_scheduling_parks_histogram
   description: The `mz_scheduling_parks_histogram` view describes a histogram of [dataflow](/get-started/arrangements/#dataflows) worker park events. A park event occurs when a worker has no outstanding work.
   columns:
@@ -433,3 +743,16 @@ relations:
   - name: count
     type: numeric
     meaning: The (noncumulative) count of park events in this bucket.
+  variants:
+  - name: mz_scheduling_parks_histogram_per_worker
+    kind: per_worker
+    description: The per-worker data underlying `mz_scheduling_parks_histogram`.
+    columns:
+    - name: worker_id
+      type: uint8
+    - name: slept_for_ns
+      type: uint8
+    - name: requested_ns
+      type: uint8
+    - name: count
+      type: bigint
