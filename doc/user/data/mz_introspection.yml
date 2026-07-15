@@ -19,9 +19,7 @@ relations:
   variants:
   - name: mz_active_peeks_per_worker
     kind: per_worker
-    description: 'The same data as `mz_active_peeks`, but reported per Timely Dataflow worker.
-
-      '
+    description: The per-worker data underlying `mz_active_peeks`.
     columns:
     - name: id
       type: uuid
@@ -45,7 +43,7 @@ relations:
   variants:
   - name: mz_arrangement_sharing_per_worker
     kind: per_worker
-    description: The same data as `mz_arrangement_sharing`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_arrangement_sharing`.
     columns:
     - name: operator_id
       type: uint8
@@ -82,7 +80,7 @@ relations:
   variants:
   - name: mz_arrangement_sizes_per_worker
     kind: per_worker
-    description: The same data as `mz_arrangement_sizes`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_arrangement_sizes`.
     columns:
     - name: operator_id
       type: uint8
@@ -113,7 +111,7 @@ relations:
   variants:
   - name: mz_compute_error_counts_per_worker
     kind: per_worker
-    description: The same data as `mz_compute_error_counts`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_compute_error_counts`.
     columns:
     - name: export_id
       type: text
@@ -133,7 +131,7 @@ relations:
   variants:
   - name: mz_compute_exports_per_worker
     kind: per_worker
-    description: The same data as `mz_compute_exports`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_compute_exports`.
     columns:
     - name: export_id
       type: text
@@ -155,7 +153,7 @@ relations:
   variants:
   - name: mz_compute_frontiers_per_worker
     kind: per_worker
-    description: The same data as `mz_compute_frontiers`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_compute_frontiers`.
     columns:
     - name: export_id
       type: text
@@ -180,7 +178,7 @@ relations:
   variants:
   - name: mz_compute_import_frontiers_per_worker
     kind: per_worker
-    description: The same data as `mz_compute_import_frontiers`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_compute_import_frontiers`.
     columns:
     - name: export_id
       type: text
@@ -205,7 +203,7 @@ relations:
   variants:
   - name: mz_compute_operator_durations_histogram_per_worker
     kind: per_worker
-    description: The same data as `mz_compute_operator_durations_histogram`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_compute_operator_durations_histogram`.
     columns:
     - name: id
       type: uint8
@@ -227,7 +225,7 @@ relations:
   variants:
   - name: mz_dataflows_per_worker
     kind: per_worker
-    description: The same data as `mz_dataflows`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_dataflows`.
     columns:
     - name: id
       type: uint8
@@ -247,7 +245,7 @@ relations:
   variants:
   - name: mz_dataflow_addresses_per_worker
     kind: per_worker
-    description: The same data as `mz_dataflow_addresses`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_dataflow_addresses`.
     columns:
     - name: id
       type: uint8
@@ -307,7 +305,7 @@ relations:
   variants:
   - name: mz_dataflow_channels_per_worker
     kind: per_worker
-    description: The same data as `mz_dataflow_channels`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_dataflow_channels`.
     columns:
     - name: id
       type: uint8
@@ -347,7 +345,7 @@ relations:
   variants:
   - name: mz_dataflow_channel_operators_per_worker
     kind: per_worker
-    description: The same data as `mz_dataflow_channel_operators`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_dataflow_channel_operators`.
     columns:
     - name: id
       type: uint8
@@ -375,7 +373,7 @@ relations:
   variants:
   - name: mz_compute_dataflow_global_ids_per_worker
     kind: per_worker
-    description: The same data as `mz_dataflow_global_ids`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_dataflow_global_ids`.
     columns:
     - name: id
       type: uint8
@@ -395,7 +393,7 @@ relations:
   variants:
   - name: mz_dataflow_operators_per_worker
     kind: per_worker
-    description: The same data as `mz_dataflow_operators`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_dataflow_operators`.
     columns:
     - name: id
       type: uint8
@@ -421,7 +419,7 @@ relations:
   variants:
   - name: mz_dataflow_operator_dataflows_per_worker
     kind: per_worker
-    description: The same data as `mz_dataflow_operator_dataflows`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_dataflow_operator_dataflows`.
     columns:
     - name: id
       type: uint8
@@ -445,7 +443,7 @@ relations:
   variants:
   - name: mz_dataflow_operator_parents_per_worker
     kind: per_worker
-    description: The same data as `mz_dataflow_operator_parents`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_dataflow_operator_parents`.
     columns:
     - name: id
       type: uint8
@@ -536,7 +534,7 @@ relations:
   variants:
   - name: mz_compute_lir_mapping_per_worker
     kind: per_worker
-    description: The same data as `mz_lir_mapping`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_lir_mapping`.
     columns:
     - name: global_id
       type: text
@@ -577,7 +575,7 @@ relations:
   variants:
   - name: mz_message_counts_per_worker
     kind: per_worker
-    description: The same data as `mz_message_counts`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_message_counts`.
     columns:
     - name: channel_id
       type: uint8
@@ -608,7 +606,7 @@ relations:
   variants:
   - name: mz_peek_durations_histogram_per_worker
     kind: per_worker
-    description: The same data as `mz_peek_durations_histogram`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_peek_durations_histogram`.
     columns:
     - name: worker_id
       type: uint8
@@ -645,7 +643,7 @@ relations:
   variants:
   - name: mz_records_per_dataflow_per_worker
     kind: per_worker
-    description: The same data as `mz_records_per_dataflow`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_records_per_dataflow`.
     columns:
     - name: id
       type: uint8
@@ -693,7 +691,7 @@ relations:
   variants:
   - name: mz_records_per_dataflow_operator_per_worker
     kind: per_worker
-    description: The same data as `mz_records_per_dataflow_operator`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_records_per_dataflow_operator`.
     columns:
     - name: id
       type: uint8
@@ -725,7 +723,7 @@ relations:
   variants:
   - name: mz_scheduling_elapsed_per_worker
     kind: per_worker
-    description: The same data as `mz_scheduling_elapsed`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_scheduling_elapsed`.
     columns:
     - name: id
       type: uint8
@@ -748,7 +746,7 @@ relations:
   variants:
   - name: mz_scheduling_parks_histogram_per_worker
     kind: per_worker
-    description: The same data as `mz_scheduling_parks_histogram`, but reported per Timely Dataflow worker.
+    description: The per-worker data underlying `mz_scheduling_parks_histogram`.
     columns:
     - name: worker_id
       type: uint8

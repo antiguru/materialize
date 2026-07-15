@@ -73,15 +73,23 @@ def add_variants(
             {
                 "name": pw_name,
                 "kind": "per_worker",
-                "description": (
-                    f"The same data as `{parent}`, but reported per Timely "
-                    "Dataflow worker."
-                ),
+                "description": f"The per-worker data underlying `{parent}`.",
                 "columns": columns,
             }
         )
         marker = f"<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.{pw_name} -->"
-        md = re.sub(rf"{re.escape(marker)}\n?", "", md)
+        marker_re = re.escape(marker)
+        # A marker line sitting alone between two blank lines (the common
+        # case) leaves a doubled blank line if we only drop the marker
+        # itself, so consume one of the surrounding blank lines too. A
+        # marker that instead sits next to sibling markers, with no blank
+        # line between them, is removed on its own: its neighbors already
+        # supply the correct blank-line spacing.
+        md = re.sub(
+            rf"(?<=\n)\n{marker_re}\n(?=\n)|{marker_re}\n?",
+            "",
+            md,
+        )
 
     return ydoc, md
 

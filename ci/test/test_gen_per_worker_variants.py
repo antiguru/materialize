@@ -60,3 +60,76 @@ def test_add_variants_injects_and_removes_marker():
     assert (
         "RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_dataflows_per_worker" not in md2
     )
+
+
+def test_add_variants_skips_existing_variant():
+    """A per_worker relation that already has a hand-authored variant on its
+    parent (e.g. mz_active_peeks_per_worker, added before this generator
+    existed) must not be duplicated.
+    """
+    existing_variant = {
+        "name": "mz_dataflows_per_worker",
+        "kind": "per_worker",
+        "description": "hand-authored, pre-existing",
+        "columns": [{"name": "id", "type": "uint8"}],
+    }
+    ydoc = {
+        "relations": [
+            {
+                "name": "mz_dataflows",
+                "description": "d",
+                "columns": [{"name": "id", "type": "uint8"}],
+                "variants": [existing_variant],
+            }
+        ]
+    }
+    md = (
+        "## `mz_dataflows`\n\n"
+        "<!-- RELATION_SPEC mz_introspection.mz_dataflows FROM_YAML -->\n"
+        '{{< catalog-relation schema="mz_introspection" name="mz_dataflows" >}}\n\n'
+        "<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_dataflows_per_worker -->\n"
+    )
+    catalog = {
+        "mz_dataflows_per_worker": [
+            {"name": "id", "type": "uint8"},
+            {"name": "worker_id", "type": "uint8"},
+        ]
+    }
+    ydoc2, md2 = gen.add_variants(ydoc, md, catalog)
+    rel = ydoc2["relations"][0]
+    # No duplicate variant was appended, and the existing one is untouched.
+    assert rel["variants"] == [existing_variant]
+    # The marker removal is gated on the append actually happening, so a
+    # skipped (already-present) variant leaves its marker in place too.
+    assert "RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_dataflows_per_worker" in md2
+
+
+def test_add_variants_skips_orphan():
+    """A `_per_worker` relation with no documented parent (an orphan) is left
+    untouched: no variant is added anywhere, and its
+    RELATION_SPEC_UNDOCUMENTED marker stays in the md for a later phase.
+    """
+    ydoc = {
+        "relations": [
+            {
+                "name": "mz_dataflows",
+                "description": "d",
+                "columns": [{"name": "id", "type": "uint8"}],
+            }
+        ]
+    }
+    md = (
+        "## `mz_dataflows`\n\n"
+        "<!-- RELATION_SPEC mz_introspection.mz_dataflows FROM_YAML -->\n"
+        '{{< catalog-relation schema="mz_introspection" name="mz_dataflows" >}}\n\n'
+        "<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_orphan_per_worker -->\n"
+    )
+    catalog = {
+        "mz_orphan_per_worker": [
+            {"name": "id", "type": "uint8"},
+            {"name": "worker_id", "type": "uint8"},
+        ]
+    }
+    ydoc2, md2 = gen.add_variants(ydoc, md, catalog)
+    assert "variants" not in ydoc2["relations"][0]
+    assert "RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_orphan_per_worker" in md2

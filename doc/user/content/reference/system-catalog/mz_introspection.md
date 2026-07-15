@@ -69,18 +69,15 @@ Per-worker relations expose the same data as their global counterparts, but have
 <!-- RELATION_SPEC mz_introspection.mz_compute_exports FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_compute_exports" >}}
 
-
 ## `mz_compute_frontiers`
 
 <!-- RELATION_SPEC mz_introspection.mz_compute_frontiers FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_compute_frontiers" >}}
 
-
 ## `mz_compute_import_frontiers`
 
 <!-- RELATION_SPEC mz_introspection.mz_compute_import_frontiers FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_compute_import_frontiers" >}}
-
 
 ## `mz_compute_operator_durations_histogram`
 
@@ -111,12 +108,10 @@ Summaries are flattened into separate quantile, sum, and count rows.
 <!-- RELATION_SPEC mz_introspection.mz_dataflows FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_dataflows" >}}
 
-
 ## `mz_dataflow_addresses`
 
 <!-- RELATION_SPEC mz_introspection.mz_dataflow_addresses FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_dataflow_addresses" >}}
-
 
 ## `mz_dataflow_arrangement_sizes`
 
@@ -128,36 +123,30 @@ Summaries are flattened into separate quantile, sum, and count rows.
 <!-- RELATION_SPEC mz_introspection.mz_dataflow_channels FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_dataflow_channels" >}}
 
-
 ## `mz_dataflow_channel_operators`
 
 <!-- RELATION_SPEC mz_introspection.mz_dataflow_channel_operators FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_dataflow_channel_operators" >}}
-
 
 ## `mz_dataflow_global_ids`
 
 <!-- RELATION_SPEC mz_introspection.mz_dataflow_global_ids FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_dataflow_global_ids" >}}
 
-
 ## `mz_dataflow_operators`
 
 <!-- RELATION_SPEC mz_introspection.mz_dataflow_operators FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_dataflow_operators" >}}
-
 
 ## `mz_dataflow_operator_dataflows`
 
 <!-- RELATION_SPEC mz_introspection.mz_dataflow_operator_dataflows FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_dataflow_operator_dataflows" >}}
 
-
 ## `mz_dataflow_operator_parents`
 
 <!-- RELATION_SPEC mz_introspection.mz_dataflow_operator_parents FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_dataflow_operator_parents" >}}
-
 
 ## `mz_expected_group_size_advice`
 
@@ -175,7 +164,6 @@ See [Which part of my query runs slowly or uses a lot of memory?](/transform-dat
 
 <!-- RELATION_SPEC mz_introspection.mz_lir_mapping FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_lir_mapping" >}}
-
 
 ## `mz_message_counts`
 
@@ -199,12 +187,10 @@ See [Which part of my query runs slowly or uses a lot of memory?](/transform-dat
 <!-- RELATION_SPEC mz_introspection.mz_records_per_dataflow FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_records_per_dataflow" >}}
 
-
 ## `mz_records_per_dataflow_operator`
 
 <!-- RELATION_SPEC mz_introspection.mz_records_per_dataflow_operator FROM_YAML -->
 {{< catalog-relation schema="mz_introspection" name="mz_records_per_dataflow_operator" >}}
-
 
 ## `mz_scheduling_elapsed`
 
