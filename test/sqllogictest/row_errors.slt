@@ -84,6 +84,19 @@ SELECT p.k FROM positive p JOIN other o ON p.k = o.k
 1
 3
 
+# An index built by reading another index keeps the taint.
+statement ok
+CREATE VIEW positive_copy AS SELECT k, x FROM positive
+
+statement ok
+CREATE INDEX positive_copy_idx ON positive_copy (k, x)
+
+query error division by zero
+SELECT k, x FROM positive_copy
+
+statement ok
+DROP VIEW positive_copy
+
 # Reduce elevates a tainted input row.
 query error division by zero
 SELECT count(*) FROM positive

@@ -28,7 +28,9 @@ use mz_dyncfg::ConfigSet;
 use mz_expr::{ErrorScope, Eval, EvalError, Id, MfpPlan};
 use mz_ore::soft_assert_or_log;
 use mz_repr::fixed_length::ExtendDatums;
-use mz_repr::{DatumVec, DatumVecBorrow, Diff, GlobalId, Row, RowArena, SharedRow, StableRow};
+use mz_repr::{
+    DatumError, DatumVec, DatumVecBorrow, Diff, GlobalId, Row, RowArena, SharedRow, StableRow,
+};
 use mz_storage_types::controller::CollectionMetadata;
 use mz_timely_util::columnar::Column;
 use mz_timely_util::columnar::batcher;
@@ -381,7 +383,13 @@ impl<'scope, T: RenderTimestamp> ArrangementFlavor<'scope, T> {
         // No push bound here: it lives at `logic`'s `give` call site, so a caller can push
         // borrowed records into a columnar builder that has no owned-tuple `Push`.
         DCB: ContainerBuilder,
-        L: for<'a, 'b> FnMut(&'a mut DatumVecBorrow<'b>, T, Diff, &mut Session<T, DCB>) -> usize
+        L: for<'a, 'b> FnMut(
+                &'a mut DatumVecBorrow<'b>,
+                Option<DatumError<'b>>,
+                T,
+                Diff,
+                &mut Session<T, DCB>,
+            ) -> usize
             + 'static,
     {
         match &self {
@@ -674,8 +682,13 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
                         // `give` copies the bytes into the column, so one buffer
                         // serves every record.
                         let mut row_buf = Row::default();
-                        move |borrow, t, r, ok_session| {
-                            row_buf.packer().extend(borrow.iter());
+                        move |borrow, row_error, t, r, ok_session| {
+                            // Repacking the datums loses the row-level error, so carry it over.
+                            let mut packer = row_buf.packer();
+                            if let Some(error) = row_error {
+                                packer.push_row_error(error);
+                            }
+                            packer.extend(borrow.iter());
                             ok_session.give((&row_buf, &t, &r));
                             1
                         }
@@ -890,6 +903,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
         DCB: ContainerBuilder,
         L: for<'a, 'b> FnMut(
                 &'a mut DatumVecBorrow<'b>,
+                Option<DatumError<'b>>,
                 T,
                 mz_repr::Diff,
                 &mut Session<T, DCB>,
@@ -943,7 +957,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
                         k.extend_datums(&temp_storage, &mut datums_borrow, Some(max_demand));
                         let remaining = max_demand.saturating_sub(datums_borrow.len());
                         v.extend_datums(&temp_storage, &mut datums_borrow, Some(remaining));
-                        logic(&mut datums_borrow, t, d, ok_session)
+                        logic(&mut datums_borrow, v.row_error(), t, d, ok_session)
                     };
 
                 let mut fuel = refuel;
