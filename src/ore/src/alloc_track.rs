@@ -88,7 +88,8 @@ pub enum FreeKind {
 /// The default mean sampling interval in bytes.
 pub const DEFAULT_SAMPLE_INTERVAL: u64 = 1 << 19;
 
-static ACTIVE: AtomicBool = AtomicBool::new(true);
+// Experiment: sampling starts inactive.
+static ACTIVE: AtomicBool = AtomicBool::new(false);
 static TRACK_FREES: AtomicBool = AtomicBool::new(false);
 static SAMPLE_INTERVAL: AtomicU64 = AtomicU64::new(DEFAULT_SAMPLE_INTERVAL);
 
