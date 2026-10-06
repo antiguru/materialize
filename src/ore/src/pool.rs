@@ -76,6 +76,87 @@ pub use crate::pool::file::READ_LATENCY_BUCKETS;
 use crate::pool::file::{FileStore, IoMode, WriteError};
 use crate::pool::region::{Region, SIZE_CLASSES};
 
+/// DIAG (throwaway): attributes compressed-tier growth to the path that
+/// created each extent, and logs per-interval totals and maxima.
+mod diag {
+    use std::cell::Cell;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    pub const OTHER: u8 = 0;
+    pub const SPILL: u8 = 1;
+    pub const DIRECT: u8 = 2;
+    pub const BUDGET: u8 = 3;
+    #[allow(dead_code)]
+    pub const COMPRESSED: u8 = 4;
+    const NAMES: [&str; 5] = ["other", "spill", "direct", "budget_pass", "compressed_pass"];
+
+    thread_local! {
+        static PATH: Cell<u8> = const { Cell::new(OTHER) };
+    }
+    static BYTES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+    static COUNT: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+    static MAX_TIER: AtomicU64 = AtomicU64::new(0);
+    static MAX_PASS_GROWTH: AtomicU64 = AtomicU64::new(0);
+    static MAX_PASS_LOOPS: AtomicU64 = AtomicU64::new(0);
+    static MAX_PASS_MS: AtomicU64 = AtomicU64::new(0);
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+
+    /// Runs `f` with this thread's path set to `path`, restoring the
+    /// previous path afterwards.
+    pub fn with_path<R>(path: u8, f: impl FnOnce() -> R) -> R {
+        let prev = PATH.with(|p| p.replace(path));
+        let r = f();
+        PATH.with(|p| p.set(prev));
+        r
+    }
+
+    pub fn set_path(path: u8) {
+        PATH.with(|p| p.set(path));
+    }
+
+    pub fn created(bytes: u64, tier_after: u64) {
+        let i = usize::from(PATH.with(|p| p.get()));
+        BYTES[i].fetch_add(bytes, Ordering::Relaxed);
+        COUNT[i].fetch_add(1, Ordering::Relaxed);
+        MAX_TIER.fetch_max(tier_after, Ordering::Relaxed);
+        maybe_log();
+    }
+
+    pub fn pass(growth: u64, loops: u64, ms: u64) {
+        MAX_PASS_GROWTH.fetch_max(growth, Ordering::Relaxed);
+        MAX_PASS_LOOPS.fetch_max(loops, Ordering::Relaxed);
+        MAX_PASS_MS.fetch_max(ms, Ordering::Relaxed);
+    }
+
+    fn maybe_log() {
+        let Ok(mut last) = LAST.try_lock() else {
+            return;
+        };
+        let now = Instant::now();
+        if last.is_some_and(|l| now.duration_since(l).as_millis() < 1000) {
+            return;
+        }
+        *last = Some(now);
+        let mut parts = String::new();
+        for (i, name) in NAMES.iter().enumerate() {
+            parts.push_str(&format!(
+                " {name}={}MiB/{}",
+                BYTES[i].swap(0, Ordering::Relaxed) >> 20,
+                COUNT[i].swap(0, Ordering::Relaxed)
+            ));
+        }
+        tracing::info!(
+            "pooldiag created{parts} max_tier={}MiB max_budget_pass_growth={}MiB max_budget_pass_loops={} max_budget_pass_ms={}",
+            MAX_TIER.swap(0, Ordering::Relaxed) >> 20,
+            MAX_PASS_GROWTH.swap(0, Ordering::Relaxed) >> 20,
+            MAX_PASS_LOOPS.swap(0, Ordering::Relaxed),
+            MAX_PASS_MS.swap(0, Ordering::Relaxed),
+        );
+    }
+}
+
 /// Virtual reservation per size class. Purely virtual: physical memory
 /// materializes only for slots in use, and slots are scoped to residency,
 /// so this must exceed the largest plausible *resident* set per class, the
@@ -1015,10 +1096,10 @@ impl Pool {
             .counters
             .direct_extent_inserts
             .fetch_add(1, Ordering::Relaxed);
-        {
+        diag::with_path(diag::DIRECT, || {
             let mut state = meta.state();
             inner.commit_extent(&meta, &mut state, extent);
-        }
+        });
         inner.enforce_or_defer_compressed_cap();
         ChunkHandle { meta }
     }
@@ -1355,6 +1436,10 @@ impl PoolInner {
         // A heap-fallback extent is born permanently capped and counts as
         // unreclaimable from the start.
         self.note_extent_resident(meta, extent.alloc_size(), !extent.pageout_capped());
+        diag::created(
+            u64::cast_from(extent.alloc_size()),
+            self.counters.extent_resident_bytes.load(Ordering::Relaxed),
+        );
         state.extent = Some(extent);
     }
 
@@ -1411,8 +1496,12 @@ impl PoolInner {
             }
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         };
+        let diag_start = std::time::Instant::now();
+        let diag_tier = self.counters.extent_resident_bytes.load(Ordering::Relaxed);
+        let mut diag_loops = 0u64;
         loop {
-            self.enforce_budget_inner();
+            diag_loops += 1;
+            diag::with_path(diag::BUDGET, || self.enforce_budget_inner());
             #[cfg(test)]
             run_enforce_budget_hook();
             // A caller turned away since this pass's counter reads may have
@@ -1429,6 +1518,14 @@ impl PoolInner {
             }
         }
         drop(guard);
+        diag::pass(
+            self.counters
+                .extent_resident_bytes
+                .load(Ordering::Relaxed)
+                .saturating_sub(diag_tier),
+            diag_loops,
+            u64::try_from(diag_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
         // Inline evictions above may have grown the compressed tier.
         self.enforce_or_defer_compressed_cap();
     }
@@ -1574,6 +1671,7 @@ impl PoolInner {
     /// `BackedResident` instead of parking, and park with a timeout once
     /// everything reachable is backed.
     fn spill_worker(self: Arc<Self>) {
+        diag::set_path(diag::SPILL);
         let mut hinted_retry = std::time::Instant::now();
         loop {
             #[cfg(test)]
