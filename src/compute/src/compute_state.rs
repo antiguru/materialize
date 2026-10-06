@@ -597,6 +597,10 @@ impl ComputeState {
             let compress_min_depth =
                 u8::try_from(COLUMN_CHUNK_COMPRESS_MIN_DEPTH.get(config)).unwrap_or(u8::MAX);
             mz_timely_util::columnar::chunk::set_compress_min_depth(compress_min_depth);
+            mz_timely_util::columnar::chunk::set_chunk_codec(
+                u8::try_from(mz_compute_types::dyncfgs::COLUMN_CHUNK_CODEC_EXPERIMENT.get(config))
+                    .unwrap_or(0),
+            );
         }
 
         // Remember the maintenance interval locally to avoid reading it from the config set on

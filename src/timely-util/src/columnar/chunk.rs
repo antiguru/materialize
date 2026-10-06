@@ -44,7 +44,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use columnar::bytes::indexed;
 use columnar::{Borrow, BorrowedOf, Columnar, Container as _, Index, Len, Push as _};
@@ -186,7 +186,39 @@ fn codec_for_depth(depth: u8) -> (&'static dyn ExtentCodec, bool) {
     if depth < compress_min_depth() {
         (&IDENTITY_CODEC, false)
     } else {
-        (&LZ4_CODEC, true)
+        match CHUNK_CODEC.load(Ordering::Relaxed) {
+            1 => (&ZSTD1_CODEC, true),
+            2 => (&ZSTD_FAST3_CODEC, true),
+            _ => (&LZ4_CODEC, true),
+        }
+    }
+}
+
+/// EXPERIMENT: the compressing codec, 0 lz4, 1 zstd level 1, 2 zstd level -3.
+static CHUNK_CODEC: AtomicU8 = AtomicU8::new(0);
+
+/// EXPERIMENT: select the compressing codec. See [`CHUNK_CODEC`].
+pub fn set_chunk_codec(codec: u8) {
+    CHUNK_CODEC.store(codec, Ordering::Relaxed);
+}
+
+/// EXPERIMENT: body bytes in and stored bytes out of compressing encodes.
+static CODEC_IN: AtomicU64 = AtomicU64::new(0);
+static CODEC_OUT: AtomicU64 = AtomicU64::new(0);
+
+/// EXPERIMENT: count one encode and log totals every 4 GiB of input.
+fn record_encode(body: usize, stored: usize) {
+    const EVERY: u64 = 4 << 30;
+    let body = u64::cast_from(body);
+    let before = CODEC_IN.fetch_add(body, Ordering::Relaxed);
+    let out = CODEC_OUT.fetch_add(u64::cast_from(stored), Ordering::Relaxed);
+    if before / EVERY != (before + body) / EVERY {
+        tracing::info!(
+            codec = CHUNK_CODEC.load(Ordering::Relaxed),
+            body_bytes = before + body,
+            stored_bytes = out + u64::cast_from(stored),
+            "chunk codec experiment stats"
+        );
     }
 }
 
@@ -660,6 +692,7 @@ impl ExtentCodec for Lz4Codec {
         let compressed = lz4_flex::block::compress_into(body, &mut out[4..])
             .expect("output sized to the maximum");
         out.truncate(4 + compressed);
+        record_encode(body.len(), out.len());
     }
 
     fn decode(&self, stored: &[u8], body: &mut [u8]) {
@@ -672,6 +705,50 @@ impl ExtentCodec for Lz4Codec {
         );
         let written = lz4_flex::block::decompress_into(&stored[4..], body)
             .expect("stored bytes hold a valid lz4 block");
+        assert_eq!(written, body.len(), "decoded length mismatch");
+    }
+}
+
+/// EXPERIMENT: zstd at a fixed level, framed like [`Lz4Codec`].
+#[derive(Debug)]
+pub struct ZstdCodec(i32);
+
+/// EXPERIMENT: zstd level 1.
+pub static ZSTD1_CODEC: ZstdCodec = ZstdCodec(1);
+/// EXPERIMENT: zstd level -3.
+pub static ZSTD_FAST3_CODEC: ZstdCodec = ZstdCodec(-3);
+
+thread_local! {
+    static ZSTD_CCTX: RefCell<zstd::zstd_safe::CCtx<'static>> =
+        RefCell::new(zstd::zstd_safe::CCtx::create());
+    static ZSTD_DCTX: RefCell<zstd::zstd_safe::DCtx<'static>> =
+        RefCell::new(zstd::zstd_safe::DCtx::create());
+}
+
+impl ExtentCodec for ZstdCodec {
+    fn encode(&self, body: &[u8], out: &mut Vec<u8>) {
+        let max_out = zstd::zstd_safe::compress_bound(body.len());
+        out.resize(4 + max_out, 0);
+        let len = u32::try_from(body.len()).expect("chunk bodies are bounded by the size classes");
+        out[..4].copy_from_slice(&len.to_le_bytes());
+        let compressed = ZSTD_CCTX
+            .with(|cctx| cctx.borrow_mut().compress(&mut out[4..], body, self.0))
+            .expect("output sized to the bound");
+        out.truncate(4 + compressed);
+        record_encode(body.len(), out.len());
+    }
+
+    fn decode(&self, stored: &[u8], body: &mut [u8]) {
+        let prefix: [u8; 4] = stored[..4].try_into().expect("prefix length");
+        let len = usize::try_from(u32::from_le_bytes(prefix)).expect("length fits usize");
+        assert_eq!(
+            len,
+            body.len(),
+            "destination must match the encoded body length"
+        );
+        let written = ZSTD_DCTX
+            .with(|dctx| dctx.borrow_mut().decompress(body, &stored[4..]))
+            .expect("stored bytes hold a valid zstd frame");
         assert_eq!(written, body.len(), "decoded length mismatch");
     }
 }
@@ -1598,6 +1675,21 @@ mod tests {
 
     type Tuple = ((u64, u64), u64, i64);
     type TestChunk = ColumnChunk<(u64, u64), u64, i64>;
+
+    #[mz_ore::test]
+    fn zstd_codecs_round_trip() {
+        let body: Vec<u8> = (0..100_000u32)
+            .flat_map(|i| (i % 977).to_le_bytes())
+            .collect();
+        for codec in [&ZSTD1_CODEC, &ZSTD_FAST3_CODEC] {
+            let mut stored = Vec::new();
+            codec.encode(&body, &mut stored);
+            assert!(stored.len() < body.len());
+            let mut round = vec![0u8; body.len()];
+            codec.decode(&stored, &mut round);
+            assert_eq!(round, body);
+        }
+    }
 
     /// The delegated codec's stored form is byte-identical to the extent
     /// store's previous hard-coded framing: a little-endian `u32`

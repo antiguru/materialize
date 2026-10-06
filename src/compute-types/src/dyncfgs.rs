@@ -166,6 +166,14 @@ pub const COLUMN_CHUNK_COMPRESS_MIN_DEPTH: Config<u32> = Config::new(
     ParameterScope::Replica,
 );
 
+/// EXPERIMENT: the chunk compression codec, 0 lz4, 1 zstd level 1, 2 zstd level -3.
+pub const COLUMN_CHUNK_CODEC_EXPERIMENT: Config<u32> = Config::new(
+    "column_chunk_codec_experiment",
+    0,
+    "EXPERIMENT: chunk compression codec, 0 lz4, 1 zstd level 1, 2 zstd level -3.",
+    ParameterScope::Replica,
+);
+
 /// Resident-bytes budget fraction for chunk spilling. Two consumers read
 /// it: the column pager's tiered policy multiplies it against the
 /// announced memory limit, and the buffer pool (`mz_ore::pool`)
@@ -898,4 +906,5 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&COLUMN_PAGED_BATCHER_EAGER_BACKING)
         .add(&COLUMN_PAGED_BATCHER_POOL_RSS_TARGET_FRACTION)
         .add(&COLUMN_CHUNK_COMPRESS_MIN_DEPTH)
+        .add(&COLUMN_CHUNK_CODEC_EXPERIMENT)
 }
