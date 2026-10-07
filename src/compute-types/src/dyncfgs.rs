@@ -359,6 +359,16 @@ pub const TEMPORAL_BUCKETING_SUMMARY: Config<Duration> = Config::new(
     ParameterScope::Environment,
 );
 
+/// Whether temporal bucketing stops splitting buckets at the largest power of two no larger than
+/// [`TEMPORAL_BUCKETING_SUMMARY`]. Read at operator construction time.
+pub const ENABLE_COMPUTE_TEMPORAL_BUCKETING_MIN_WIDTH: Config<bool> = Config::new(
+    "enable_compute_temporal_bucketing_min_width",
+    false,
+    "Whether temporal bucketing stops splitting buckets at the largest power of two no larger \
+     than compute_temporal_bucketing_summary.",
+    ParameterScope::Environment,
+);
+
 /// The yielding behavior with which linear joins should be rendered.
 pub const LINEAR_JOIN_YIELDING: Config<&str> = Config::new(
     "linear_join_yielding",
@@ -851,6 +861,7 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&ENABLE_CORRECTION_V2_SPILL)
         .add(&ENABLE_COMPUTE_TEMPORAL_BUCKETING)
         .add(&TEMPORAL_BUCKETING_SUMMARY)
+        .add(&ENABLE_COMPUTE_TEMPORAL_BUCKETING_MIN_WIDTH)
         .add(&LINEAR_JOIN_YIELDING)
         .add(&ENABLE_LGALLOC)
         .add(&LGALLOC_BACKGROUND_INTERVAL)
