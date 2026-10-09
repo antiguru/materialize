@@ -561,6 +561,7 @@ impl ComputeState {
                         ExtentBackend::File {
                             dir: scratch.join("pool"),
                             capacity_bytes: None,
+                            lazy: COLUMN_PAGED_BATCHER_FILE_EXTENTS_LAZY.get(config),
                         }
                     }
                     _ => ExtentBackend::Swap,

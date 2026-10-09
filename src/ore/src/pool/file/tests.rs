@@ -445,6 +445,19 @@ fn probe_einval_falls_back_to_buffered() {
 #[mz_ore::test]
 #[cfg_attr(miri, ignore)]
 #[cfg(target_os = "linux")]
+fn lazy_mode_round_trips() {
+    let dir = disk_tempdir();
+    let s = FileStore::open_with(dir.path(), Some(64 << 20), &classes(), true).expect("open");
+    assert_eq!(s.io_mode(), IoMode::Lazy);
+    let data = pattern(300_000, 17);
+    let slot = s.alloc(s.class_for(data.len()).unwrap()).unwrap();
+    write_bytes(&s, slot, &data).unwrap();
+    assert_reads_back(&s, slot, &data);
+}
+
+#[mz_ore::test]
+#[cfg_attr(miri, ignore)]
+#[cfg(target_os = "linux")]
 fn probe_error_fails_open() {
     let dir = disk_tempdir();
     fault::fail_next(fault::Op::Read, libc::EIO);

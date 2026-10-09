@@ -241,6 +241,8 @@ pub enum ExtentBackend {
         /// Capacity of the files in bytes. `None` derives it from the
         /// volume's free space.
         capacity_bytes: Option<u64>,
+        /// Leave writeback and caching to the kernel instead of `O_DIRECT`.
+        lazy: bool,
     },
 }
 
@@ -253,6 +255,8 @@ pub enum BackendKind {
     FileDirect,
     /// Files with page-cache I/O, written back and dropped after each write.
     FileBuffered,
+    /// Files with page-cache I/O whose writeback is left to the kernel.
+    FileLazy,
 }
 
 /// The extent store behind a [`PoolInner`].
@@ -881,6 +885,7 @@ impl Pool {
             ExtentStore::File(store) => match store.io_mode() {
                 IoMode::Direct => BackendKind::FileDirect,
                 IoMode::Buffered => BackendKind::FileBuffered,
+                IoMode::Lazy => BackendKind::FileLazy,
             },
         }
     }
@@ -906,10 +911,12 @@ impl Pool {
             ExtentBackend::File {
                 dir,
                 capacity_bytes,
-            } => ExtentStore::File(Arc::new(FileStore::open(
+                lazy,
+            } => ExtentStore::File(Arc::new(FileStore::open_with(
                 &dir,
                 capacity_bytes,
                 extent_arena.classes(),
+                lazy,
             )?)),
         };
         let regions = SIZE_CLASSES

@@ -82,6 +82,11 @@ pub(crate) enum IoMode {
     Direct,
     /// Page-cache I/O, written back and dropped after each write.
     Buffered,
+    /// Page-cache I/O left to the kernel: writes return once the bytes are in
+    /// the page cache, and reads keep what they fault in. Dirty pages are
+    /// charged to the process's cgroup, which throttles the writer at its
+    /// dirty limit and can reclaim clean pages at its memory limit.
+    Lazy,
 }
 
 /// A slot in the store: `index` in the file of extent class `class`.
@@ -192,17 +197,30 @@ pub(crate) struct FileStore {
 }
 
 impl FileStore {
-    /// Opens one anonymous file per entry of `classes` in `dir`. `classes`
-    /// is the ladder of slot sizes, ascending page multiples. `capacity_bytes`
-    /// `None` derives capacity from the volume: the bytes available to
-    /// unprivileged writers, minus the larger of 1 GiB and 2% of them.
-    ///
-    /// Fails with [`io::ErrorKind::Unsupported`] when `dir` is on a
-    /// memory-backed filesystem or the platform is not Linux.
+    /// As [`FileStore::open_with`] with direct I/O.
+    #[cfg(test)]
     pub(crate) fn open(
         dir: &Path,
         capacity_bytes: Option<u64>,
         classes: &[usize],
+    ) -> io::Result<FileStore> {
+        Self::open_with(dir, capacity_bytes, classes, false)
+    }
+
+    /// Opens one anonymous file per entry of `classes` in `dir`. `classes`
+    /// is the ladder of slot sizes, ascending page multiples. `capacity_bytes`
+    /// `None` derives capacity from the volume: the bytes available to
+    /// unprivileged writers, minus the larger of 1 GiB and 2% of them.
+    /// `lazy` selects [`IoMode::Lazy`]; otherwise the store tries
+    /// [`IoMode::Direct`] and falls back to [`IoMode::Buffered`].
+    ///
+    /// Fails with [`io::ErrorKind::Unsupported`] when `dir` is on a
+    /// memory-backed filesystem or the platform is not Linux.
+    pub(crate) fn open_with(
+        dir: &Path,
+        capacity_bytes: Option<u64>,
+        classes: &[usize],
+        lazy: bool,
     ) -> io::Result<FileStore> {
         if sys::is_memory_backed(dir)? {
             return Err(io::Error::new(
@@ -226,7 +244,9 @@ impl FileStore {
                 && classes.is_sorted(),
             "classes must be ascending page multiples: {classes:?}",
         );
-        let (files, io_mode) = match open_files(dir, classes.len(), page, IoMode::Direct) {
+        let first = if lazy { IoMode::Lazy } else { IoMode::Direct };
+        let (files, io_mode) = match open_files(dir, classes.len(), page, first) {
+            Ok(files) if lazy => (files, IoMode::Lazy),
             Ok(files) => (files, IoMode::Direct),
             Err(err) if err.raw_os_error() == Some(libc::EINVAL) => {
                 tracing::warn!(
@@ -370,7 +390,7 @@ impl FileStore {
         let offset = self.offset(slot);
         let result =
             write_all(&c.file, &buf[..n], offset, self.io_mode).and_then(|()| match self.io_mode {
-                IoMode::Direct => Ok(()),
+                IoMode::Direct | IoMode::Lazy => Ok(()),
                 IoMode::Buffered => sys::writeback_and_drop(&c.file, offset, n),
             });
         match result {
@@ -736,7 +756,7 @@ fn write_all(file: &File, buf: &[u8], offset: u64, io_mode: IoMode) -> io::Resul
                 }
             }
         }
-        IoMode::Buffered => {
+        IoMode::Buffered | IoMode::Lazy => {
             let mut done = 0;
             while done < buf.len() {
                 match sys::pwrite(file, &buf[done..], offset + u64::cast_from(done)) {

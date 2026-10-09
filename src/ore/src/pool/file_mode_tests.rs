@@ -32,6 +32,7 @@ fn file_pool(budget: usize, capacity: u64) -> (tempfile::TempDir, Pool) {
         ExtentBackend::File {
             dir: dir.path().to_owned(),
             capacity_bytes: Some(capacity),
+            lazy: false,
         },
         64 << 20,
     )

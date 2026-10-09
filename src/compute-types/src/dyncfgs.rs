@@ -144,6 +144,17 @@ pub const ENABLE_COLUMN_PAGED_BATCHER_FILE_EXTENTS: Config<bool> = Config::new(
     ParameterScope::Replica,
 );
 
+/// Whether the buffer pool's file store leaves writeback and caching to the
+/// kernel instead of using direct I/O. Takes effect only at pool
+/// installation, like [`ENABLE_COLUMN_PAGED_BATCHER_FILE_EXTENTS`].
+pub const COLUMN_PAGED_BATCHER_FILE_EXTENTS_LAZY: Config<bool> = Config::new(
+    "column_paged_batcher_file_extents_lazy",
+    false,
+    "Write the buffer pool's file extents through the page cache and leave \
+     writeback to the kernel, instead of direct I/O. Read once at pool installation.",
+    ParameterScope::Replica,
+);
+
 /// The youngest chunk generation whose spilled bodies are compressed.
 ///
 /// A chunk at generational depth `d` is rewritten with frequency
@@ -899,6 +910,7 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&ENABLE_COLUMNAR_ACCUMULABLE_DIFF)
         .add(&ENABLE_COLUMN_PAGED_BATCHER_SPILL)
         .add(&ENABLE_COLUMN_PAGED_BATCHER_FILE_EXTENTS)
+        .add(&COLUMN_PAGED_BATCHER_FILE_EXTENTS_LAZY)
         .add(&COLUMN_PAGED_BATCHER_BUDGET_FRACTION)
         .add(&COLUMN_PAGED_BATCHER_LZ4)
         .add(&COLUMN_PAGED_BATCHER_SWAP_PAGEOUT)

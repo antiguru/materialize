@@ -460,6 +460,7 @@ fn main() {
             ExtentBackend::File {
                 dir,
                 capacity_bytes: args.file_capacity_mib.map(|m| m * 1024 * 1024),
+                lazy: false,
             }
         }
         other => panic!("unknown backend {other:?}, use 'swap' or 'file'"),

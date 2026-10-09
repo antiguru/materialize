@@ -196,6 +196,7 @@ mod tests {
             ExtentBackend::File {
                 dir: pool_dir.clone(),
                 capacity_bytes: None,
+                lazy: false,
             },
         );
         assert!(ok);
@@ -221,6 +222,7 @@ mod tests {
             ExtentBackend::File {
                 dir: file.path().join("pool"),
                 capacity_bytes: None,
+                lazy: false,
             },
         );
         assert!(ok, "the fallback installs a pool");

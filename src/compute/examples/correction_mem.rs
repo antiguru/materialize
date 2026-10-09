@@ -157,6 +157,7 @@ fn main() {
                 mz_timely_util::pool_config::ExtentBackend::File {
                     dir: std::path::PathBuf::from(&pool_scratch_dir),
                     capacity_bytes: None,
+                    lazy: false,
                 }
             },
         );

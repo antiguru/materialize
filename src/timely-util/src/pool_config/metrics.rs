@@ -141,6 +141,7 @@ fn backend_gauges(registry: &MetricsRegistry) {
         ("swap", BackendKind::Swap),
         ("file_direct", BackendKind::FileDirect),
         ("file_buffered", BackendKind::FileBuffered),
+        ("file_lazy", BackendKind::FileLazy),
     ];
     for (label, kind) in kinds {
         let _gauge: ComputedUIntGauge = registry.register_computed_gauge(
